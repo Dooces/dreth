@@ -1,0 +1,1042 @@
+# DRETH TODO
+
+This file is the operational source of truth. Items are ordered by dependency.
+Do not implement a later item before its prerequisites are done.
+Do not claim an item is done unless its acceptance tests pass.
+
+---
+
+## What the code currently does vs what the taxonomy requires
+
+The taxonomy (DRETH_TAXONOMY.md) defines claims scoped to named operations with
+explicit authority and stored scope records. The code has:
+
+- one unscoped string per variable: `operation_role = "tareth" | "trass"`
+- no named operation on the claim
+- no authority field
+- no scope record
+- `_certify_form_role` running every cycle regardless of triggers
+- no `predict_under_joint_intervention`
+- no joint false-trass test
+
+The gap is not cosmetic. The taxonomy's core rule — `trass-for-skip` does not
+imply `trass-for-route` — is not expressible in the current code. The same
+`operation_role` value gates skip, parent selection, routing, form shortcuts,
+and compression simultaneously. That is wrong.
+
+---
+
+## Known drift risks — read before implementing anything
+
+These are the exact places implementation will silently revert to pattern-matching
+if not actively prevented. Each has a constraint added to the relevant step below.
+
+**DRIFT 1 — Cosmetic migration in T1 (most likely failure):**
+`role_for("skip")` falls back to `operation_role` when no cert exists. It is
+possible to migrate all gate syntax — replace `n.operation_role == "trass"` with
+`n.role_for("skip") == "trass"` — and call T1 done while nothing actually changed.
+The taxonomy's core rule (`trass-for-skip ≠ trass-for-route`) remains inexpressible
+for vars because only forms get route certs in T1. Vars never get separate skip vs
+route verdicts. The structure looks right. The semantics are not there.
+CONSTRAINT: T1 is not done until a test asserts a var has `role_for("skip") ==
+"tareth"` and `role_for("route") == "untested"` simultaneously. Two different values.
+If no test asserts this, T1 is not done.
+
+**DRIFT 2 — T2.1 "design documentation only" is morphology:**
+A comment that nothing reads is the same as no implementation. T2.1 as a standalone
+step will be marked complete after adding a comment block. That comment changes
+nothing.
+CONSTRAINT: T2.1 is deleted as a standalone step. The documentation lives as
+inline comments inside the `invalidate()` method in T2.2. If the method does not
+exist, the documentation does not exist.
+
+**DRIFT 3 — `keep_skip_cert=True` in T2.2 will never be called:**
+The invalidate method as specified includes a `keep_skip_cert=True` path for when
+the caller has verified downstream structure is unchanged. There is no infrastructure
+to verify that. The conservative path always runs. The untangling is fake — the skip
+cert gets flagged on every parent change just like `operation_role` did before.
+CONSTRAINT: Remove `keep_skip_cert` from T2.2 entirely. The correct behavior is:
+parent change flags skip cert as untested (requiring retest), not clears it. That is
+sufficient and honest. Do not add a parameter that will never be called with True.
+
+**DRIFT 4 — T3.1 fourth trigger site will be skipped:**
+Four trigger sites are named for `needs_role_retest = True`. The fourth — "when any
+instance's parent set changes" — is hard to wire because parent changes are per-var,
+not per-form-instance. The first three (bind, unbind, quarantine recovery) will be
+wired and the fourth will be silently dropped.
+CONSTRAINT: T3.1 requires a test that changes an instance's parents mid-run and
+asserts `_certify_form_role` fires on the next cycle. Without that test, the fourth
+trigger is not done and T3.1 is not done.
+
+**DRIFT 5 — T4's `_is_ancestor` uses agent hypothesis, not truth:**
+`_is_ancestor(a, b)` walks the ledger's known parent structure — what the agent
+believes, not the true causal structure. If the agent has a wrong hypothesis, the
+joint test trigger silently fails to fire in exactly the cases where it matters most.
+CONSTRAINT: Document this as an explicit known limitation inside `_test_joint_false_trass`.
+The T4.2 acceptance test must use a world where the agent has the correct hypothesis,
+so the trigger fires. Do not write a test that passes only because the trigger is
+bypassed.
+
+**DRIFT 7 — Var route certs are never created; core rule is half-implemented after T5:**
+After all T0–T5 steps are complete, `trass-for-skip ≠ trass-for-route` is real
+for forms, fake for vars. Vars use skip cert as proxy for route eligibility
+throughout T1.4. No T step creates var route certs. The T1.3 drift guard tests
+object isolation — it cannot catch this because it only constructs a synthetic
+VarNethra, not a real agent run.
+CONSTRAINT: Do not claim the taxonomy's core rule is fully implemented after T5.
+Claim: "implemented for forms; vars use skip-as-route proxy until D5." This must
+be stated in the T5 acceptance text, not buried in T1.4.
+
+**DRIFT 8 — T2.3 event classification is a judgment call that will be wrong:**
+There are ~15 direct `operation_role` assignments in agent.py. T2.3 says "determine
+which event caused it" — left to implementation-time judgment. Misclassifying one
+(e.g. structural_mutation where parent_change is correct) silently changes the cert
+cascade. No test catches wrong event type unless tests explicitly assert cert state
+after each event.
+CONSTRAINT: T2.3 requires classifying every site before touching any code. See
+the site classification table in T2.3. Tests must check cert key state, not just
+the final operation_role string.
+
+**DRIFT 9 — T4.3 "after quarantine events" has no single location in code:**
+Quarantine events are set in multiple paths across agent.py. Wiring
+`_find_joint_trass_candidates` to only one path silently misses others.
+CONSTRAINT: Track quarantines-this-cycle in `self._quarantined_this_cycle`.
+Clear it at the start of `run_cycle`. Every path that sets `n.status =
+"quarantined"` adds to it. Call `_find_joint_trass_candidates` once at the END
+of `run_cycle`. This is the only location. See T4.3 for exact wiring.
+
+**DRIFT 10 — VarNethra.invalidate() name collision with ChainedLedger.invalidate():**
+ChainedLedger.invalidate(vars, cycle, reason) already exists at ledger.py:525.
+T2.2 adds VarNethra.invalidate(event) — same name, different object. During T2.3
+the grep output will show ledger.invalidate(...) calls at lines 1248 and 1462.
+These must NOT be replaced with n.invalidate_certs(event) — they cascade status
+through descendants which is separate from cert invalidation.
+CONSTRAINT: T2.2's method must be named `invalidate_certs(event)` not
+`invalidate(event)`. Every reference in T2.2, T2.3, T3.2 must use that name.
+
+**DRIFT 11 — Line 873 false-trass contradiction has no event type in T2.2:**
+agent.py:873: `pn.operation_role = "untested"` is the false-trass contradiction
+path — a child var picked a trass parent, contradiction detected. This is NOT
+"parent_change", "sentinel_failure", or "drift". T2.2's invalidate_certs() has
+no event for this. T2.3 "classify each site" gives no guidance on this line.
+CONSTRAINT: T2.2 must add event type "false_trass_contradiction" with behavior:
+flag skip cert as untested (same as sentinel_failure). T2.3 must explicitly name
+line 873 as the one site that uses this event type.
+
+**DRIFT 12 — Sentinel failure path never resets operation_role — T3.2 must ADD, not replace:**
+ledger.py:525 ChainedLedger.invalidate() resets n.status (certified→uncertain)
+but NEVER touches n.operation_role. After sentinel failure at agent.py:1462,
+operation_role remains "tareth". There is no scattered assignment to replace.
+T3.2 must ADD `n.invalidate_certs("sentinel_failure")` after the existing
+ledger.invalidate() call — it is not replacing anything. The TODO currently
+implies T3.2 is replacing an existing assignment. That is wrong.
+
+**DRIFT 13 — T4.3 trigger "quarantined vars" — var status never becomes "quarantined":**
+Var n.status goes to "uncertain" after sentinel failure (see ledger.py:543).
+n.status = "quarantined" does not exist for VarNethra. Only form.health_status
+becomes "quarantined" (forms.py:902, 983). The trigger `_quarantined_this_cycle`
+tracking `n.status == "quarantined"` will always be empty — the condition never
+fires. The correct trigger is: vars that transitioned to n.status == "uncertain"
+due to sentinel failure this cycle. Rename to `_uncertain_this_cycle`. Populate
+it in both places where sentinel failure cascades: agent.py:1462 (main loop)
+and agent.py:1248 (dormant safety sweep). These are the only two sites.
+
+**DRIFT 6 — T5 will be deferred indefinitely (fatal):**
+Removing the legacy `operation_role` field is the proof that T0–T4 actually worked.
+It is also the hardest and most frightening step. It will be deferred. The certs will
+become a parallel structure nobody is forced to use. `operation_role` will remain the
+true decision field forever.
+CONSTRAINT: T5 is the acceptance test for T0–T4. If T5 cannot be completed, T0–T4
+are not done. The legacy field removal is not a cleanup step. It is the proof. Add
+this statement to T5 explicitly.
+
+---
+
+# T0 — NethraCertificate data structure
+
+## T0.1 Define the NethraCertificate dataclass
+
+**What is missing:**
+There is no object that carries operation + role + authority + context + scope +
+witnesses together. The taxonomy's minimal record shape does not exist in code.
+The DRETH_TAXONOMY.md defines exactly what it should look like.
+
+**Where it goes:**
+New dataclass in `dreth/ledger.py`, above `VarNethra`.
+
+**Exact fields required:**
+
+```python
+from typing import Literal, Optional, Tuple, FrozenSet, Mapping
+
+Operation = Literal["skip", "route", "compress", "audit", "reexamine"]
+Role = Literal["tareth", "trass", "untested", "false_trass"]
+Authority = Literal["none", "prefer", "guarded_reuse", "skip", "propagate"]
+
+@dataclass
+class NethraCertificate:
+    operation: Operation
+    role: Role
+    authority: Authority
+    # Context: the concrete conditions under which this was tested.
+    # Minimum fields: parent signature at time of test, visible var count,
+    # cycle window. Can be extended later. Use frozenset of tuples for
+    # hashability.
+    context_parents: Tuple[int, ...]   # parent tuple of this var at cert time
+    context_visible: int               # visible_count at cert time
+    context_cycle: int                 # cycle when certified
+    # Scope: the boundary of validity.
+    # targets: which vars were checked for propagation
+    # substitutions: what was substituted (operator names, parent indices)
+    targets: Tuple[int, ...]           # vars checked for downstream change
+    substitutions_tested: Tuple[str, ...]  # what was swapped
+    # Evidence
+    changes: int                       # how many substitutions propagated
+    trials: int                        # total substitutions tested
+    # Joint test (None if not yet run)
+    joint_members: Optional[Tuple[int, ...]] = None
+    joint_R0: Optional[float] = None
+    joint_RA: Optional[float] = None
+    joint_RB: Optional[float] = None
+    joint_RAB: Optional[float] = None
+```
+
+**What it is not:**
+Not a replacement for the existing `operation_role` string yet. That replacement
+happens in T0.2. This step only defines the structure.
+
+**Acceptance:**
+- `NethraCertificate` can be instantiated and compared.
+- No existing behavior changes.
+- `python3 -m pytest -q` passes.
+- DRIFT GUARD: T0.1 is only complete when T1.1 is started in the same sitting.
+  A dataclass that nothing populates is morphology. If T0.1 is marked done and
+  T1.1 is not started immediately, T0.1 is not done.
+
+---
+
+## T0.2 Add per-operation certificate storage to VarNethra
+
+**What is missing:**
+`VarNethra.operation_role` is a single string shared across all operations.
+The taxonomy requires per-operation certificates.
+
+**Where it goes:**
+`dreth/ledger.py`, inside `VarNethra`.
+
+**Exact change:**
+Add a dict mapping operation → NethraCertificate alongside the existing field:
+
+```python
+# Existing field stays for now (backward compat during migration):
+operation_role: str = "untested"
+
+# New per-operation certificates:
+certificates: Dict[Operation, NethraCertificate] = field(default_factory=dict)
+```
+
+Add a helper that reads the per-operation cert if present, falls back to the
+legacy `operation_role` string if not:
+
+```python
+def role_for(self, operation: Operation) -> Role:
+    if operation in self.certificates:
+        return self.certificates[operation].role
+    # Legacy fallback during migration
+    return self.operation_role  # type: ignore[return-value]
+
+def authority_for(self, operation: Operation) -> Authority:
+    if operation in self.certificates:
+        return self.certificates[operation].authority
+    return "none"
+```
+
+**What changes in behavior:**
+Nothing yet. The legacy `operation_role` path still controls all decisions.
+The `certificates` dict is populated by later steps.
+
+**Acceptance:**
+- `VarNethra` carries `certificates` field.
+- `role_for` and `authority_for` return correct values for both populated and
+  empty cert dicts.
+- Unit test: create a VarNethra with no certs → `role_for("skip")` returns the
+  legacy `operation_role` value. Create one with a cert for "skip" → returns
+  the cert role.
+- `python3 -m pytest -q` passes.
+
+---
+
+## T0.3 Add per-operation certificate storage to Form
+
+**What is missing:**
+`Form.operation_role` is a single string, same problem as VarNethra.
+
+**Where it goes:**
+`dreth/forms.py`, inside `Form`.
+
+**Exact change:**
+
+```python
+# Existing:
+operation_role: str = "untested"
+role_certified_at_cycle: int = 0
+
+# Add:
+form_certificates: Dict[str, "NethraCertificate"] = field(default_factory=dict)
+```
+
+Add the same `role_for` and `authority_for` helpers.
+
+**Acceptance:**
+- `Form` carries `form_certificates`.
+- Existing `operation_role` logic unchanged.
+- `python3 -m pytest -q` passes.
+
+---
+
+# T1 — Operation-scoped certification
+
+## T1.1 Make _certify_operation_role produce a NethraCertificate
+
+**What is missing:**
+`_certify_operation_role` in `agent.py` runs the substitution test and writes
+a string to `n.operation_role`. It does not record:
+- which operation it is certifying (it is implicitly "skip" always)
+- which targets it checked
+- which substitutions it tried
+- what the context was at test time
+- the evidence counts
+
+**Where it goes:**
+`dreth/agent.py`, inside `_certify_operation_role`.
+
+**Exact change:**
+After computing `role`, construct a `NethraCertificate` and store it in
+`n.certificates["skip"]`:
+
+```python
+cert = NethraCertificate(
+    operation="skip",
+    role=role,
+    authority="skip" if role == "tareth" else "none",
+    context_parents=tuple(n.parents) if n.parents else (),
+    context_visible=self.world.visible_count,
+    context_cycle=cycle,
+    targets=tuple(targets_checked),   # vars that were compared
+    substitutions_tested=("perturbation",),  # current method: value perturbation
+    changes=changes,
+    trials=n_trials,
+)
+n.certificates["skip"] = cert
+```
+
+`targets_checked` must be collected during the inner loop where propagation is
+checked — it is the set of tareth vars where `|Δavg| > tolerance` was tested.
+
+**What changes in behavior:**
+Nothing yet in decision paths. The legacy `n.operation_role` string is still
+written alongside the cert. Decision paths still read the legacy field.
+Migration of decision paths happens in T1.3.
+
+**Acceptance:**
+- After `_certify_operation_role` runs, `n.certificates["skip"]` is populated.
+- `cert.operation == "skip"`.
+- `cert.changes` and `cert.trials` match the logged counts in the event log.
+- `cert.context_parents` matches `n.parents` at test time.
+- `python3 -m pytest -q` passes.
+
+---
+
+## T1.2 Make _certify_form_role produce a NethraCertificate
+
+**What is missing:**
+Same as T1.1 but for form-level certification.
+The form cert is scoped to "route" — a form that is tareth authorizes
+routing new instances to this form's context without a full audit.
+
+**Where it goes:**
+`dreth/agent.py`, inside `_certify_form_role`.
+
+**Exact change:**
+After computing `role`, construct cert and store in `form.form_certificates["route"]`:
+
+```python
+cert = NethraCertificate(
+    operation="route",
+    role=role,
+    authority="guarded_reuse" if role == "tareth" else "none",
+    context_parents=(),              # form level: no single parent tuple
+    context_visible=self.world.visible_count,
+    context_cycle=cycle,
+    targets=tuple(targets_checked),
+    substitutions_tested=tuple(substitutions_tried),
+    changes=changes,
+    trials=trials,
+)
+form.form_certificates["route"] = cert
+```
+
+**Acceptance:**
+- After `_certify_form_role` runs, `form.form_certificates["route"]` populated.
+- `cert.operation == "route"`.
+- Evidence counts match.
+- `python3 -m pytest -q` passes.
+
+---
+
+## T1.3 Migrate skip-decision gate to read certificates["skip"]
+
+**What is missing:**
+Every decision gate currently reads `n.operation_role` (unscoped string).
+The skip decision — "should I audit this var or skip it?" — should read the
+"skip"-scoped cert.
+
+**Where it goes:**
+`dreth/agent.py`, everywhere `n.operation_role == "trass"` or
+`n.operation_role != "tareth"` gates the skip path.
+
+**Exact change:**
+Replace each skip gate with `n.role_for("skip") == "trass"` or
+`n.authority_for("skip") == "skip"`.
+
+Do NOT change the parent-selection gate (line ~305, where available_parents
+is built from tareth vars) in this step. That is a "route" or "audit" scoped
+claim and is handled in T1.4.
+
+Do NOT change form shortcut gate (`form.operation_role != "tareth"`). That is
+"route" scoped and is handled in T1.4.
+
+Skip-specific gates to migrate (find all in agent.py):
+- The main `if n.operation_role == "trass": self.trass_skip_count += 1` path
+  in `run_cycle`
+- The `if n.operation_role == "trass" or n.status == "trass": return` guard
+  at start of `_full_audit_var`
+- `_retest_trass_vars`: reading `n.operation_role != "trass"` to decide which
+  vars to retest
+
+**What changes in behavior:**
+For vars that have a "skip" cert: behavior is identical to before because the
+cert role mirrors the old `operation_role`. For vars without a cert yet: the
+`role_for` helper falls back to legacy field. Net behavioral change: none until
+certs are scoped differently from the legacy field.
+
+**Acceptance:**
+- Skip path reads `n.role_for("skip")` not `n.operation_role` directly.
+- All existing tests pass.
+- `python3 -m pytest -q` passes.
+- Stress baseline unchanged.
+- DRIFT GUARD: a test explicitly constructs a VarNethra with `certificates["skip"].role
+  = "tareth"` and NO "route" cert. Asserts `role_for("skip") == "tareth"` and
+  `role_for("route") == "untested"`. These must be two different return values from the
+  same object. If this test does not exist, T1.3 is not done.
+
+---
+
+## T1.4 Migrate route/parent-selection gate to read certificates["route"]
+
+**What is missing:**
+The parent selection gate (which vars are available as candidate parents) reads
+`other_n.operation_role == "tareth"`. This is implicitly a "route" claim —
+it decides which vars are valid routing targets for hypothesis enumeration.
+
+The form shortcut gate reads `form.operation_role != "tareth"`. This is also
+a "route" claim — the form is authorizing routing a new var to its context.
+
+**Where it goes:**
+`dreth/agent.py`:
+- `_full_audit_var` where `available_parents` is built (line ~305)
+- `_try_form_hypothesis` where `nv.operation_role == "tareth"` filters
+  available vars (line ~399)
+- `_try_form_hypothesis` where `form.operation_role != "tareth"` gates the
+  form (line ~414)
+
+**Exact change:**
+- Available parents: `other_n.role_for("skip") == "tareth"` — using skip cert
+  as proxy for route eligibility. This is a known partial implementation.
+  Var-level route certs do not exist yet. See D5 for when they get implemented.
+  Do not write "Revisit in T2" — T2 is invalidation, not route cert creation.
+  The proxy is the real behavior until D5 is done. Name it as such.
+- Form shortcut: `form.form_certificates.get("route")` exists and `.role ==
+  "tareth"` and `.authority in ("guarded_reuse", "propagate")`.
+
+**Acceptance:**
+- Parent selection reads `role_for("skip")` as proxy for route eligibility.
+- Form shortcut reads form route cert.
+- Behavior identical to before for all vars with populated certs.
+- `python3 -m pytest -q` passes.
+- DRIFT GUARD: The T1.3 drift guard (skip=tareth, route=untested on same object)
+  tests object isolation only. It does NOT prove the agent produces vars with
+  different skip vs route verdicts in a real run — it cannot, because var route
+  certs are not created until D5. The T1.3 guard is necessary but not sufficient.
+  Do not claim the taxonomy's core rule is fully implemented after T1. It is
+  implemented for forms only. Vars remain using the proxy until D5.
+
+---
+
+# T2 — VarNethra invalidation untangling
+
+## T2.1 DELETED — merged into T2.2
+
+Design documentation that lives outside the method it describes is morphology.
+The invalidation cascade logic lives as inline comments inside `invalidate()` in
+T2.2. If the method does not exist, the documentation does not exist.
+
+---
+
+## T2.2 Add explicit invalidation method to VarNethra
+
+**What is missing:**
+Invalidation is scattered across agent.py. There is no single place that
+enforces the cascade logic from T2.1.
+
+**Where it goes:**
+`dreth/ledger.py`, on `VarNethra`.
+
+**Exact change:**
+
+```python
+def invalidate_certs(self, event: str) -> None:
+    """
+    Invalidate per-operation certificates based on the event type.
+    Named invalidate_certs (not invalidate) to avoid collision with
+    ChainedLedger.invalidate(vars, cycle, reason) which cascades status
+    through descendants and must NOT be confused with this method.
+
+    event: "parent_change" | "sentinel_failure" | "structural_mutation" |
+           "drift" | "false_trass_contradiction"
+
+    Cascade logic (this is the design documentation — it lives here, not elsewhere):
+
+      parent_change:
+        - clears predict cert (this var's function is now operating on new inputs)
+        - clears compress cert (compression depends on function + inputs)
+        - clears audit cert (fidelity evidence is stale)
+        - FLAGS skip cert as untested, does NOT clear it — the skip cert's validity
+          depends on downstream propagation structure (who uses this var's output),
+          NOT on this var's own function or parents. We cannot verify downstream
+          structure here without re-running the substitution test, so we flag for
+          retest. The cert record is preserved so evidence counts survive.
+        There is no keep_skip_cert parameter. We do not have infrastructure to
+        verify downstream structure is unchanged. The flag-for-retest behavior is
+        correct and honest. Do not add a parameter that would never be called True.
+
+      sentinel_failure:
+        - clears audit cert (hypothesis fidelity is violated)
+        - clears compress cert (compression depends on audit-level confidence)
+        - FLAGS skip cert as untested (world may have changed in a way that
+          re-activates this var's downstream influence)
+        NOTE: ChainedLedger.invalidate() at agent.py:1462 resets n.status but
+        NOT n.operation_role. T3.2 ADDS invalidate_certs("sentinel_failure")
+        after ledger.invalidate() — it does not replace an existing assignment.
+
+      structural_mutation:
+        - clears ALL certs. The causal graph changed. Nothing is valid.
+
+      drift:
+        - FLAGS all certs as untested. Do not clear — preserve evidence counts.
+          Re-certification required before any cert authorizes decisions.
+
+      false_trass_contradiction:
+        - agent.py:873: a child var picked this var as parent despite trass status.
+          This is a contradiction — the skip cert verdict was wrong for this scope.
+        - FLAGS skip cert as untested. Same behavior as sentinel_failure for certs.
+        - This is NOT parent_change (this var's parents didn't change).
+        - This is NOT sentinel_failure (no sentinel failed on this var).
+        - It is specifically: evidence arrived that the trass verdict was false.
+    """
+    if event == "structural_mutation":
+        self.certificates.clear()
+        self.operation_role = "untested"
+        return
+    if event == "parent_change":
+        self.certificates.pop("predict", None)
+        self.certificates.pop("compress", None)
+        self.certificates.pop("audit", None)
+        if "skip" in self.certificates:
+            self.certificates["skip"] = dataclasses.replace(
+                self.certificates["skip"], role="untested"
+            )
+        self.operation_role = "untested"
+    if event in ("sentinel_failure", "false_trass_contradiction"):
+        self.certificates.pop("audit", None)
+        self.certificates.pop("compress", None)
+        if "skip" in self.certificates:
+            self.certificates["skip"] = dataclasses.replace(
+                self.certificates["skip"], role="untested"
+            )
+        self.operation_role = "untested"
+    if event == "drift":
+        for op in list(self.certificates):
+            self.certificates[op] = dataclasses.replace(
+                self.certificates[op], role="untested"
+            )
+        self.operation_role = "untested"
+```
+
+**Acceptance:**
+- `invalidate("parent_change")` clears predict/compress/audit certs, flags
+  skip cert role as "untested", does NOT delete the skip cert record.
+- `invalidate("structural_mutation")` clears all certs and the record.
+- `invalidate("sentinel_failure")` clears audit+compress, flags skip.
+- `invalidate("drift")` flags all certs without clearing records.
+- Unit test each event type with a populated cert dict — assert exact
+  post-invalidation state for every cert key.
+- `python3 -m pytest -q` passes.
+- DRIFT GUARD: there is no `keep_skip_cert` parameter. If one appears,
+  T2.2 has drifted. Remove it.
+
+---
+
+## T2.3 Replace scattered operation_role assignments with invalidate_certs()
+
+**What is missing:**
+The one scattered direct `operation_role` write that needs replacing.
+The method is `invalidate_certs()` not `invalidate()` — see DRIFT 10.
+
+**Exact site inventory — verified by reading actual code:**
+
+Run this to confirm line numbers haven't shifted:
+```bash
+grep -n "operation_role = " dreth/agent.py
+```
+
+Verified sites and their dispositions:
+- agent.py:461 — `n.operation_role = "tareth"` inside `_certify_operation_role`.
+  DO NOT REPLACE. Cert function writing its verdict.
+- agent.py:514 — `n.operation_role = role` inside `_certify_operation_role`.
+  DO NOT REPLACE. Same.
+- agent.py:635 — `form.operation_role = role` inside `_certify_form_role`.
+  DO NOT REPLACE. Form cert function writing its verdict.
+- agent.py:662 — `n.operation_role = "untested"` inside `_retest_trass_vars`.
+  DO NOT REPLACE. Deliberate retest setup before forced re-certification.
+- agent.py:873 — `pn.operation_role = "untested"` — false-trass contradiction.
+  REPLACE WITH: `pn.invalidate_certs("false_trass_contradiction")`
+
+That is ONE replacement. The previous "~15 assignments" claim was wrong —
+written without reading the code.
+
+CRITICAL: there is NO `operation_role` write on the sentinel failure path
+(agent.py:1462). `ledger.invalidate()` there resets n.status, not
+n.operation_role. Do not search for a write that does not exist. T3.2 ADDS
+a call at that site — it does not replace one.
+
+Do NOT change what triggers invalidation — only replace the one site above.
+
+**Acceptance:**
+- `grep -n "\.operation_role = " dreth/agent.py` returns only lines inside
+  the cert functions (461, 514, 635, 662) and the one false_trass site now
+  replaced. Any additional line is a failure.
+- Unit test: set up the false-trass contradiction (child var picks trass parent).
+  After the contradiction fires, assert `pn.certificates["skip"].role == "untested"`
+  and the skip cert record still exists (not deleted — flags, not clears).
+- `python3 -m pytest -q` passes.
+- Stress baseline unchanged.
+
+---
+
+# T3 — Certification trigger dispatch
+
+## T3.1 Replace every-cycle _certify_form_role with event-triggered dispatch
+
+**What is missing:**
+`_run_form_discovery` in `v30_integration.py` calls `_certify_form_role` every
+cycle for every form with ≥2 instances. This is wrong: role certification
+answers a question about causal structure, not current values. The structure
+changes on graph mutations, not on value changes.
+
+Running the substitution test every cycle wastes budget and produces redundant
+results when nothing about the form's causal structure has changed.
+
+**Where it goes:**
+`dreth/v30_integration.py`, `_run_form_discovery`.
+`dreth/forms.py`, `Form` dataclass.
+
+**Exact change — Form dataclass:**
+Add a dirty flag that marks when the form needs re-certification:
+
+```python
+needs_role_retest: bool = True   # True at creation; set by invalidation events
+```
+
+**Exact change — v30_integration.py:**
+In `_run_form_discovery`, only call `_certify_form_role` when
+`form.needs_role_retest` is True:
+
+```python
+for form in self.forms.forms.values():
+    if form.instance_count > 0:
+        form.strong_observations += 1
+        if form.instance_count >= 2:
+            if form.needs_role_retest:
+                agent._certify_form_role(form.form_id, cycle)
+                form.needs_role_retest = False
+        elif form.operation_role != "untested":
+            form.operation_role = "untested"
+            form.needs_role_retest = True
+            agent.ledger.event_log.append(
+                f"c{cycle}: {form.form_id} form_role→untested "
+                f"(instances dropped to {form.instance_count})"
+            )
+```
+
+**Exact change — trigger sites:**
+Set `form.needs_role_retest = True` in these places:
+1. When a new instance binds to the form (in `FormRegistry.bind`)
+2. When an instance unbinds (already handled above via instance count drop)
+3. When the form goes through quarantine/probation and recovers
+4. When any instance's parent set changes (in `_handle_unbound` or wherever
+   parent changes propagate to form instances)
+
+**Acceptance:**
+- `_certify_form_role` no longer runs every cycle.
+- It runs exactly when `needs_role_retest` is True and ≥2 instances exist.
+- After running, `needs_role_retest` is cleared.
+- After a new instance binds, `needs_role_retest` is set.
+- `test_form_certification.py` still passes.
+- Stress baseline: form_role event count changes (fewer redundant re-tests)
+  but tareth verdicts still appear at first encounter and after structural change.
+- DRIFT GUARD: a test changes the parent set of a var that is an instance of
+  an active tareth-certified form, then runs one cycle, and asserts that
+  `form.needs_role_retest` is True and `_certify_form_role` fires. Without this
+  test, the fourth trigger site is not wired and T3.1 is not done.
+
+---
+
+## T3.2 Add sentinel-failure trigger for cert retest
+
+**What is missing:**
+`ChainedLedger.invalidate()` at agent.py:1462 resets `n.status` (certified →
+uncertain) but NEVER touches `n.operation_role` or certs. After sentinel failure,
+`operation_role` remains "tareth" and all certs remain valid. This is wrong — the
+world changed enough to fail a sentinel, so the skip cert should be flagged for
+retest.
+
+There is NO existing `operation_role` write at this site. T3.2 ADDS a call.
+It does not replace anything.
+
+**Where it goes — two sites, not one:**
+1. agent.py:1462 — main loop sentinel failure:
+   After `closure = self.ledger.invalidate({var}, cycle, f"sentinel: {reason}")`,
+   add for each var in closure:
+   ```python
+   self.ledger.vars[v].invalidate_certs("sentinel_failure")
+   self._uncertain_this_cycle.add(v)
+   ```
+2. agent.py:1248 — dormant safety sweep sentinel failure:
+   After `closure = self.ledger.invalidate({var}, cycle, f"dormant sweep: {reason}")`,
+   same additions.
+
+`self._uncertain_this_cycle` is a set cleared at the start of `run_cycle` and
+consumed by `_find_joint_trass_candidates` at the end. See T4.3.
+
+**Acceptance:**
+- After sentinel failure, `n.certificates["skip"].role == "untested"`.
+- `n.status == "uncertain"` (from existing ledger.invalidate() — unchanged).
+- `n.operation_role` is also reset (from invalidate_certs cascade).
+- Both sentinel failure paths (main loop + dormant sweep) add to
+  `_uncertain_this_cycle`.
+- `python3 -m pytest -q` passes.
+
+---
+
+# T4 — Joint test infrastructure
+
+## T4.1 Add predict_under_joint_intervention to CausalWorld
+
+**What is missing:**
+`world.predict_under_intervention(var, val)` forces one variable and propagates.
+The joint false-trass test requires forcing multiple variables simultaneously.
+
+**Where it goes:**
+`dreth/world.py`, on `CausalWorld`.
+
+**Exact signature:**
+
+```python
+def predict_under_joint_intervention(
+    self, forced: Mapping[int, float]
+) -> Tuple[float, ...]:
+    """
+    Force multiple variables simultaneously and propagate through the world.
+    
+    forced: {var_index: forced_value, ...}
+    Returns the resulting state tuple after propagation.
+    
+    This is the primitive needed for joint false-trass testing.
+    Forcing both A and B simultaneously checks interaction effects that
+    neither individual test can see.
+    """
+```
+
+**Implementation:**
+Follow the same pattern as `predict_under_intervention` but apply all forced
+values before propagation. The exact propagation mechanism depends on how the
+hidden world is structured — look at how `predict_under_intervention` works and
+extend it to accept a dict of forced values.
+
+**Acceptance:**
+- `predict_under_joint_intervention({a: v_a, b: v_b})` forces both vars and
+  propagates.
+- For a single-var dict `{a: v_a}`, result matches `predict_under_intervention(a, v_a)`.
+- Unit test: in a world where `c = a * b` (PROD), force `a=0.5, b=0.5`
+  jointly → `c ≈ 0.25`. Force each alone → `c` changes only by the individual
+  contribution.
+- `python3 -m pytest -q` passes.
+
+---
+
+## T4.2 Add joint false-trass test to agent
+
+**What is missing:**
+No joint false-trass test exists. Two vars that are each individually trass may
+be jointly tareth if their interaction is load-bearing.
+
+**Where it goes:**
+`dreth/agent.py`, new method `_test_joint_false_trass`.
+
+**Exact procedure:**
+
+```python
+def _test_joint_false_trass(
+    self, var_a: int, var_b: int, cycle: int
+) -> str:
+    """
+    Test whether var_a and var_b are jointly tareth despite being individually
+    trass.
+    
+    Procedure:
+      R0  = baseline: no intervention
+      RA  = perturb var_a alone (n_trials times)
+      RB  = perturb var_b alone (n_trials times)
+      RAB = perturb both simultaneously (n_trials times)
+    
+    If RA ≈ R0 and RB ≈ R0 but RAB ≠ R0 in a downstream tareth var:
+    → jointly tareth → record false_trass on both certs
+    
+    Returns: "tareth" | "trass" | "untested"
+    """
+```
+
+**What counts as R0 vs RA vs RB vs RAB:**
+For each trial:
+- Sample a random value for var_a (spread across [0.05, 0.25, 0.5, 0.75, 0.95])
+- Sample a random value for var_b (same spread)
+- RA: `predict_under_intervention(var_a, val_a)` — var_b stays at current
+- RB: `predict_under_intervention(var_b, val_b)` — var_a stays at current
+- RAB: `predict_under_joint_intervention({var_a: val_a, var_b: val_b})`
+- R0: current `world.state`
+
+For each downstream tareth var `j`:
+- If `|RAB[j] - R0[j]| > j.current_tolerance` AND
+  `|RA[j] - R0[j]| <= j.current_tolerance` AND
+  `|RB[j] - R0[j]| <= j.current_tolerance`:
+  → interaction evidence on this trial
+
+Verdict: jointly tareth if interaction evidence in ≥ half of trials.
+
+**When to call it:**
+Only when both vars are trass and they share a common tareth-certified descendant
+that is quarantined or has `weak_margins` (sub-threshold sentinel passes). Do
+not run speculatively on all trass pairs — O(n²) budget cost.
+
+**On jointly-tareth verdict:**
+- Set `n_a.certificates["skip"].role = "false_trass"` (new role value)
+- Set `n_b.certificates["skip"].role = "false_trass"`
+- Set `n_a.operation_role = "untested"` and trigger re-certification
+- Set `n_b.operation_role = "untested"` and trigger re-certification
+- Log: `f"c{cycle}: x{var_a}+x{var_b} jointly_tareth (false_trass) — N/M trials showed interaction"`
+
+**Acceptance:**
+- Unit test: construct a world where `c = PROD(a, b)`. Agent has the correct
+  hypothesis for all three vars. Set `a` and `b` individually trass. Set `c`
+  tareth. Call `_test_joint_false_trass(a, b)`. Verify "tareth" returned.
+- Unit test: two vars with no common tareth descendant → "untested" returned.
+- `python3 -m pytest -q` passes.
+- DRIFT GUARD: the docstring of `_test_joint_false_trass` must include this
+  sentence verbatim: "This method uses the agent's believed parent structure,
+  not the true causal structure. It will miss joint effects when the agent's
+  hypothesis about ancestry is wrong." If that sentence is absent, the known
+  limitation has been hidden.
+
+---
+
+## T4.3 Wire joint false-trass trigger
+
+**What is missing:**
+The trigger condition — trass pair with quarantined common tareth descendant —
+must be checked somewhere in the cycle loop.
+
+**Where it goes:**
+`dreth/agent.py`, called once at the END of `run_cycle`, after all per-var
+processing for that cycle is complete.
+
+CRITICAL: Var `n.status` NEVER becomes "quarantined". Only `form.health_status`
+becomes "quarantined" (forms.py). Vars go to "uncertain" after sentinel failure
+(ledger.py:543). The trigger is: vars that transitioned to `n.status == "uncertain"`
+due to sentinel failure this cycle. This is tracked by `self._uncertain_this_cycle`
+populated in T3.2, not "quarantined."
+
+The set is named `_uncertain_this_cycle`. Cleared at start of `run_cycle`.
+Populated by both sentinel failure sites in T3.2. Consumed here.
+
+**Exact trigger logic:**
+
+```python
+def _find_joint_trass_candidates(self, cycle: int) -> None:
+    """
+    Called once per cycle after all per-var processing. Checks vars that
+    transitioned to n.status=="uncertain" due to sentinel failure this cycle
+    (tracked in self._uncertain_this_cycle, populated by T3.2 sentinel paths).
+    For each uncertain var, finds trass ancestors and runs joint false-trass
+    test on pairs.
+
+    This method uses the agent's believed parent structure, not the true
+    causal structure. It will miss joint effects when the agent's hypothesis
+    about ancestry is wrong.
+    """
+    uncertain_this_cycle = list(self._uncertain_this_cycle)
+
+    for uvar in uncertain_this_cycle:
+        trass_ancestors = [
+            v for v in range(self.world.visible_count)
+            if self.ledger.vars[v].role_for("skip") == "trass"
+            and self._is_ancestor(v, uvar)
+        ]
+        # Test pairs
+        for i in range(len(trass_ancestors)):
+            for j in range(i + 1, len(trass_ancestors)):
+                self._test_joint_false_trass(
+                    trass_ancestors[i], trass_ancestors[j], cycle
+                )
+```
+
+`_is_ancestor(v, target)`: v is in the causal ancestry of target if target's
+parents (recursively) include v. Use the ledger's known parent structure.
+
+**Acceptance:**
+- Joint test fires when `_uncertain_this_cycle` is non-empty and trass ancestors
+  exist. Not on "quarantined" vars — that status does not exist for VarNethra.
+- Does not fire when `_uncertain_this_cycle` is empty (no sentinel failures).
+- Does not fire on all trass pairs speculatively.
+- `_uncertain_this_cycle` is cleared at start of `run_cycle` and populated by
+  both sentinel sites in T3.2 before `_find_joint_trass_candidates` runs.
+- `python3 -m pytest -q` passes.
+
+---
+
+# T5 — Migrate legacy operation_role to per-operation certs
+
+## T5.1 Remove the legacy operation_role fallback
+
+THIS STEP IS THE PROOF THAT T0–T4 WORKED.
+
+If T5 cannot be completed, T0–T4 are not done. The legacy field removal is not
+a cleanup step or a nice-to-have. It is the acceptance test for the entire
+migration. If `operation_role` still exists after T0–T4, it means some decision
+path still reads it directly, which means the cert migration is incomplete, which
+means the taxonomy's core rule is still not implemented.
+
+Do not defer T5. Do not call any prior step done if T5 cannot follow immediately.
+
+**What is missing:**
+After T0–T4 are complete, every decision path reads certs via `role_for(op)`.
+The legacy `operation_role` string is now redundant. Remove it.
+
+**This step is last because:**
+It requires T1 (all decision paths migrated), T2 (invalidation uses certs),
+T3 (triggers wired), T4 (joint test populates certs) to all be done first.
+Removing the legacy field before any of those is done breaks the fallback.
+
+**Exact change:**
+- Remove `operation_role: str = "untested"` from `VarNethra`.
+- Remove the `operation_role` fallback branch from `role_for` and
+  `authority_for` — the fallback was only there during migration.
+- Remove all direct reads/writes of `n.operation_role` in `agent.py`.
+  Run: `grep -n "operation_role" dreth/agent.py` — every remaining line
+  is a failure. Fix each one before marking this done.
+- Update `display()` in `VarNethra` to read from certs.
+- Update CLI summary lines that read `n.operation_role`.
+- Update `final_summary` in `agent.py`.
+
+**Acceptance:**
+- `grep -rn "operation_role" dreth/` returns zero results outside of
+  `dreth/ledger.py`'s cert-related methods. Zero. If any remain, T5 is not done.
+- `python3 -m pytest -q` passes.
+- `test_form_certification.py` passes.
+- `python3 tests/test_regime_recall.py` passes.
+- Stress baseline produces equivalent behavior. Any delta in tareth/trass counts
+  must be explained by correct per-operation scoping, not by broken fallback.
+
+---
+
+# Deferred — do not implement yet
+
+## D1 — Shared sentinels (deferred)
+
+A tareth form authorizes using one instance's sentinel set to validate another
+instance. This is context-dependent. Do not implement a universal mechanism.
+
+Only implement when a specific test case exists that would fail if shared
+sentinels were absent. The test must assert: using instance A's sentinels for
+instance B produces a different (wrong) outcome vs using instance-specific
+sentinels, and the form cert correctly identifies when sharing is safe.
+
+## D2 — Shared compression (deferred)
+
+Same rule as D1. A tareth form authorizes applying a compression discovered on
+one instance to other instances. Do not implement until a test certifies it.
+
+## D3 — Instance routing (deferred)
+
+Routing new instances to a form's context using form priors. Do not implement
+until a test would fail without it.
+
+## D5 — Var-level route certs (deferred — completes the taxonomy's core rule for vars)
+
+T1.4 uses skip cert as proxy for route eligibility. This is explicitly partial.
+The taxonomy's core rule (`trass-for-skip ≠ trass-for-route`) is only implemented
+for forms after T0–T5. For vars, skip and route are the same value.
+
+A var-level route cert answers: "is this var a valid routing target for hypothesis
+enumeration?" That is a different question from "does perturbing this var propagate
+downstream?" A var could be tareth-for-skip (its perturbation matters) but
+trass-for-route (it is not a useful parent candidate for other vars' hypotheses,
+e.g. because it is always downstream, never upstream in the fitted structure).
+
+Only implement when a test exists that would fail without it — i.e., a case where
+a var is tareth-for-skip but should be excluded from parent selection, or
+trass-for-skip but should still be a valid parent candidate. Until that case
+exists in a test, the proxy is sufficient and honest.
+
+## D4 — TiedFrontier consumers (deferred)
+
+The old TODO (P1–P7) covers TiedFrontier work. That work is still valid but
+depends on the taxonomy gaps (T0–T5) being resolved first. Do not activate
+frontier-biased probes or collapse gating until operation-scoped certs exist,
+because the frontier consumers will need to read scoped certs to make correct
+decisions.
+
+---
+
+# Global acceptance invariant
+
+For every item:
+
+```bash
+python3 -m pytest -q
+python3 tests/test_form_certification.py
+python3 tests/test_regime_recall.py
+```
+
+Report:
+- changed files
+- which behavior was supposed to change
+- whether behavior changed as expected or not
+- fast pytest result
+- form certification test result
+- regime recall result
+- any delta in tareth/trass counts and explanation for the delta
+
+An item is NOT done if it only adds terminology or data structures that nothing
+reads. An item is done when a decision path reads the new structure and a test
+would fail if it were removed.

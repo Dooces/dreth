@@ -1,0 +1,236 @@
+# Dreth runtime assessment converted to D2.
+# Source: uploaded markdown assessment.
+# Render with: d2 dreth_assessment.d2 dreth_assessment.svg
+
+direction: down
+
+runtime_loop: {
+  label: "1. Main Runtime Loop"
+  style.fill: "#f8f8f8"
+
+  parse_args: "parse_args"
+  create_world: "Create CausalWorld"
+  create_agent: "Create ChainedAgent"
+  mode_check: "mode != v28?"
+  mode_check.shape: diamond
+  v29_ext: "v29 extension installed"
+  v30_check: "v30 flags?"
+  v30_check.shape: diamond
+  v30_bundle: "V30Bundle"
+  initialize: "agent.initialize"
+
+  full_audit: "_full_audit_var"
+  fit_var: "fit_var"
+  install_var: "_install_var"
+  ledger_update: "ChainedLedger.update_var"
+  topo_invalidate: "_topo_cache = None"
+  sig_change: "V30 on_signature_change"
+  select_sentinels: "select_var_sentinels"
+  discover_compressions: "_discover_compressions"
+  v29_compressions: "v29 extension compressions"
+  audit_complete: "V30 on_audit_complete"
+
+  cycle: "for cycle"
+  perturb: "world.perturb_by_schedule"
+  reveal_check: "mutation.kind == REVEAL?"
+  reveal_check.shape: diamond
+  variable_revealed: "on_variable_revealed"
+  run_cycle: "run_cycle"
+
+  v30_hooks: "V30 cycle hooks"
+  forms_maintenance: "forms maintenance"
+  topo_order: "_topological_order"
+  trass_skip: "trass skip"
+  compression_skip: "compression skip"
+  sentinel_check: "check_var_sentinels_with_envelope"
+  sentinel_skip: "sentinel skip"
+  ledger_invalidate: "ledger.invalidate"
+  needs_audit: "needs_audit"
+  novelty: "_maybe_novelty"
+  novelty_bookkeeping: "novelty bookkeeping"
+  records: "CycleRecord records"
+
+  parse_args -> create_world: "run calls parse_args; cli.py:337-349"
+  create_world -> create_agent: "CausalWorld constructed; cli.py:358-360"
+  create_agent -> mode_check: "ChainedAgent constructed; cli.py:362-373"
+  mode_check -> v29_ext: "yes: load dreth_extensions; cli.py:376-388"
+  mode_check -> v30_check: "no extension branch; cli.py:377"
+  v29_ext -> v30_check: "continues to v30 setup; cli.py:398-401"
+  v30_check -> v30_bundle: "V30Bundle assigned; cli.py:401-414"
+  v30_check -> initialize: "no flags: agent.v30 remains None; agent.py:160-164"
+  v30_bundle -> initialize: "continues to initialize; cli.py:435"
+
+  initialize -> full_audit: "audit each visible var; agent.py:769-777"
+  full_audit -> fit_var: "calls fit_var; agent.py:191-192"
+  fit_var -> install_var: "best parents/func/score; fit.py:324-326"
+  install_var -> ledger_update: "commits fit; agent.py:501-504"
+  ledger_update -> topo_invalidate: "parents_changed; agent.py:506-508"
+  install_var -> sig_change: "syntactic_changed && v30; agent.py:510-515"
+  install_var -> select_sentinels: "no sentinels && strong_obs >= 1; agent.py:560-579"
+  install_var -> discover_compressions: "sentinel gate + strong observations; agent.py:589-593"
+  install_var -> v29_compressions: "extension enabled; agent.py:601-615"
+  install_var -> audit_complete: "v30 hook; agent.py:631-634"
+
+  initialize -> cycle: "main loop starts; cli.py:443"
+  cycle -> perturb: "cli.py:443-444"
+  perturb -> reveal_check
+  reveal_check -> variable_revealed: "yes; cli.py:445-448"
+  variable_revealed -> full_audit: "invalidate topo, retest trass, audit new var; agent.py:779-801"
+  reveal_check -> run_cycle: "no; cli.py:448-449"
+
+  run_cycle -> v30_hooks: "on_cycle_start + pending gate obs; agent.py:827-834"
+  v30_hooks -> forms_maintenance: "discover/lift/propagate forms; v30_integration.py:77-106"
+  run_cycle -> topo_order: "compute topo order; agent.py:856"
+  topo_order -> trass_skip: "trass path; agent.py:860-866"
+  topo_order -> compression_skip: "compression gate; agent.py:868-876"
+  topo_order -> sentinel_check: "authoritative sentinel check; agent.py:878-884"
+  sentinel_check -> sentinel_skip: "passed; agent.py:901-908"
+  sentinel_check -> ledger_invalidate: "failed; agent.py:909-918"
+  topo_order -> needs_audit: "otherwise; agent.py:920-921"
+  needs_audit -> full_audit: "audit up to budget; agent.py:929-950"
+  install_var -> novelty: "semantic change returned; agent.py:636"
+  novelty -> novelty_bookkeeping: "after audit; agent.py:949-955"
+  run_cycle -> records: "append; agent.py:967-977"
+}
+
+varnethra_transitions: {
+  label: "2. VarNethra / Signature Transitions"
+  direction: down
+  style.fill: "#f8f8f8"
+
+  start: "[*]"
+  default: "DefaultVarNethra\ncreated per slot"
+  fit_diag: "FitDiagnosticReady"
+  fit_reset: "FitInstalledReset"
+  proposed: "ProposedFit"
+  tied_churn: "TiedChurnPreserved"
+  fit_preserved: "FitInstalledPreserved"
+  semantic_change: "SemanticChange"
+  topo_invalidated: "TopoInvalidated"
+  form_hook: "FormSignatureHook"
+  trass: "Trass"
+  strong_observed: "StrongObserved"
+  sentinel_attached: "SentinelAttached"
+  certified: "Certified"
+  uncertain: "Uncertain"
+  form_bound: "FormBound"
+  form_unbound_a: "FormUnbound"
+  form_binding_updated: "FormBindingUpdated"
+  form_tie_preserved: "FormBindingPreservedByTie"
+  form_unbound_b: "FormUnbound"
+
+  start -> default: "ledger.py:322-329"
+  default -> fit_diag: "_full_audit_var builds FitDiagnostic; agent.py:191-220"
+  fit_diag -> fit_reset: "_install_var update_var reset_state; agent.py:497-504"
+  fit_reset -> proposed: "sets parents/func/status proposed; ledger.py:388-400"
+
+  fit_diag -> tied_churn: "same_parent_tied_churn; agent.py:491-504"
+  tied_churn -> fit_preserved: "reset_state false; ledger.py:388-402"
+  fit_diag -> semantic_change: "syntactic_changed && !same_parent_tied_churn; agent.py:491-499"
+  semantic_change -> fit_reset: "ledger_reset_needed; agent.py:497-504"
+
+  fit_reset -> topo_invalidated: "parents_changed; agent.py:506-508"
+  fit_reset -> form_hook: "syntactic_changed && v30; agent.py:510-515"
+  fit_preserved -> form_hook: "syntactic_changed && v30; agent.py:510-515"
+
+  proposed -> trass: "operation_role trass; agent.py:521-529"
+  proposed -> strong_observed: "not semantic_changed increments strong_observations; agent.py:531-535"
+  proposed -> sentinel_attached: "strong_observations >= 1 selects sentinels; agent.py:560-579"
+  sentinel_attached -> certified: "promote_after + sentinels; agent.py:581-583"
+  certified -> uncertain: "ledger.invalidate demotes; ledger.py:417-423"
+
+  proposed -> form_bound: "discover_forms binds; forms.py:300-308"
+  form_hook -> form_unbound_a: "binding_invalid && func mismatch; v30_integration.py:192-198"
+  form_hook -> form_binding_updated: "identity match; v30_integration.py:199-202"
+  form_hook -> form_tie_preserved: "tie_log operator + arity match; v30_integration.py:203-215"
+  form_hook -> form_unbound_b: "fallback mismatch; v30_integration.py:216-227"
+}
+
+forms_flow: {
+  label: "3. Forms Flow"
+  direction: down
+  style.fill: "#f8f8f8"
+
+  on_cycle_start: "V30Bundle.on_cycle_start"
+  discover_forms: "discover_forms"
+  group_operator: "group by operator arity"
+  sig_buckets: "behavior signature buckets"
+  existing_form: "existing Form"
+  register_form: "register_form"
+  registry_forms: "FormRegistry.forms"
+  bind: "bind"
+  optional_unbind: "optional unbind"
+  instances: "instances + _form_to_vars"
+
+  discover_form_compressions: "discover_form_compressions"
+  instance_compressions: "instance compressions"
+  slot_patterns: "slot patterns"
+  shared_cluster: "shared cluster"
+  form_compression: "FormCompression"
+
+  propagate: "propagate_form_compressions"
+  bound_vars: "bound vars"
+  eligible_instance: "eligible instance"
+  concrete_gate: "concrete gate"
+  var_compressions: "var.n.compressions"
+
+  install_var: "agent._install_var"
+  sig_change_hook: "on_signature_change"
+  no_op: "no-op"
+  unbind: "unbind"
+  preserve_binding: "preserve/update binding"
+  collapse_log: "form collapse log"
+
+  on_cycle_start -> discover_forms: "enable_forms + interval; v30_integration.py:88-91"
+  discover_forms -> group_operator: "filter visible tareth proposed/certified sentinels parents; forms.py:260-275"
+  group_operator -> sig_buckets: "forms.py:281-286"
+  sig_buckets -> existing_form: "find existing; forms.py:292-295"
+  sig_buckets -> register_form: "new form; forms.py:296-298"
+  register_form -> registry_forms: "creates/indexes form; forms.py:142-154"
+  existing_form -> bind: "eligible vars; forms.py:300-308"
+  registry_forms -> bind: "eligible vars; forms.py:300-308"
+  bind -> optional_unbind: "if rebinding; forms.py:156-159"
+  bind -> instances: "create FormInstance; forms.py:160-167"
+
+  on_cycle_start -> discover_form_compressions: "after discover_forms; v30_integration.py:96-99"
+  discover_form_compressions -> instance_compressions: "iterate vars_for_form/get_instance; forms.py:429-443"
+  instance_compressions -> slot_patterns: "translate concrete gate vars to slots; forms.py:447-467"
+  slot_patterns -> shared_cluster: "cluster by target/value tolerance; forms.py:471-497"
+  shared_cluster -> form_compression: "append; forms.py:518-538"
+
+  on_cycle_start -> propagate: "after lift; v30_integration.py:100"
+  propagate -> bound_vars: "iterate forms and vars_for_form; forms.py:363-371"
+  bound_vars -> eligible_instance: "func and arity match; forms.py:371-382"
+  eligible_instance -> concrete_gate: "resolve slots via binding; forms.py:340-349,384-385"
+  concrete_gate -> var_compressions: "append ledger.Compression if new; forms.py:383-399"
+
+  install_var -> sig_change_hook: "syntactic_changed && v30; agent.py:510-515"
+  sig_change_hook -> no_op: "no forms/no instance; v30_integration.py:183-186"
+  sig_change_hook -> unbind: "missing form; v30_integration.py:187-191"
+  sig_change_hook -> unbind: "binding invalid + func mismatch; v30_integration.py:192-198"
+  sig_change_hook -> preserve_binding: "identity match; v30_integration.py:199-202"
+  sig_change_hook -> preserve_binding: "tie_log operator + arity match; v30_integration.py:203-215"
+  sig_change_hook -> unbind: "fallback mismatch; v30_integration.py:216-227"
+  unbind -> collapse_log: "remove instance/reverse index; forms.py:169-180"
+}
+
+uncertainties: {
+  label: "4. Unresolved / Docstring-Only Claims"
+  direction: down
+  style.fill: "#fff8e8"
+
+  u1: "UNKNOWN: form sentinel failure -> unbind\nDocstring says yes; scoped runtime found sentinel failure -> ledger.invalidate only.\nforms.py:30; agent.py:909"
+  u2: "UNKNOWN: per-variable audits become per-form audits\nDocstring says shared form-level audit; scoped runtime still calls per-variable _full_audit_var.\nforms.py:10"
+  u3: "UNKNOWN: Form.sentinel_template runtime population\nDefined/displayed, no scoped writer found.\nforms.py:75"
+  u4: "UNKNOWN: Form.strong_observations runtime mutation\nDefined/displayed, no scoped writer found.\nforms.py:77,82"
+  u5: "UNKNOWN: retire_form caller\nDefinition found; no scoped caller found.\nforms.py:182"
+
+  u1 -> u2: "separate missing runtime edge"
+  u2 -> u3: "separate missing runtime edge"
+  u3 -> u4: "separate missing runtime mutation"
+  u4 -> u5: "separate missing caller"
+}
+
+runtime_loop -> varnethra_transitions: "install/audit state transitions"
+runtime_loop -> forms_flow: "v30 hooks"
+forms_flow -> uncertainties: "claims needing verification"

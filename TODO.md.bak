@@ -1,0 +1,266 @@
+# TODO
+
+## Prospective reliability modeling ("when will this fit stop working?")
+
+**Where it belongs:** `dreth/ledger.py` (VarNethra), `dreth/v30_integration.py` (forms layer),
+wired through `agent.py` audit and sentinel paths.
+
+**The gap:**  
+The agent currently asks "is my current fit still valid *right now*?"  
+It does not ask "how much longer is this fit likely to remain valid?"
+
+Sentinel failures and envelope clustering are reactive — they detect change after it
+starts. The prospective question is different: given how often this variable has been
+invalidated in the past, and given what the causal graph looks like around it, when
+should I start paying closer attention *before* things break?
+
+**What this would look like:**
+
+1. **Per-var invalidation history** — `VarNethra` already records `full_audits` and
+   `margins`. Add a list of cycles at which `sig_changed=True` (i.e., the drift events
+   from `run_cycle`'s `drift` list). From that, compute an inter-invalidation interval
+   distribution per var (mean + variance, or a simple Poisson rate).
+
+2. **Stability horizon estimate** — a `cycles_until_next_expected_invalidation` field
+   on `VarNethra`, updated each cycle based on time since last `sig_changed`. As the
+   estimated time approaches zero, the var enters a "watch" state: sentinel_count
+   effectively higher, audit priority bumped.
+
+3. **Form-level propagation** — when one instance of form F is invalidated, all other
+   instances of F should have their stability horizon shortened. Forms encode shared
+   causal structure; shared structure implies shared vulnerability to the same class of
+   structural mutation. This is distinct from the current `on_signature_change` logic,
+   which only reacts after the fact.
+
+4. **Parent-as-leading-indicator** — in a causal chain A→B→C, A's instability is a
+   leading indicator for B and C. If A just entered a watch state, B's sentinel checks
+   should become stricter and C's audit priority should rise. This is NOT the same as
+   the current `ledger.invalidate` closure walk (which fires *after* A's sentinel
+   fails). This fires *before*.
+
+**What to be careful about:**  
+- This is a statistical model fitted to each individual run. The mutation schedule
+  differs between seeds and problem sizes. Don't hard-code priors.
+- `sig_changed` is already computed per-cycle in `run_cycle`'s audit loop (line ~979).
+  The history just needs to be recorded somewhere — currently it isn't.
+- The stability horizon should NOT feed back into `_full_audit_var` or `fit_var`
+  directly. It should only affect *attention* (sentinel_count, audit priority weight,
+  form-level pre-invalidation). The fit itself must still be evidence-driven.
+- Forms make this tractable: instead of modeling N vars independently, you model
+  K form patterns and propagate. Without forms the per-var histories are too short
+  to fit reliably.
+
+**Prerequisite:** forms must be on by default (event-driven discovery is already
+implemented; removing the `--enable-forms` flag and making it the default is the
+remaining step before this work is useful). ✓ done — now `--disable-forms`.
+
+---
+
+## Form rebind churn — negative mask / cooldown gate ✓ done
+
+**Implemented in:** `dreth/forms.py` (FormRegistry: `_rebind_cooldowns`,
+`_unbind_counts`, `is_rebind_allowed`), `discover_forms` cooldown check.
+
+**Result (seed=12 nv=40 3000 cycles):**
+- Before: 10448 collapse events / 3000 cycles (3.5/cycle)
+- After: 904 actual unbinds + 16596 cooldown-blocked rebind attempts
+- **91% reduction in churn.** Stable endpoint: 1 active form from 13 discovered
+  (same endpoint as before, reached with orders-of-magnitude less thrashing).
+
+`cd_blocks` and `gated_pairs` are tracked on FormRegistry, surfaced in the
+`predict:` summary line (`cd_blocks=N gated=N`) and in `display_summary`.
+
+**Remaining open questions:**
+- `base=50 cycles` and `cap=400` are judgment calls, not derived from evidence.
+  They could be calibrated from the observed unbind-to-invalidation lag similar
+  to how `watch_threshold_cycles` was derived from `median_interval`. Not urgent
+  since the current defaults are effective in practice.
+- High-`cd_blocks` runs (like seed=12 high-mutation) correctly gate most rebinds.
+  Low-mutation runs see near-zero blocks, meaning the gate is idle when not needed.
+
+---
+
+## Known approximations in predictive failure (drift toward priors)
+
+**Where it belongs:** `dreth/ledger.py` (record_drift, update_stability_horizon).
+
+**The 0.3 fraction in watch_threshold_cycles is a prior.**
+`watch_threshold_cycles = max(1, int(median_interval * 0.3))` uses 0.3 as the
+fraction of the median interval at which to enter watch state. This is a judgment
+call, not derived from the run's own evidence. The correct value depends on how much
+lead time the agent actually needs to re-audit a variable before it invalidates —
+which is measurable from the run: the lag between "watch state entered" and "actual
+invalidation" could be tracked and used to calibrate. For now 0.3 is a reasonable
+prior but it is a prior.
+
+**The `// 2` form sibling horizon shortening is a rule-of-thumb.**
+When a form instance is unbound (genuine mismatch), siblings get their stability
+horizon halved. The factor of 2 is arbitrary — not derived from observed sibling
+co-invalidation lag times. A more faithful version would track per-form "when one
+instance invalidates, how quickly do siblings follow?" and use the empirical lag as
+the shortening factor. This data isn't currently collected anywhere.
+
+**drift_cycles accumulates across structurally distinct fits.**
+The drift history for a variable slot includes oscillations from ALL its fit
+generations (before and after sig_changed resets the fit). If a variable undergoes a
+fundamental structural change (e.g., no-parent HIGH → parent-dependent FIRST), the
+old drift history from the prior regime may give a misleading median_interval. The
+horizon estimate will be off until enough new-regime drift events accumulate to
+dominate the median. This is a known approximation; the agent converges eventually
+but may over-trigger or under-trigger watch state during the transition window.
+
+---
+
+## Sentinel count does not adapt to watch state
+
+**Where it belongs:** `dreth/agent.py` (_install_var, select_var_sentinels path),
+`dreth/sentinels.py` (select_var_sentinels).
+
+**The gap:**
+`select_var_sentinels` uses a fixed `sentinel_count` and `sentinel_pool` regardless
+of the variable's predictive state. A variable in `in_watch_state=True` (expected to
+invalidate soon) should use a larger pool and/or count — more discriminating probes
+make the sentinel check more likely to catch the incoming structural change before it
+causes downstream invalidation cascades.
+
+Currently `sentinel_count` and `sentinel_pool` are fixed at `ChainedAgent` construction
+time. The watch state is computed but not fed back into sentinel selection. This is the
+attention-routing gap the predictive failure feature was meant to fill but doesn't yet.
+
+**What this would look like:**
+When `n.in_watch_state` is True at the point where sentinels are refreshed (inside
+`_install_var` after `if not n.sentinels and n.strong_observations >= 1:`), pass a
+larger pool/count to `select_var_sentinels`. The multiplier could be fixed (e.g. 2×)
+or derived from `1.0 / poisson_rate` relative to the run's overall mean drift rate.
+
+**Constraint:** This only fires at sentinel-refresh time (when sentinels are first
+selected or when a sig_changed resets them). It does not re-select sentinels for a
+currently-stable variable mid-run. That's a separate concern.
+
+---
+
+## Form as VarNethra — architectural unification ("nethra of nethras")
+
+**Where it belongs:** `dreth/forms.py` (Form dataclass), `dreth/ledger.py`,
+`dreth/v30_integration.py`.
+
+**The insight:**
+A Form IS a VarNethra at a higher abstraction level:
+- Form's "fit" = operator + arity (shared causal structure)
+- Form's "parents" = its instance bindings (the vars that instantiate it)
+- Form's "sentinels" = `sentinel_template` (currently populated but not part of any cycle)
+- Form's "envelope" = prediction variance across instances — NOT YET TRACKED
+- Form's "compressions" = form-level compressions — already implemented
+- Form's "drift detection" = `collapse_log` / `strong_observations` — partial
+
+This is not a distinct abstraction from VarNethra. It IS VarNethra, one level up. The
+separation is artificial: both represent causal hypotheses about shared structure, at
+different scales. Forms just have more than one "observation" at a time (N instances
+= N simultaneous observations of the same causal pattern).
+
+**What full unification would look like:**
+1. Form gets a `NoiseEnvelope` tracking prediction error across instances each cycle
+   (aggregate of all instance sentinel deltas). When the form's envelope is certified,
+   its sentinel_template is trustworthy.
+2. Form participates in the same drift detection as VarNethra — if form predictions
+   consistently deviate from observations across instances, the form itself is in watch
+   state. This is not the same as individual instance unbinds (which are already
+   tracked); it's the shared causal pattern going unstable.
+3. `strong_observations` already counts cycles without contradiction — this IS the form's
+   version of `n.strong_observations`. Needs to feed into form-level watch state.
+4. Form's "audit" = the `discover_forms` cycle, which already runs every 50 cycles.
+   With the envelope, this becomes evidence-driven: re-discover only when form's
+   envelope shows degradation.
+
+**Why this matters:**
+Once Form is a proper VarNethra, the A*-guided search below is natural — the form's
+envelope confidence is the heuristic that orders form hypotheses by trustworthiness.
+And form-level watch state propagates to ALL instances simultaneously, not just via
+the indirect "sibling horizon shortening" hack.
+
+**Prerequisite:** sentinel_template must be populated and validated (in progress).
+
+---
+
+## A*-guided form hypothesis testing (proactive, priority-ordered fitting)
+
+**Where it belongs:** `dreth/agent.py` (`_install_var`, `_try_form_hypothesis`).
+
+**The gap:**
+Currently: var needs audit → test all 50+ operator hypotheses → find best fit → bind
+to form afterward. The form is an afterthought.
+
+With sentinel_template in place, the correct order is:
+- Priority 1: Test existing form hypotheses (cheap — K probes per candidate form,
+  where K = len(sentinel_template))
+- Priority 2: Test operator hypotheses ordered by `strong_observations` (forms with
+  more evidence first)
+- Priority 3: Full enumeration if no form matches
+
+This is A* in hypothesis space: the heuristic is form confidence (strong_observations
+× instance_count). High-confidence forms are tested first. `fit_var`'s full enumeration
+is the fallback when the heuristic finds nothing.
+
+**Form-hypothesis shortcut:** implemented in the current plan (sentinel_template Part 2).
+The A* priority ordering is the upgrade: instead of iterating forms arbitrarily in
+`_try_form_hypothesis`, order by `form.strong_observations × form.instance_count`.
+Forms with many strong instances are the highest-confidence priors and should be tested
+first, failing fast if they don't match, without testing low-confidence forms at all.
+
+**Expected payoff:** In homogeneous worlds (many vars, same form), vars after the first
+few instances converge in O(K) interventions instead of O(intervention_budget). For
+nv=40 with 5 instances of FORM_0001, the 6th through 40th vars of that form each take
+K≈5 probe interventions instead of 200+. This is the "concurrent" convergence the
+user asked about — not all vars at once, but each subsequent var amortizes against the
+form's accumulated evidence.
+
+**Regime where it doesn't help:** heterogeneous worlds (each var unique), high-mutation
+environments where forms are invalidated before enough instances accumulate. In those
+cases, `_try_form_hypothesis` returns None quickly and falls through to full audit —
+no regression, just no speedup.
+
+---
+
+## Hierarchical forms (forms of forms)
+
+**Where it belongs:** `dreth/forms.py` (FormRegistry), eventually `dreth/ledger.py`.
+
+**The concept:**
+Once Form is a proper VarNethra, the same discovery machinery can operate on forms
+themselves. A "meta-form" is a recurring pattern in HOW forms relate to each other
+— a causal structure one level above the individual variable level. For example: if
+FORM_0001 (MEAN/arity=2) consistently has parent forms FORM_0002 and FORM_0003, that
+is itself a structural pattern worth encoding.
+
+This is not immediately actionable — it requires:
+1. Form as VarNethra (above)
+2. Enough form diversity in benchmark runs to see recurring meta-patterns
+3. A definition of "form identity" at the meta level
+
+**Near-term proxy:** the existing `instance_count × strong_observations` score is a
+crude version of this — it tells you which forms are the most universally-applicable
+causal patterns. Meta-forms would make this explicit as a learnable structure.
+
+**Not yet actionable.** Documented for architectural continuity.
+
+---
+
+## form_sibling_watches fires zero times in all benchmark runs
+
+**Where it belongs:** `dreth/v30_integration.py` (on_signature_change, Case 3).
+
+**The gap:**
+The form sibling horizon shortening (Part 3 of predictive failure) only triggers in
+Case 3 of `on_signature_change` — a genuine operator mismatch unbind (e.g., FIRST →
+HIGH). All observed unbinds in benchmark runs are Case 1 (parent binding changed,
+same operator) or "rebinding." Case 3 hasn't been observed, so `form_sibling_watches`
+is always 0.
+
+Case 1 unbinds also represent structural change worth propagating to siblings — if a
+var's parent structure changed significantly enough to break its form binding, that's
+evidence the causal graph shifted in a way that could affect other instances. Consider
+extending sibling notification to include Case 1 unbinds where `parents_changed` is
+True and the binding mismatch is large (e.g., parent set changed by more than one
+variable).
+
+Add first-class contextual tie/frontier tracking to VarNethra: when fit_var returns tied or near-tied candidates, do not discard them as noise or force a single winner unless probes actually separate them. Store the candidate constellation with scores, margin, context/regime key, collapse signature, and any known separating probes. Treat this as “operationally equivalent under current context,” not as trass: trass means target-irrelevant, while a tie means multiple explanations currently predict/control the same. Use the frontier to preserve state across tied churn, choose future probes that split the constellation when needed, and archive dormant alternatives when one candidate becomes decisively better.

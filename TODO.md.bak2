@@ -1,0 +1,235 @@
+# DRETH TODO — current state and execution order
+
+This TODO is source-of-truth oriented. Do not use `dreth/STATE.md` as authoritative until it is repaired or deleted.
+
+## Current state
+
+The project is an executable research prototype.
+
+Working spine:
+- `dreth/agent.py`: causal audit loop, sentinel cheap path, invalidation, promotion, compression discovery.
+- `dreth/fit.py`: hypothesis enumeration, probe selection, batched scoring, exact tie diagnostics.
+- `dreth/ledger.py`: `VarNethra`, status/role state, drift tracking, invalidation closure.
+- `dreth/forms.py` + `dreth/v30_integration.py`: v30 forms, form discovery, sentinel templates, health/recovery, co-occurrence recall.
+- `tests/test_fit_transition_boundaries.py`: fast pytest coverage.
+- `tests/test_regime_recall.py`: standalone receipt/stress harness, not normal pytest coverage.
+
+Partially implemented / scaffolded:
+- `TiedFrontier` tracking is fully wired: dataclass in `ledger.py`, fields on `VarNethra`, lifecycle management in `_install_var` (`_update_tied_frontier` / `_collapse_tied_frontier`), `near_tie_candidates` + `near_tie_context_key` in `FitDiagnostic`, `frontier_candidates` + `near_tie_margin` parameters threaded through `fit_var`. The tracking infrastructure is lifecycle-correct (clears on invalidation and structural reset, archives losers to `dormant_alternatives`). No consumer currently reads the frontier to influence decisions — probe bias and semantic suppression are both disabled (see P1 below).
+- Adaptive probe budget exists but is intentionally disabled because changing probe pool size perturbs probe selection / RNG trajectory.
+- Dormant partition is conservative by design: dormant vars still need sentinel checks because envelope deltas feed form signatures.
+- NN proposers train as diagnostics but are not active decision components.
+- Cold storage exists but should be treated as experimental until key serialization is made invertible.
+
+Stress baseline: `PASS=6  PARTIAL=1  SKIP=17  FAIL=0  total=24`
+
+Do not claim:
+- v28 mode is pure v28 while v30 forms are default-enabled.
+- `total_interventions` is a full intervention-observation counter.
+- NN proposers are operational.
+- `TiedFrontier` consumers are operational — tracking is live, but no decision path reads the frontier yet.
+- Tie cause can be read from hypothesis morphology alone — morphology (same-parent, same-operator, exact/near) describes candidate structure; cause (contextual equivalence, library-defect, under-probed) requires separating probes and regime-survival evidence.
+- `frontier_same_parent_churn` suppresses semantic_changed — it was implemented, found to perturb form discovery timing, and removed. Reconnect only after regime-survival gating is in place (P1.2/P1.5).
+
+## P0 — repair measurement before arguing speed
+
+### P0.1 Replace `total_interventions` with explicit counters
+
+Problem: `total_interventions` currently counts fit budgets and sentinel counts, but misses operation-role probes and form hypothesis probes. It therefore undercounts work and can over-credit forms.
+
+Add counters on `ChainedAgent`:
+
+```python
+self.fit_probe_calls = 0
+self.role_probe_calls = 0
+self.sentinel_probe_calls = 0
+self.form_probe_calls = 0
+self.compression_probe_calls = 0
+```
+
+Then make `total_interventions` either deprecated or a derived property:
+
+```python
+@property
+def total_probe_calls(self) -> int:
+    return (
+        self.fit_probe_calls
+        + self.role_probe_calls
+        + self.sentinel_probe_calls
+        + self.form_probe_calls
+        + self.compression_probe_calls
+    )
+```
+
+Count sites:
+- `_full_audit_var`: increment `fit_probe_calls` by actual `len(diag_dict["probes"])`, not by requested budget.
+- `_certify_operation_role`: increment `role_probe_calls` by every `predict_under_intervention` call.
+- sentinel checks: increment `sentinel_probe_calls` by actual sentinel checks executed.
+- `_check_form_hypothesis`: increment `form_probe_calls` per `predict_var_under_intervention` call.
+- compression discovery/checks: increment `compression_probe_calls` wherever world intervention calls are used.
+
+Acceptance:
+- Add a monkeypatch test that wraps `world.predict_under_intervention` and `world.predict_var_under_intervention`; assert derived total equals observed calls for at least one short CLI run.
+- Existing fast pytest passes.
+- Regime receipt remains non-FAIL.
+
+### P0.2 Fix mode semantics
+
+Problem: `--mode v28` can still attach v30 forms because forms are default-enabled.
+
+Choose one:
+- Make `--mode v28` disable v30 unless `--enable-forms` is explicitly passed.
+- Or rename/report it as `v28-core+forms` when forms are active.
+
+Acceptance:
+- CLI summary reports the active stack, not just the mode label.
+- One test or smoke command proves `--mode v28` has no v30 bundle by default if pure-v28 is chosen.
+
+## P1 — make TiedFrontier a first-class equivalence-frontier object
+
+Do not treat tie classification as causal classification. First implement tie morphology labels computed from candidate structure, then use separating probes and regime-survival evidence to infer tie cause. TiedFrontier should behave like a version-space/equivalence-frontier object: preserve competing candidates, expose disagreement regions for probe selection, delay collapse until equivalence survives relevant intervention/context regimes, and feed persistent validated equivalences — not raw near-ties — into form/function abstraction discovery.
+
+The invariant: ambiguity is maintained as a first-class object until an observation, intervention, proof, or cost rule justifies collapse or extraction. The failure mode to avoid is premature semantic collapse under the flattering name of structure discovery.
+
+The correct sequence:
+
+```
+tie observed
+→ store frontier
+→ label morphology: exact/near, same-parent/different-parent, same-operator/different-operator
+→ generate separating probes
+→ track survival across operational contexts/regimes
+→ only then classify cause: trass, contextual equivalence, duplicate handle,
+  library-defect, under-probed ambiguity, or abstraction candidate
+→ collapse/extract only after that gate
+```
+
+Cause cannot be read from morphology alone. Same parents + different operators does not cleanly imply FUNC_LIBRARY ambiguity — it may be contextual equivalence (the world is in a regime where both operators agree) or under-probed ambiguity (more probes would separate them). Cause classification requires probe evidence and regime-survival data.
+
+### P1.1 Tie morphology labels on TiedFrontier *(not yet built)*
+
+Add a computed field to `TiedFrontier` (or populate it in `_update_tied_frontier`) that labels the candidate set structurally:
+
+- `exact` vs `near`: whether all candidates score equal to best, or some are within margin but below.
+- `same_parent` vs `mixed_parent`: whether all candidates share the same parent tuple.
+- `same_operator` vs `mixed_operator`: whether all candidates share the same function name.
+
+These are pure structural labels — they describe what the candidates look like, not why they tie. They are the input to eventual cause inference, not the conclusion.
+
+Add `morphology: str` (or a small dataclass) to `TiedFrontier`. Compute in `_update_tied_frontier` from the candidate set.
+
+### P1.2 Separating probe generation and regime-survival gating *(blocked on P4.1)*
+
+This is the nearest operational path. Two parts:
+
+**Separating probes:** The commented-out frontier bias in `fit_var` selects probes that maximally split frontier candidates. Blocked on P4.1 (probe pool decoupling from selection). Once pool generation is decoupled from which probes are chosen, activate the bias and populate `diag["separating_probes"]` and a corresponding `FitDiagnostic` field.
+
+**Regime-survival gating for collapse:** The current `_collapse_tied_frontier` triggers when the score landscape narrows to one candidate in a single audit. This is premature — one audit's scores are not regime-survival evidence. Replace with a gated collapse:
+
+- Frontier survives while `stable_count < regime_survival_threshold` (proposed default: 5).
+- Frontier survives across at least N distinct `context_key` values (proposed: 2).
+- Only after both gates: if a single candidate has dominated across all recent audits, collapse and archive losers.
+- If the frontier narrows but gates not met: retain all prior candidates, reduce their scores, do not discard.
+
+This requires `stable_count` (already tracked) and a new `distinct_contexts_seen: int` field on `TiedFrontier`.
+
+### P1.3 Cause classification *(design required before implementation)*
+
+After morphology labels and separating probes exist, cause can be inferred from evidence:
+
+- Candidates survive many separating probes unchanged → under-probed ambiguity; schedule more targeted interventions.
+- Candidates agree across many distinct context_keys → contextual equivalence; one may be redundant (duplicate handle).
+- Same-operator different-parent candidates tie persistently → structural symmetry; inform form binding slots.
+- Different-operator same-parent candidates survive targeted probes → possible library-defect (neither operator is the true function); raise novelty or flag as abstraction candidate.
+- All candidates collapse to trass after role re-test → tie was among irrelevant hypotheses; discard frontier.
+
+Cause classification gates what happens next: contextual equivalence → collapse one candidate; library-defect → novelty; structural symmetry → form signal; under-probed → more probes. None of these should be inferred from morphology alone.
+
+### P1.4 Feed validated equivalences into abstraction discovery *(design required before implementation)*
+
+Only persistent, cause-classified ties feed into abstraction. Raw near-ties do not.
+
+Two distinct paths depending on cause:
+
+- **Structural symmetry (same-operator, different parents that are persistently interchangeable):** feed as binding-equivalence hints into the form system. This is the most tractable path — it fits the current form infrastructure's co-occurrence model.
+- **Library-defect (no operator in FUNC_LIBRARY separates the candidates under targeted probes):** raise as vocabulary novelty. Do not attempt to extract a new function until the novelty has been observed across multiple variables and regimes.
+
+Do not build the abstraction path until cause classification (P1.3) is in place. Feeding raw ties into form discovery produces noise, not signal.
+
+### P1.5 Semantic suppression for frontier churn *(removed, reconnect after P1.2)*
+
+`frontier_same_parent_churn` was implemented and removed because the near_tie_set was too large early in the run (dozens of candidates at cycle 200), making suppression too aggressive and perturbing form discovery timing. The `near_tie_set` variable is computed in `_install_var` and ready for reconnection.
+
+Reconnect only after P1.2 is in place: with regime-survival gating, the frontier is smaller and more stable before collapse is considered, making churn suppression safe. Gate suppression on `old_frontier.stable_count >= regime_survival_threshold`, not on raw frontier membership.
+
+### P1.6 Dormant alternative revival *(not yet built, after P1.3)*
+
+`n.dormant_alternatives` accumulates `(parents, func, last_score)` triples on collapse. Currently nothing reads them. Connect after cause classification exists — revival candidates should be tagged with their cause label so the re-audit knows whether to prioritize them.
+
+Intended uses: form recovery probe fallback; re-audit warm-start after invalidation; diagnostic display in `final_summary`.
+
+## P2 — put receipt/stress under normal test discipline
+
+Problem: `tests/test_regime_recall.py` is a standalone harness, not pytest coverage.
+
+Add either:
+- `tests/test_regime_recall_pytest.py` with one bounded smoke receipt, or
+- a pytest marker `@pytest.mark.slow` wrapper around selected receipt cases.
+
+Acceptance:
+- `python3 -m pytest -q` covers at least one regime-recall smoke path.
+- Slow/stress run remains manual:
+
+```bash
+python3 tests/test_regime_recall.py --stress
+```
+
+## P3 — make docs truthful
+
+### P3.1 Replace `dreth/STATE.md`
+
+Current file is obsolete. Replace with:
+- active modules
+- active CLI modes
+- what is intentionally disabled
+- what is scaffold only
+- validated commands
+
+### P3.2 Replace `run_flowchart.md`
+
+Use `run_flowchart_better.md` as the replacement. Keep it focused on current executable paths, not a historical narrative.
+
+## P4 — later, after P0/P1
+
+### P4.1 Adaptive budgets and probe pool decoupling
+
+Do not activate raw budget scaling yet. First decouple probe selection randomness from budget size. This unblocks both `_adaptive_probe_budget` and the frontier probe bias (P1.1).
+
+Safer route:
+- generate a fixed candidate pool independent of budget
+- rank pool by discrimination (with or without frontier/adaptive bonus)
+- take top K according to adaptive budget
+- keep RNG stream stable across K changes
+
+Acceptance:
+- Same seed + same hidden world + different budget policy changes only number of probes, not unrelated world/form trajectory.
+- Stress baseline preserved with adaptive budget enabled.
+
+### P4.2 NN proposers
+
+Current state: passive diagnostics.
+
+Either:
+- wire scores into audit priority / role testing / gate candidate ordering behind an explicit flag, or
+- rename as diagnostics and remove active-sounding claims.
+
+### P4.3 Form-as-VarNethra
+
+Only after measurement is clean.
+
+Minimal next step:
+- give `Form` an envelope over instance/template prediction deltas
+- track form-level watch state
+- propagate form watch state to instances
+
+Do not build forms-of-forms until form-level envelope is real.
