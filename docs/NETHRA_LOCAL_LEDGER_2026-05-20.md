@@ -22,6 +22,48 @@ Nethra is also not morphology clustering. A group of variables that look structu
 
 Nethra is not proactive risk management. A reachable but unused handle is not a problem merely because it might be stale. Authority changes when use, failure, or a directly active interface makes it relevant.
 
+Nethra is not a raw-feature ledger. It should not attempt to map every failure surface over pixels, tokens, activations, or all variables. Existing models and tools — CNNs, transformers, simulators, planners, policies, retrieval systems, or symbolic modules — can themselves be treated as handles. Dreth governs when those handles are trusted, when their failure earns decomposition, and when a composite/interface nethra is formed.
+
+## Anti-mistake guardrail
+
+Repeated review mistakes came from importing a managerial or verification prior into a failure-earned architecture.
+
+Wrong prior:
+
+```text
+something might be stale, costly, misleading, high-dimensional, or dangerous
+therefore proactively inspect, prune, invalidate, recertify, or globally manage it
+```
+
+Nethra prior:
+
+```text
+use the reached handle if it is not specifically excluded
+if use succeeds or no consequential failure is observed, do nothing
+if use fails past the operation threshold, repair/factorize/compose locally
+if repeated local patches reveal shared structure, consolidate offline
+```
+
+The mistake was made because common adjacent frames point in the wrong direction:
+
+```text
+ledger        -> ATMS-style bookkeeping explosion
+shortcut      -> EBL utility collapse
+hierarchy     -> predictive-coding / HRL comparison
+diagnosis     -> MBD completeness assumptions
+failure       -> proactive safety/verification reflex
+stale handle  -> external garbage-collection or cleanup reflex
+scale         -> raw-feature dimensionality objection
+```
+
+Each frame names a real historical failure mode, but it becomes wrong when applied before checking the nethra invariant. The required check is:
+
+```text
+What observed failure, sentinel miss, contradiction, active dependency/interface event, or repeated local patch earned this update?
+```
+
+If the answer is none, do not add a proactive invalidation, pruning, recertification, or cleanup rule. Treat the concern as speculation, not architecture.
+
 ## Lifecycle
 
 Normal path:
@@ -63,6 +105,20 @@ The important shift is that nethra is both:
 Nethra-of-nethra is therefore not just compression. It is also fault-localization topology.
 
 The parent nethra does not need a complete internal decomposition before failure. If the parent works, no internal accounting is needed. If it fails, the failure earns the cost of decomposition. Newly created subnethras then reduce future repair cost.
+
+## Scaling clarification
+
+Dreth does not scale by ledgering more raw detail. It scales only if consequential failures compress into reusable handles.
+
+A large learned model can be a nethra. A specialist module can be a nethra. A composed interface between tools can be a nethra. The ledger should govern authority at the handle/interface level, not replace the underlying computation.
+
+The real scaling question is:
+
+```text
+Do failures compress into reusable handles faster than they fragment into active exceptions?
+```
+
+If a failure is random, non-recurring, non-compressible, or below consequence threshold, it should not become an active structure. If local failures recur and share a pattern, that recurrence earns a higher nethra. Fragmentation is a problem only when non-compressible exceptions remain active and keep consuming search/repair attention.
 
 ## Granularity
 
@@ -121,11 +177,28 @@ Certification means earned shortcut authority for an operation in the tested reg
 
 If x1 earned a trass skip cert while x0 was excluded from the tested target set, x0 later becoming tareth does not automatically make x1 wrong. x1 keeps firing. If x1 now fails, the failure earns repair. Proactive staling merely because a role changed is positive-ledger behavior unless an active interface says that role transition itself is a failure condition.
 
+## Reachability, authority, and cleanup
+
+Reachability is not the same as active authority.
+
+A nethra can be reachable because a parent, log, old cert, index, or archive references it. That does not require proactive cleanup. It only matters operationally when the nethra is activated for shortcutting, routing, repair, composition, or consolidation.
+
+Correct handling:
+
+```text
+unreferenced handle -> ordinary garbage-collection candidate
+referenced but not activated -> no operational issue
+activated and succeeds -> keep authority
+activated and fails -> repair, demote, exclude, factorize, or compose as earned by the failure
+```
+
+Do not demote or prune a nethra because an external evaluator predicts it might be stale. Authority changes through use, sentinel failure, contradiction, active dependency/interface evidence, or repeated failed repairs.
+
 ## Forms
 
 Forms, as morphology buckets, are wrong as an architectural primitive.
 
-A form that groups variables because they share operator, arity, or behavioral signature is not a certified nethra-of-nethra. It is pattern grouping. It may provide useful heuristics, but it should not carry nethra authority.
+A form that groups variables because they share operator, arity, or behavioral signature is not a certified nethra-of-nethras. It is pattern grouping. It may provide useful heuristics, but it should not carry nethra authority.
 
 The replacement primitive is CompositeNethra or an equivalent earned composite handle, created by failure, interaction, recurring local patches, or tested interchangeability — not by resemblance alone.
 
@@ -167,5 +240,6 @@ factorize lazily when the failed nethra lacks useful children
 patch locally before abstracting
 create composite nethras for relational failures
 consolidate repeated local patches offline
+treat tools/models as handles, not rivals
 judge by prediction/control failure and utility, not by external correctness
 ```
