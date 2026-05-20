@@ -39,8 +39,11 @@ from __future__ import annotations
 # TARETH / TRASS: Provisional verdicts from scope-specific substitution tests.
 #   trass  — substituting the distinction leaves monitored targets unchanged
 #   tareth — substitution changes monitored targets; a concrete witness exists
-#   Neither verdict is permanent. World drift, scope change, or sentinel failure
-#   revokes certification. The verdict belongs to the scope, not the hypothesis.
+#   Certs fire by default; only observed failure or an active dependency event
+#   earns revocation. Sentinel failure and downstream contradiction revoke cert
+#   authority. Structural or scope changes revoke only when they are themselves
+#   dependency events (parent set changed, contradicting evidence in expanded
+#   context). The verdict belongs to the scope, not the hypothesis.
 #
 # FALSE-TRASS: Two locally-trass nethras can jointly be tareth. Composition
 #   requires a joint re-test. Local certification does not propagate upward.
@@ -108,8 +111,11 @@ Authority = Literal["none", "prefer", "guarded_reuse", "skip", "propagate"]
 class NethraCertificate:
     """A certified claim scoped to a named operation. Carries the context under
     which it was tested, the scope of what was checked, and the evidence counts.
-    Role and authority are provisional — invalidated by scope change or evidence
-    class change. See DRETH_TAXONOMY.md for full semantics."""
+    Role and authority are provisional — the cert fires by default; invalidation
+    requires observed failure or an active dependency event (parent set changed,
+    sentinel contradiction, composite revoked). Structural context alone (e.g.
+    new variable visible) does not revoke unless it is itself a dependency event.
+    See DRETH_TAXONOMY.md for full semantics."""
     operation: Operation
     role: Role
     authority: Authority
@@ -485,7 +491,8 @@ class VarNethra:
             self.certificates.pop("compress", None)
             self.certificates.pop("audit", None)
             if "skip" in self.certificates:
-                # Tested before, but parent context changed — evidence is stale
+                # Parent change is an active dependency event — cert was scoped
+                # to the old parent set; the old evidence no longer applies.
                 self.certificates["skip"] = dataclasses.replace(
                     self.certificates["skip"], role="untested"
                 )
@@ -493,7 +500,7 @@ class VarNethra:
             self.certificates.pop("audit", None)
             self.certificates.pop("compress", None)
             if "skip" in self.certificates:
-                # Tested before, but world changed or composition contradicted — stale
+                # Observed failure (sentinel) or composite contradiction earns revocation.
                 self.certificates["skip"] = dataclasses.replace(
                     self.certificates["skip"], role="untested"
                 )

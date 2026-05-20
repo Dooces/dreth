@@ -45,8 +45,11 @@ from __future__ import annotations
 # TARETH / TRASS: Provisional verdicts from scope-specific substitution tests.
 #   trass  — substituting the distinction leaves monitored targets unchanged
 #   tareth — substitution changes monitored targets; a concrete witness exists
-#   Neither verdict is permanent. World drift, scope change, or sentinel failure
-#   revokes certification. The verdict belongs to the scope, not the hypothesis.
+#   Certs fire by default; only observed failure or an active dependency event
+#   earns revocation. Sentinel failure and downstream contradiction revoke cert
+#   authority. Structural or scope changes revoke only when they are themselves
+#   dependency events (parent set changed, contradicting evidence in expanded
+#   context). The verdict belongs to the scope, not the hypothesis.
 #
 # FALSE-TRASS: Two locally-trass nethras can jointly be tareth. Composition
 #   requires a joint re-test. Local certification does not propagate upward.
