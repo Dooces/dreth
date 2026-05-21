@@ -1508,12 +1508,18 @@ class ChainedAgent:
 
     def _maybe_demote(self, var: int, cycle: int) -> None:
         """Move var into the dormant partition if it meets stability criteria.
-        Trass vars demote unconditionally. Non-trass require certified+stable
-        with no active watch state, weak streak, or defer streak."""
+        Trass and noise_floor demote unconditionally. Non-trass/non-noise_floor
+        require certified+stable with no active watch state, weak streak, or
+        defer streak."""
         if self._live_set is None:
             return
         n = self.ledger.vars[var]
         if n.role_for("skip") == "trass" or n.status == "trass":
+            self._live_set.discard(var)
+            return
+        if n.role_for("skip") == "noise_floor":
+            # Best fit accepted at noise floor — park immediately. Periodic sweep
+            # monitors at 3×ε so genuine changes still trigger re-audit.
             self._live_set.discard(var)
             return
         min_cert_age = self._dormant_recheck_period * 2
@@ -1614,10 +1620,13 @@ class ChainedAgent:
         cycle = mutation.cycle
         self._uncertain_this_cycle.clear()
 
-        # Dormant partition maintenance.
-        # No periodic sweep needed: the first-pass loop runs sentinel checks
-        # for ALL vars (including dormant) every cycle. Sentinel failure
-        # promotes dormant vars back to live immediately, not on a timer.
+        # Dormant partition maintenance: periodic sweep checks sentinels for
+        # vars removed from the hot pass. Noise_floor vars use 3×ε threshold
+        # (set in check_var_sentinels_with_envelope); regular dormant vars use 1×ε.
+        if self._live_set is not None:
+            if cycle - self._last_dormant_recheck >= self._dormant_recheck_period:
+                self._dormant_safety_sweep(cycle)
+                self._last_dormant_recheck = cycle
 
         truth_novelty = any(
             self.world.funcs[i] == "SIN"
@@ -1661,13 +1670,10 @@ class ChainedAgent:
                         and _v not in self._live_set):
                     self._live_set.add(_v)
 
-        # First-pass loop runs over ALL vars in topological order. Dormant
-        # vars still need their sentinel checks each cycle so that:
-        #   (a) envelopes stay current for form-discovery behavior signatures
-        #   (b) world changes trigger re-audit without waiting for the sweep
-        # The dormant partition blocks dormant vars from PROACTIVE audit
-        # queueing (e.g. watch-parent propagation) but does NOT skip the
-        # sentinel check itself — that would freeze envelopes.
+        # First-pass loop runs in topological order over LIVE vars only.
+        # Dormant vars (removed from _live_set by _maybe_demote) are skipped
+        # here and checked by _dormant_safety_sweep every _dormant_recheck_period
+        # cycles. noise_floor vars use 3×ε in the sweep; regular dormant vars use 1×ε.
         # Build open-novelty set once per cycle (used in needs_audit rate-limit).
         _novelty_vars: Set[int] = {
             nv.affected_var for nv in self.ledger.novelty if nv.status == "open"
@@ -1715,6 +1721,12 @@ class ChainedAgent:
                 skipped.append(var)
                 if self._live_set is not None:
                     self._live_set.discard(var)
+                continue
+
+            # Dormant gate: vars not in the live set are handled by the periodic
+            # sweep. Skip here — sentinel and audit will fire when the sweep
+            # detects a genuine deviation.
+            if self._live_set is not None and var not in self._live_set:
                 continue
 
             # Proposed compression trial: for each compression not yet promoted,
