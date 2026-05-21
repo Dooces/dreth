@@ -141,6 +141,12 @@ def check_var_sentinels_with_envelope(
     total = len(n.sentinels)
     deviations = []
     tol_fallback = DEFAULT_TOLERANCE
+    # noise_floor vars: widen re-trigger threshold. The 5% statistical tail of
+    # a certified noise floor should not count as signal. Only fail on
+    # deviations that exceed the noise floor by a meaningful margin (3×ε).
+    _base_eps = n.envelope.certified_eps if n.envelope.certified_eps > 0 else tol_fallback
+    _NOISE_FLOOR_K = 3.0
+    effective_tol = _NOISE_FLOOR_K * _base_eps if n.role_for("skip") == "noise_floor" else _base_eps
     for iv, _stale_exp in zip(n.sentinels, n.expected_outcomes):
         expected = predict_var(n.parents, n.func, world.state, iv[0], iv[1], world.visible_count)
         # Only compute the target var's output. The previous full-state path
@@ -148,8 +154,7 @@ def check_var_sentinels_with_envelope(
         actual = world.predict_var_under_intervention(var, iv[0], iv[1])
         delta = abs(actual - expected)
         deviations.append(delta)
-        tol = n.envelope.certified_eps if n.envelope.certified_eps > 0 else tol_fallback
-        if delta <= tol:
+        if delta <= effective_tol:
             score += 1
         n.envelope.add_delta(delta, cycle)
 

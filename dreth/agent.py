@@ -1672,6 +1672,11 @@ class ChainedAgent:
         _novelty_vars: Set[int] = {
             nv.affected_var for nv in self.ledger.novelty if nv.status == "open"
         }
+        # Audit rate-limit constants (used in needs_audit gate and cert issuance).
+        _BACKOFF_THRESHOLD = 4
+        _BACKOFF_INTERVAL  = 8
+        _NOVELTY_INTERVAL  = 5
+        _STABLE_THRESHOLD  = 3
 
         for var in topo_order:
             n = self.ledger.vars[var]
@@ -1885,10 +1890,6 @@ class ChainedAgent:
             # interventions without converging. Rate-limit to once per
             # NOVELTY_INTERVAL cycles. Invariant 7: threshold policy for
             # high-cost domains.
-            _BACKOFF_THRESHOLD  = 4
-            _BACKOFF_INTERVAL   = 8
-            _NOVELTY_INTERVAL   = 5
-            _STABLE_THRESHOLD   = 3
             if n.audit_stable_count >= _STABLE_THRESHOLD:
                 continue  # Case C: envelope stable — best fit accepted at noise floor; sentinel re-opens
             if (n.consecutive_sentinel_failures >= _BACKOFF_THRESHOLD
@@ -1955,6 +1956,28 @@ class ChainedAgent:
                     _env_updated = _n.envelope.maybe_certify(cycle)
                     if not _env_updated and not _n.envelope.envelope_failing():
                         _n.audit_stable_count += 1
+                        if _n.audit_stable_count == _STABLE_THRESHOLD:
+                            # First time reaching the threshold: issue noise_floor cert.
+                            # Carries ε and audit count as evidence; sentinel re-opens
+                            # only on deviation > k×ε (genuine change, not tail noise).
+                            _prev = _n.certificates.get("skip")
+                            _n.certificates["skip"] = NethraCertificate(
+                                operation="skip",
+                                role="noise_floor",
+                                authority="guarded_reuse",
+                                context_parents=tuple(_n.parents),
+                                context_visible=self.world.visible_count,
+                                context_cycle=cycle,
+                                targets=_prev.targets if _prev else (),
+                                substitutions_tested=("envelope_stable",),
+                                changes=_n.audit_stable_count,
+                                trials=_n.full_audits,
+                                earned_by="envelope_stable",
+                            )
+                            self.ledger.event_log.append(
+                                f"c{cycle}: x{var} noise_floor certified "
+                                f"(ε={_n.envelope.certified_eps:.3f} audits={_n.full_audits})"
+                            )
                     else:
                         _n.audit_stable_count = 0
             if self._maybe_novelty(var, score, second, cycle, sig_changed=sig_changed):

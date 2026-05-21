@@ -95,6 +95,8 @@ class ArchMetrics:
     vars_open_novelty: int = 0
     # Envelope-stable vars: vars that exited the audit queue via Case C
     vars_envelope_stable: int = 0
+    # noise_floor certified: vars that earned the noise_floor cert
+    vars_noise_floor: int = 0
 
 
 @dataclass
@@ -219,6 +221,9 @@ def _extract_arch_metrics(agent: ChainedAgent, world: CausalWorld) -> ArchMetric
     m.vars_envelope_stable = sum(
         1 for n in visible if n.audit_stable_count >= _STABLE_THRESHOLD
     )
+    m.vars_noise_floor = sum(
+        1 for n in visible if n.role_for("skip") == "noise_floor"
+    )
 
     # ── frontier collapse guard events ───────────────────────────────────────
     for e in agent.ledger.event_log:
@@ -320,7 +325,7 @@ def _fmt_row(r: RunResult) -> str:
         f"| skip={skip:6s} sent={r.sentinel_skips:5d} comp={r.compression_skips:4d} "
         f"| iv={r.interventions:6d} auds={r.full_audits:5d} miss={r.true_missing:3d} "
         f"| rc={rca:4d} ac={aca:3d} dorm={dorm:3d} rev={revoked:3d} "
-        f"fc={fc:3d}/{fc+fclr:<3d} bkf={bkf:2d} nov={r.arch.vars_open_novelty:2d} stb={r.arch.vars_envelope_stable:2d} "
+        f"fc={fc:3d}/{fc+fclr:<3d} bkf={bkf:2d} nov={r.arch.vars_open_novelty:2d} stb={r.arch.vars_envelope_stable:2d} nf={r.arch.vars_noise_floor:2d} "
         f"| {viols}"
     )
 
@@ -502,6 +507,7 @@ def main():
     print("  rev=revocations(certs with revoked_by set)")
     print("  fc/tot=frontier_collapses / (collapses+clears)")
     print("  bkf=vars in sentinel backoff  nov=vars with open novelty  stb=vars in Case C (envelope-stable exit)")
+    print("  nf=noise_floor certified (best-fit accepted at ε; sentinel re-triggers only at 3×ε)")
     print("  inv: ok=all invariants pass  *N=N violations")
     print("  I1 earned_by  I2 audit-role  I3 dormant-type  I4 revoked_by  I5 route-owned")
 

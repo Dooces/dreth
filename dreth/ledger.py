@@ -105,7 +105,7 @@ Operation = Literal["skip", "route", "compress", "audit", "reexamine"]
 # tareth:      tested; substitution propagates; distinction is load-bearing
 # trass:       tested; substitution does not propagate; collapse allowed
 # false_trass: locally trass but jointly tareth with another var; composition invalidated
-Role = Literal["tareth", "trass", "untested", "false_trass", "reusable", "not_reusable"]
+Role = Literal["tareth", "trass", "untested", "false_trass", "reusable", "not_reusable", "noise_floor"]
 # "reusable" / "not_reusable" are used by the audit cert only (invariant 11 in spec:
 # trass/tareth vocabulary is wrong for audit; see _install_var audit cert write).
 Authority = Literal["none", "prefer", "guarded_reuse", "skip", "propagate"]
@@ -602,7 +602,14 @@ class VarNethra:
         if event in ("sentinel_failure", "false_trass_contradiction"):
             self.certificates.pop("audit", None)
             self.certificates.pop("compress", None)
-            self.audit_stable_count = 0
+            # Reset audit_stable_count only for noise_floor vars. A failure at
+            # k×ε is genuine signal for an already-stable var and warrants a
+            # re-audit. For normal tareth vars, don't reset — the count must
+            # accumulate across sentinel failures to reach the noise_floor
+            # threshold (every audit is preceded by a sentinel failure, so
+            # resetting here would prevent the count from ever reaching 3).
+            if self.role_for("skip") == "noise_floor":
+                self.audit_stable_count = 0
             revoked_by = "sentinel_failure" if event == "sentinel_failure" else "composite_failure"
             if "skip" in self.certificates:
                 # Observed failure (sentinel) or composite contradiction earns revocation.
@@ -619,9 +626,10 @@ class VarNethra:
     @property
     def authoritative(self) -> bool:
         """True if this variable can run cheap-path (sentinel skip) right now.
-        Requires: tareth for skip, sentinels attached, status not collapsed."""
+        Includes noise_floor vars: they still need sentinel monitoring, just
+        with a wider re-trigger threshold (k×ε instead of ε)."""
         return (
-            self.role_for("skip") == "tareth"
+            self.role_for("skip") in ("tareth", "noise_floor")
             and bool(self.sentinels)
             and self.status in ("certified", "proposed")
         )
