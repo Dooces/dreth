@@ -38,7 +38,7 @@ import time
 from collections import Counter
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Tuple
 
 sys.path.insert(0, __file__.replace("/scripts/batch_run.py", ""))
 
@@ -106,13 +106,16 @@ class ArchMetrics:
 
 @dataclass
 class BaselineMetrics:
-    """Metrics from the dirty-closure baseline agent."""
+    """Metrics from the sparse_cached_refit baseline agent."""
     elapsed: float = 0.0
-    skip_count: int = 0          # vars not refit this cycle (no sentinel failure in closure)
+    skip_count: int = 0          # vars not refit this cycle (residual window below threshold)
     full_audits: int = 0         # total refits
-    interventions: int = 0       # total probe calls (fit + sentinel)
-    sentinel_fails: int = 0      # times a sentinel detected a deviation
+    interventions: int = 0       # total probe calls (screening + refit interventions)
+    sentinel_fails: int = 0      # times residual window triggered a refit
+    candidate_refreshes: int = 0 # times candidate parent set was re-screened
     wrong_fits: int = 0          # vars with wrong final parents at end of run
+    wrong_at_20: List[int] = field(default_factory=list)  # wrong-parent var IDs at 20% snap
+    wrong_at_end: List[int] = field(default_factory=list) # wrong-parent var IDs at end
     ok: bool = True
     error: str = ""
 
@@ -143,163 +146,199 @@ class RunResult:
     violations: List[str] = field(default_factory=list)
     # Baseline comparison (populated only when --compare is active)
     baseline: Optional[BaselineMetrics] = None
+    # Per-variable overlap diagnostics (populated for all runs)
+    snap_cycle: int = 0
+    dreth_wrong_at_20: List[int] = field(default_factory=list)
+    dreth_wrong_at_end: List[int] = field(default_factory=list)
 
 
-# ── dirty-closure baseline agent ───────────────────────────────────────────────
+# ── sparse-cached-refit baseline agent ────────────────────────────────────────
 
-class BaselineAgent:
-    """Dirty-closure cached refit baseline.
+@dataclass
+class SparseVarState:
+    candidate_parents: List[int]
+    parents: Tuple[int, ...]
+    func: str
+    residuals: List[float]          # rolling window, capped at VALIDATION_WINDOW
+    last_refit_cycle: int
+    refit_count: int
+    candidate_refresh_count: int
+    last_refresh_cycle: int
 
-    Fit each variable; cache result. Each cycle:
-      1. Run sentinel probes for every cached variable.
-      2. On failure: mark variable dirty + full transitive descendant closure.
-      3. Refit entire dirty closure in topological order.
-      4. Refresh sentinels for refitted vars.
+
+class SparseCachedRefitAgent:
+    """Sparse-cached refit baseline (K=10, window=8, threshold=3).
+
+    Per variable: maintains a top-K candidate parent set screened by
+    intervention sensitivity (|predict(x=0.9) - predict(x=0.1)|). Each cycle,
+    reads current world state to compute a residual. If the rolling window
+    accumulates >= failure_threshold failures, refits using the candidate set.
+    If still poor, refreshes the candidate set (rate-limited by
+    candidate_refresh_interval) and refits again.
 
     No nethra certs. No route-trass pruning. No composite nethras.
-    No operation-indexed authority. Available parents = all other vars.
-
-    This is the realistic comparator: it localises failure to the dirty
-    closure but always cascades to all believed descendants — the exact
-    behavior that route-trass pruning skips.
     """
 
-    _DEFAULT_TOL = 0.1
+    K: int = 10
+    VALIDATION_WINDOW: int = 8
+    FAILURE_THRESHOLD: int = 3
+    CANDIDATE_REFRESH_INTERVAL: int = 100
+    _DEFAULT_TOL: float = 0.1
 
     def __init__(
         self,
         world: CausalWorld,
         rng: random.Random,
         intervention_budget: int = 10,
-        sentinel_count: int = 5,
+        sentinel_count: int = 5,    # noqa: unused, kept for call-site symmetry
     ):
         self.world = world
         self.rng = rng
         self.intervention_budget = intervention_budget
-        self.sentinel_count = sentinel_count
         self.tolerance = self._DEFAULT_TOL
 
-        # fit_cache[var] = (parents_tuple, func_str)
-        self.fit_cache: Dict[int, Tuple[Tuple[int, ...], str]] = {}
-        # sentinels[var] = list of (iv_var, iv_val) pairs
-        self.sentinels: Dict[int, List[Tuple[int, float]]] = {}
+        self._state: Dict[int, SparseVarState] = {}
+        self._cycle: int = 0
 
         self.skip_count: int = 0
         self.full_audit_count: int = 0
         self.total_interventions: int = 0
-        self.sentinel_fail_count: int = 0
+        self.sentinel_fail_count: int = 0   # refit-trigger count (API symmetry)
+        self.candidate_refresh_count: int = 0
 
     # ── internal ──────────────────────────────────────────────────────────────
 
-    def _fit_one(self, var: int) -> None:
+    def _screen_candidates(self, y: int) -> List[int]:
+        """Score each x != y by |predict_y(x=0.9) - predict_y(x=0.1)|,
+        return top min(K, n-1) by sensitivity. Costs 2*(n-1) interventions."""
+        n = self.world.visible_count
+        scores: List[Tuple[float, int]] = []
+        for x in range(n):
+            if x == y:
+                continue
+            lo = self.world.predict_var_under_intervention(y, x, 0.1)
+            hi = self.world.predict_var_under_intervention(y, x, 0.9)
+            self.total_interventions += 2
+            scores.append((abs(hi - lo), x))
+        scores.sort(reverse=True)
+        return [x for _, x in scores[: self.K]]
+
+    def _predict(self, y: int) -> float:
+        vs = self._state[y]
+        fn = FUNC_LIBRARY.get(vs.func)
+        if fn is None or not vs.parents:
+            return 0.0
+        try:
+            return fn([self.world.state[p] for p in vs.parents])
+        except Exception:
+            return 0.0
+
+    def _do_refit(self, y: int, candidates: List[int]) -> None:
+        available = set(candidates) if candidates else None
         parents, func, _, _ = fit_var(
-            var, self.world, self.rng,
+            y, self.world, self.rng,
             self.intervention_budget, self.tolerance,
-            available_parents=None,  # no restriction
+            available_parents=available,
         )
-        self.fit_cache[var] = (parents, func)
         self.total_interventions += self.intervention_budget
         self.full_audit_count += 1
-        # Random sentinel probes (no discrimination scoring)
-        n_vars = self.world.visible_count
-        pool = [(self.rng.randint(0, n_vars - 1), self.rng.random())
-                for _ in range(self.sentinel_count)]
-        self.sentinels[var] = pool
+        vs = self._state[y]
+        vs.parents = tuple(parents)
+        vs.func = func
+        vs.last_refit_cycle = self._cycle
+        vs.refit_count += 1
 
-    def _check_sentinels(self, var: int) -> bool:
-        """Returns True if all sentinel probes pass. Counts interventions."""
-        parents, func = self.fit_cache[var]
-        fn = FUNC_LIBRARY.get(func)
-        if fn is None:
-            return True
-        n_vars = self.world.visible_count
-        for iv_var, iv_val in self.sentinels.get(var, []):
-            forced = [iv_val if i == iv_var else self.world.state[i]
-                      for i in range(n_vars)]
-            expected = fn([forced[p] for p in parents])
-            actual = self.world.predict_var_under_intervention(var, iv_var, iv_val)
-            self.total_interventions += 1
-            if abs(actual - expected) > self.tolerance:
-                return False
-        return True
+    def _current_residual(self, y: int) -> float:
+        return abs(self.world.state[y] - self._predict(y))
 
-    def _dependents(self, var: int) -> Set[int]:
-        n_vars = self.world.visible_count
-        return {
-            v for v in range(n_vars)
-            if v in self.fit_cache and var in self.fit_cache[v][0]
-        }
+    def _is_poor(self, y: int) -> bool:
+        vs = self._state[y]
+        window = vs.residuals[-self.VALIDATION_WINDOW:]
+        return sum(1 for r in window if r > self.tolerance) >= self.FAILURE_THRESHOLD
 
-    def _full_closure(self, dirty: Set[int]) -> Set[int]:
-        """Transitive closure of dirty — no pruning, all believed descendants."""
-        out = set(dirty)
-        frontier = set(dirty)
-        while frontier:
-            new_front: Set[int] = set()
-            for v in frontier:
-                for d in self._dependents(v):
-                    if d not in out:
-                        out.add(d)
-                        new_front.add(d)
-            frontier = new_front
-        return out
-
-    def _refit_closure(self, closure: Set[int]) -> None:
-        """Refit vars in closure. World DAG has lower-index parents, so
-        iterating 0..n_vars is topologically ordered."""
-        for var in range(self.world.visible_count):
-            if var in closure:
-                self._fit_one(var)
+    def _init_var(self, y: int) -> None:
+        candidates = self._screen_candidates(y)
+        self._state[y] = SparseVarState(
+            candidate_parents=candidates,
+            parents=(),
+            func="",
+            residuals=[],
+            last_refit_cycle=0,
+            refit_count=0,
+            candidate_refresh_count=0,
+            last_refresh_cycle=-self.CANDIDATE_REFRESH_INTERVAL,
+        )
+        self._do_refit(y, candidates)
 
     # ── public ────────────────────────────────────────────────────────────────
 
     def initialize(self) -> None:
-        for var in range(self.world.visible_count):
-            self._fit_one(var)
+        for y in range(self.world.visible_count):
+            self._init_var(y)
 
     def on_variable_revealed(self, var: int) -> None:
-        """Fit new var; check existing vars' sentinels since new var is a
-        candidate parent for all — those that fail cascade to their closure."""
-        self._fit_one(var)
-        dirty: Set[int] = set()
-        for v in range(self.world.visible_count):
-            if v == var:
+        """Init new var; rescreen all existing vars (new var is a parent candidate)."""
+        self._init_var(var)
+        for y in range(self.world.visible_count):
+            if y == var or y not in self._state:
                 continue
-            if v not in self.fit_cache:
-                dirty.add(v)
-            elif not self._check_sentinels(v):
-                self.sentinel_fail_count += 1
-                dirty.add(v)
-        if dirty:
-            closure = self._full_closure(dirty)
-            self._refit_closure(closure)
+            candidates = self._screen_candidates(y)
+            vs = self._state[y]
+            vs.candidate_parents = candidates
+            vs.candidate_refresh_count += 1
+            vs.last_refresh_cycle = self._cycle
+            self.candidate_refresh_count += 1
+            self._do_refit(y, candidates)
+            vs.residuals.clear()
 
     def run_cycle(self) -> None:
-        n_vars = self.world.visible_count
-        dirty: Set[int] = set()
-        for var in range(n_vars):
-            if var not in self.fit_cache:
-                dirty.add(var)
-            elif not self._check_sentinels(var):
-                self.sentinel_fail_count += 1
-                dirty.add(var)
+        self._cycle += 1
+        for y in range(self.world.visible_count):
+            if y not in self._state:
+                self._init_var(y)
+                continue
 
-        closure = self._full_closure(dirty) if dirty else set()
-        self.skip_count += n_vars - len(closure)
-        self._refit_closure(closure)
+            vs = self._state[y]
+            residual = self._current_residual(y)
+            vs.residuals.append(residual)
+            if len(vs.residuals) > self.VALIDATION_WINDOW:
+                vs.residuals = vs.residuals[-self.VALIDATION_WINDOW:]
+
+            if not self._is_poor(y):
+                self.skip_count += 1
+                continue
+
+            # Residual window has enough failures — refit with candidate set
+            self.sentinel_fail_count += 1
+            self._do_refit(y, vs.candidate_parents)
+            new_residual = self._current_residual(y)
+            vs.residuals = [new_residual]
+
+            if new_residual > self.tolerance:
+                # Still poor — refresh candidates if not rate-limited
+                if self._cycle - vs.last_refresh_cycle >= self.CANDIDATE_REFRESH_INTERVAL:
+                    new_candidates = self._screen_candidates(y)
+                    vs.candidate_parents = new_candidates
+                    vs.candidate_refresh_count += 1
+                    vs.last_refresh_cycle = self._cycle
+                    self.candidate_refresh_count += 1
+                    self._do_refit(y, new_candidates)
+                    vs.residuals = [self._current_residual(y)]
 
     def wrong_fits(self) -> int:
-        """Count vars whose cached parents differ from world's true parents."""
-        n_vars = self.world.visible_count
         return sum(
-            1 for var in range(n_vars)
-            if set(self.fit_cache.get(var, ((),))[0]) != set(self.world.parents[var])
+            1 for y in range(self.world.visible_count)
+            if y in self._state
+            and set(self._state[y].parents) != set(self.world.parents[y])
         )
 
 
 # ── in-process run ─────────────────────────────────────────────────────────────
 
-def _build_and_run_dreth(cfg: RunConfig) -> Tuple[ChainedAgent, CausalWorld]:
+def _build_and_run_dreth(
+    cfg: RunConfig,
+) -> Tuple[ChainedAgent, CausalWorld, int, List[int], List[int]]:
+    """Returns (agent, world, snap_cycle, wrong_at_20pct, wrong_at_end)."""
     rng_w = random.Random(cfg.seed)
     rng_a = random.Random(cfg.seed + 10_000)
 
@@ -312,6 +351,8 @@ def _build_and_run_dreth(cfg: RunConfig) -> Tuple[ChainedAgent, CausalWorld]:
         promote_after=2,
         priority_audit_budget=max(1, cfg.n_vars // 2),
     )
+    snap_cycle = max(1, cfg.cycles // 5)
+    dreth_wrong_at_20: List[int] = []
     agent.initialize()
     for cycle in range(1, cfg.cycles + 1):
         m = world.perturb_by_schedule(cycle, cfg.schedule,
@@ -320,22 +361,34 @@ def _build_and_run_dreth(cfg: RunConfig) -> Tuple[ChainedAgent, CausalWorld]:
             agent.on_variable_revealed(m.affected_var, cycle)
         else:
             agent.run_cycle(m)
-    return agent, world
+        if cycle == snap_cycle:
+            dreth_wrong_at_20 = sorted(
+                var for var in range(world.visible_count)
+                if set(agent.ledger.vars[var].parents) != set(world.parents[var])
+            )
+    dreth_wrong_at_end = sorted(
+        var for var in range(world.visible_count)
+        if set(agent.ledger.vars[var].parents) != set(world.parents[var])
+    )
+    return agent, world, snap_cycle, dreth_wrong_at_20, dreth_wrong_at_end
 
 
-def _build_and_run_baseline(cfg: RunConfig) -> Tuple[BaselineAgent, CausalWorld]:
-    """Build an independent world from the same seed and run the baseline."""
+def _build_and_run_baseline(
+    cfg: RunConfig,
+    snap_cycle: int,
+) -> Tuple[SparseCachedRefitAgent, CausalWorld, List[int], List[int]]:
+    """Returns (agent, world, wrong_at_20pct, wrong_at_end). Uses same snap_cycle as Dreth."""
     rng_w = random.Random(cfg.seed)
     rng_a = random.Random(cfg.seed + 20_000)   # distinct stream from Dreth
 
     initial_visible = 1 if cfg.schedule == "incremental" else cfg.n_vars
     world = CausalWorld(cfg.n_vars, rng_w, noise_sigma=cfg.noise_sigma,
                         initial_visible=initial_visible)
-    agent = BaselineAgent(
+    agent = SparseCachedRefitAgent(
         world=world, rng=rng_a,
         intervention_budget=10,
-        sentinel_count=5,
     )
+    base_wrong_at_20: List[int] = []
     agent.initialize()
     for cycle in range(1, cfg.cycles + 1):
         m = world.perturb_by_schedule(cycle, cfg.schedule,
@@ -344,7 +397,18 @@ def _build_and_run_baseline(cfg: RunConfig) -> Tuple[BaselineAgent, CausalWorld]
             agent.on_variable_revealed(m.affected_var)
         else:
             agent.run_cycle()
-    return agent, world
+        if cycle == snap_cycle:
+            base_wrong_at_20 = sorted(
+                y for y in range(world.visible_count)
+                if y in agent._state
+                and set(agent._state[y].parents) != set(world.parents[y])
+            )
+    base_wrong_at_end = sorted(
+        y for y in range(world.visible_count)
+        if y in agent._state
+        and set(agent._state[y].parents) != set(world.parents[y])
+    )
+    return agent, world, base_wrong_at_20, base_wrong_at_end
 
 
 def _extract_arch_metrics(agent: ChainedAgent, world: CausalWorld) -> ArchMetrics:
@@ -444,7 +508,7 @@ def _check_invariants(arch: ArchMetrics) -> List[str]:
 def _run_one(cfg: RunConfig) -> RunResult:
     t0 = time.monotonic()
     try:
-        agent, world = _build_and_run_dreth(cfg)
+        agent, world, snap_cycle, dreth_wrong_at_20, dreth_wrong_at_end = _build_and_run_dreth(cfg)
         elapsed = time.monotonic() - t0
 
         records = agent.records
@@ -463,12 +527,6 @@ def _run_one(cfg: RunConfig) -> RunResult:
         trass_status = sum(1 for n in visible
                            if n.status == "trass" or n.role_for("skip") == "trass")
         true_missing = sum(1 for d in agent.fit_diagnostics if not d.true_present)
-        # Final-state wrong parents: same metric used for baseline comparison.
-        # true_missing is cumulative across fit attempts; wrong_fits is end-state.
-        wrong_fits_dreth = sum(
-            1 for var in range(world.visible_count)
-            if set(agent.ledger.vars[var].parents) != set(world.parents[var])
-        )
 
         arch = _extract_arch_metrics(agent, world)
         violations = _check_invariants(arch)
@@ -487,9 +545,12 @@ def _run_one(cfg: RunConfig) -> RunResult:
             certified=certified,
             trass_status=trass_status,
             true_missing=true_missing,
-            wrong_fits_dreth=wrong_fits_dreth,
+            wrong_fits_dreth=len(dreth_wrong_at_end),
             arch=arch,
             violations=violations,
+            snap_cycle=snap_cycle,
+            dreth_wrong_at_20=dreth_wrong_at_20,
+            dreth_wrong_at_end=dreth_wrong_at_end,
         )
     except Exception as exc:
         elapsed = time.monotonic() - t0
@@ -508,7 +569,9 @@ def _run_one(cfg: RunConfig) -> RunResult:
     if cfg.compare:
         try:
             t1 = time.monotonic()
-            b_agent, _ = _build_and_run_baseline(cfg)
+            b_agent, _, base_wrong_at_20, base_wrong_at_end = _build_and_run_baseline(
+                cfg, snap_cycle
+            )
             b_elapsed = time.monotonic() - t1
             result.baseline = BaselineMetrics(
                 elapsed=b_elapsed,
@@ -516,7 +579,10 @@ def _run_one(cfg: RunConfig) -> RunResult:
                 full_audits=b_agent.full_audit_count,
                 interventions=b_agent.total_interventions,
                 sentinel_fails=b_agent.sentinel_fail_count,
-                wrong_fits=b_agent.wrong_fits(),
+                candidate_refreshes=b_agent.candidate_refresh_count,
+                wrong_fits=len(base_wrong_at_end),
+                wrong_at_20=base_wrong_at_20,
+                wrong_at_end=base_wrong_at_end,
                 ok=True,
             )
         except Exception as exc:
@@ -578,10 +644,34 @@ def _fmt_row(r: RunResult) -> str:
             f"BASE {b.elapsed:5.1f}s "
             f"| skip={b_skip_pct:5.1f}%       "
             f"| iv={b.interventions:6d} auds={b.full_audits:5d} wf={b.wrong_fits:3d} "
-            f"| sfail={b.sentinel_fails:4d} "
+            f"| rfail={b.sentinel_fails:4d} ref={b.candidate_refreshes:3d} "
             f"| Δiv={iv_diff:>6s} Δaud={aud_diff:>6s} Δt={t_diff:>6s}"
         )
-    return dreth_line + "\n" + base_line
+    if not b.ok:
+        return dreth_line + "\n" + base_line
+
+    # ── per-variable overlap diagnostics ─────────────────────────────────────
+    d20  = set(r.dreth_wrong_at_20)
+    dend = set(r.dreth_wrong_at_end)
+    b20  = set(b.wrong_at_20)
+    bend = set(b.wrong_at_end)
+
+    def _fv(vs) -> str:
+        s = sorted(vs)
+        return "∅" if not s else "{" + ",".join(f"x{v}" for v in s) + "}"
+
+    pfx = f"  {'':>3s} {'':>4s} {'':>5s}   "
+    snap_line = (
+        f"{pfx}c{r.snap_cycle}(20%): "
+        f"D={_fv(d20)}  B={_fv(b20)}  ∩={_fv(d20 & b20)}"
+    )
+    end_line = (
+        f"{pfx}end(100%): "
+        f"D={_fv(dend)}  B={_fv(bend)}  ∩={_fv(dend & bend)}"
+        f"  │  D:res={_fv(d20 - dend)} new={_fv(dend - d20)}"
+        f"  B:res={_fv(b20 - bend)} new={_fv(bend - b20)}"
+    )
+    return dreth_line + "\n" + base_line + "\n" + snap_line + "\n" + end_line
 
 
 def _fmt_header() -> str:
@@ -678,15 +768,49 @@ def _print_aggregate(results: List[RunResult]) -> None:
     # Final-state wrong parents (same metric for both)
     d_wf = sum(r.wrong_fits_dreth for r in base_runs)
     b_wf = sum(r.baseline.wrong_fits for r in base_runs)
+    b_ref = sum(r.baseline.candidate_refreshes for r in base_runs)
     print(f"  wrong_fits(end-state): dreth={d_wf}  baseline={b_wf}  "
           f"({'same' if d_wf == b_wf else 'DIFFERS'})")
+    print(f"  baseline candidate_refreshes: {b_ref}  "
+          f"(candidate re-screens triggered by persistent failure)")
+
+    # ── per-variable overlap aggregate ───────────────────────────────────────
+    # Counts summed across runs (not union — different seeds have different vars)
+    tot_d20  = sum(len(r.dreth_wrong_at_20)        for r in base_runs)
+    tot_dend = sum(len(r.dreth_wrong_at_end)        for r in base_runs)
+    tot_b20  = sum(len(r.baseline.wrong_at_20)      for r in base_runs)
+    tot_bend = sum(len(r.baseline.wrong_at_end)      for r in base_runs)
+    tot_inter20  = sum(len(set(r.dreth_wrong_at_20) & set(r.baseline.wrong_at_20))
+                       for r in base_runs)
+    tot_interend = sum(len(set(r.dreth_wrong_at_end) & set(r.baseline.wrong_at_end))
+                       for r in base_runs)
+    tot_d_res = sum(len(set(r.dreth_wrong_at_20) - set(r.dreth_wrong_at_end))
+                    for r in base_runs)
+    tot_d_new = sum(len(set(r.dreth_wrong_at_end) - set(r.dreth_wrong_at_20))
+                    for r in base_runs)
+    tot_b_res = sum(len(set(r.baseline.wrong_at_20) - set(r.baseline.wrong_at_end))
+                    for r in base_runs)
+    tot_b_new = sum(len(set(r.baseline.wrong_at_end) - set(r.baseline.wrong_at_20))
+                    for r in base_runs)
+    snap_pct = base_runs[0].snap_cycle / base_runs[0].config.cycles * 100 if base_runs else 0
+
+    print()
+    print(f"  overlap (summed var-counts across {b_n} runs):")
+    print(f"  {'':20s}  @snap(~{snap_pct:.0f}%)   @end(100%)")
+    print(f"  {'D_miss':20s}  {tot_d20:8d}       {tot_dend:8d}")
+    print(f"  {'B_miss':20s}  {tot_b20:8d}       {tot_bend:8d}")
+    print(f"  {'D∩B (both wrong)':20s}  {tot_inter20:8d}       {tot_interend:8d}")
+    print(f"  {'D: resolved':20s}  {'→':>8s}       {tot_d_res:8d}  (wrong at snap, right at end)")
+    print(f"  {'D: newly_missed':20s}  {'→':>8s}       {tot_d_new:8d}  (right at snap, wrong at end)")
+    print(f"  {'B: resolved':20s}  {'→':>8s}       {tot_b_res:8d}")
+    print(f"  {'B: newly_missed':20s}  {'→':>8s}       {tot_b_new:8d}")
 
     print()
     print("  Δiv/Δaud negative = Dreth uses fewer probes/refits than baseline.")
     print("  Δt  negative = Dreth is faster.")
     print("  wrong_fits: lower is better; both should converge to the same answer.")
     print("  Advantage comes from: route-trass cascade pruning + failure-localized")
-    print("  invalidation + not reopening unrelated descendants.")
+    print("  invalidation vs. sparse_cached_refit's window-gated candidate-set refit.")
 
 
 # ── main ───────────────────────────────────────────────────────────────────────
@@ -715,7 +839,7 @@ def main():
     p.add_argument("--verbose-violations", action="store_true",
                    help="print full violation details for each failing run")
     p.add_argument("--compare", action="store_true",
-                   help="run dirty-closure baseline alongside Dreth and report comparison")
+                   help="run sparse_cached_refit baseline alongside Dreth and report comparison")
     args = p.parse_args()
 
     var_list   = [int(x) for x in args.vars.split(",")]
@@ -741,7 +865,7 @@ def main():
     print(f"  workers={args.workers or 'cpu'}  settle={args.settle_cycles}  "
           f"noise={args.noise_sigma}", flush=True)
     if args.compare:
-        print(f"  baseline: dirty-closure cached refit (no certs, no route-trass pruning)", flush=True)
+        print(f"  baseline: sparse_cached_refit (K=10 window=8 threshold=3 refresh_interval=100)", flush=True)
     print(f"  checking: I1(earned_by) I2(audit-role) I3(dormant-type) "
           f"I4(revoked_by) I5(route-target-owned)", flush=True)
     print()
@@ -788,6 +912,9 @@ def main():
                     "earned_by_dist": r.arch.earned_by_dist,
                     "revoked_by_dist": r.arch.revoked_by_dist,
                     "violations": r.violations,
+                    "snap_cycle": r.snap_cycle,
+                    "dreth_wrong_at_20": r.dreth_wrong_at_20,
+                    "dreth_wrong_at_end": r.dreth_wrong_at_end,
                 }
                 if r.baseline and r.baseline.ok:
                     rec["baseline"] = {
@@ -796,7 +923,10 @@ def main():
                         "full_audits": r.baseline.full_audits,
                         "interventions": r.baseline.interventions,
                         "sentinel_fails": r.baseline.sentinel_fails,
+                        "candidate_refreshes": r.baseline.candidate_refreshes,
                         "wrong_fits": r.baseline.wrong_fits,
+                        "wrong_at_20": r.baseline.wrong_at_20,
+                        "wrong_at_end": r.baseline.wrong_at_end,
                     }
                 out_fh.write(json.dumps(rec) + "\n")
                 out_fh.flush()
