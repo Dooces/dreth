@@ -23,9 +23,10 @@ Working spine:
 - `dreth/agent.py`: causal audit loop, sentinel cheap path, invalidation, promotion, compression discovery.
 - `dreth/fit.py`: hypothesis enumeration, probe selection, batched scoring, exact tie diagnostics.
 - `dreth/ledger.py`: `VarNethra`, status/role state, drift tracking, invalidation closure.
-- `dreth/forms.py` + `dreth/v30_integration.py`: v30 forms, form discovery, sentinel templates, health/recovery, co-occurrence recall.
 - `tests/test_fit_transition_boundaries.py`: fast pytest coverage.
 - `tests/test_regime_recall.py`: standalone receipt/stress harness, not normal pytest coverage.
+
+REMOVED: `dreth/forms.py` and `dreth/v30_integration.py` — forms layer removed. No replacement yet (N3 in TODO.md).
 
 Partially implemented / scaffolded:
 
@@ -43,12 +44,12 @@ Partially implemented / scaffolded:
 - `TiedFrontier` is not yet operationally consumed:
   - no active decision path reads the frontier to change behavior
   - frontier-biased probe selection is disabled
-  - semantic suppression for frontier churn was implemented, found to perturb form discovery timing, and removed
+  - semantic suppression for frontier churn was implemented and removed (perturbed form discovery timing; forms layer since removed)
   - dormant alternatives are archived but not revived
 
 - Adaptive probe budget exists but is intentionally disabled because changing probe pool size perturbs probe selection / RNG trajectory.
 
-- Dormant partition is conservative by design: dormant vars still need sentinel checks because envelope deltas feed form signatures.
+- Dormant partition: dormant vars (noise_floor cert or otherwise parked) are excluded from the main loop. Re-entry is failure-driven only — sentinel failure triggers cascade invalidation which adds the var back to _live_set. The previous rationale ("envelope deltas feed form signatures") was a dead dependency on forms.py, which no longer exists.
 
 - NN proposers train as diagnostics but are not active decision components.
 

@@ -237,11 +237,11 @@ class ChainedAgent:
         self._topo_cache_visible_count: int = -1
 
         # Dormant partition: certified+stable vars are removed from the hot
-        # pass and checked only by the periodic safety sweep. None until
-        # initialize() runs (all-live during bootstrap).
+        # pass. Re-entry is failure-driven: only a sentinel failure (cascade
+        # invalidation) wakes a dormant var. None until initialize() runs.
         self._live_set: Optional[Set[int]] = None
-        self._dormant_recheck_period: int = 50
-        self._last_dormant_recheck: int = 0
+        # Minimum envelope age before a var is eligible for dormancy.
+        self._min_dormant_cert_age: int = 100
 
         # Joint false-trass tracking: vars whose certs were invalidated by
         # sentinel failure this cycle. Cleared at start of each run_cycle.
@@ -1518,51 +1518,18 @@ class ChainedAgent:
             self._live_set.discard(var)
             return
         if n.role_for("skip") == "noise_floor":
-            # Best fit accepted at noise floor — park immediately. Periodic sweep
-            # monitors at 3×ε so genuine changes still trigger re-audit.
+            # Best fit accepted at noise floor — park immediately. Sentinel
+            # re-triggers at 3×ε if the fit genuinely changes.
             self._live_set.discard(var)
             return
-        min_cert_age = self._dormant_recheck_period * 2
+        min_cert_age = self._min_dormant_cert_age
         if (n.status == "certified"
                 and n.authoritative
-                and not n.in_watch_state
                 and self.weak_streak.get(var, 0) == 0
                 and self.defer_streak.get(var, 0) == 0
                 and len(n.envelope.deltas) >= 100
                 and cycle - n.envelope.certified_at_cycle >= min_cert_age):
             self._live_set.discard(var)
-
-    def _dormant_safety_sweep(self, cycle: int) -> None:
-        """Check sentinels for all dormant non-trass authoritative vars.
-        Any that fail are promoted back to live so the next hot pass audits
-        them. Called every _dormant_recheck_period cycles as a safety valve
-        against structural mutations that the live set would otherwise miss."""
-        if self._live_set is None:
-            return
-        for var in range(self.world.visible_count):
-            if var in self._live_set:
-                continue
-            n = self.ledger.vars[var]
-            if n.role_for("skip") == "trass" or n.status == "trass":
-                continue
-            if not n.authoritative:
-                self._live_set.add(var)
-                continue
-            self.total_interventions += len(n.sentinels)
-            passed, _, _, reason = check_var_sentinels_with_envelope(
-                var, n, self.world, cycle,
-                self.cost_low_threshold, self.cost_high_threshold,
-            )
-            if not passed:
-                self.ledger.vars[var].invalidate_certs("sentinel_failure")
-                self._uncertain_this_cycle.add(var)
-                closure = self.ledger.invalidate(
-                    {var}, cycle, f"dormant sweep: {reason}"
-                )
-                self._live_set.update(closure)
-                self.ledger.event_log.append(
-                    f"c{cycle}: x{var} dormant sweep fail → promoted ({reason})"
-                )
 
     def initialize(self) -> None:
         """First-time audit pass: full audit on every currently-visible
@@ -1649,24 +1616,18 @@ class ChainedAgent:
         # loop so those vars fall through to the audit queue this cycle.
         composite_passing = self._check_composites(cycle)
 
-        # Update stability horizons before the first pass so watch-state is
-        # current when sentinel dispatch and parent-watch propagation run.
+        # Update stability horizons for display. Diagnostic only — no behavioral
+        # consequence. Dormant wakeup is failure-driven (sentinel fail → cascade).
         for _v in topo_order:
             _vn = self.ledger.vars[_v]
             if (_vn.role_for("skip") != "trass"
                     and _vn.status != "trass"
                     and _vn.median_interval > 0):
-                _was_watch = _vn.in_watch_state
                 self.ledger.update_stability_horizon(_v, cycle)
-                if (self._live_set is not None
-                        and not _was_watch and _vn.in_watch_state
-                        and _v not in self._live_set):
-                    self._live_set.add(_v)
 
         # First-pass loop runs in topological order over LIVE vars only.
-        # Dormant vars (removed from _live_set by _maybe_demote) are skipped
-        # here and checked by _dormant_safety_sweep every _dormant_recheck_period
-        # cycles. noise_floor vars use 3×ε in the sweep; regular dormant vars use 1×ε.
+        # Dormant vars (removed from _live_set by _maybe_demote) are skipped.
+        # Re-entry is failure-driven: sentinel failure → cascade invalidation → live.
         # Build open-novelty set once per cycle (used in needs_audit rate-limit).
         _novelty_vars: Set[int] = {
             nv.affected_var for nv in self.ledger.novelty if nv.status == "open"
@@ -1903,25 +1864,6 @@ class ChainedAgent:
             if var in _novelty_vars and cycle % _NOVELTY_INTERVAL != 0:
                 continue  # Case B: vocabulary gap — don't thrash
             needs_audit.append(var)
-
-        # Parent-as-leading-indicator: if a var enters watch state, pre-queue its
-        # dependents for audit once per watch episode. Edge-triggered: _watch_propagated
-        # suppresses re-queuing while the parent remains in watch state. Resets on
-        # watch-state transition (entry or exit) in update_stability_horizon.
-        _watch_seen: Set[int] = set(needs_audit)
-        for _wvar in range(self.world.visible_count):
-            _wn = self.ledger.vars[_wvar]
-            if _wn.in_watch_state and not _wn._watch_propagated:
-                for _child in self.ledger.variable_dependents(_wvar):
-                    if _child not in _watch_seen:
-                        needs_audit.append(_child)
-                        _watch_seen.add(_child)
-                        if self._live_set is not None:
-                            self._live_set.add(_child)
-                        self.ledger.event_log.append(
-                            f"c{cycle}: x{_child} queued (parent x{_wvar} in watch state)"
-                        )
-                _wn._watch_propagated = True
 
         # v25: audit budget. Order by tractability, audit up to budget.
         # v28+: audit in topological-then-tractability order. Parents in
