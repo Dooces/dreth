@@ -92,11 +92,12 @@ Operation = Literal["skip", "route", "compress", "audit", "reexamine"]
 #   skip:      LIVE — _certify_operation_role issues certificates["skip"]
 #   route:     PARTIAL — _certify_form_role issues form.form_certificates["route"] at
 #              form level only; no instance-level route cert exists
-#   compress:  NOT LIVE — _discover_compressions uses pred_passes frequency count only;
-#              certificates["compress"] is never populated (invalidate_certs clears it
-#              but nothing writes it)
+#   compress:  LIVE — _discover_compressions issues certificates["compress"] when
+#              pred_passes == compression_promote_after; gate vars as targets,
+#              one (state_snapshot, simplified_value) witness. earned_by="compression_equivalence"
 #   audit:     NOT LIVE — declared, cleared by invalidate_certs, never populated
-#   reexamine: NOT LIVE — same
+#   reexamine: NOT LIVE — folded into audit/recovery per spec; do not implement
+#              as a separate cert until a distinct live need appears
 # Ought to: _discover_compressions should issue a certificates["compress"] cert scoped
 # to the gate predicate, with witnesses from the observed (state, value) pairs, so that
 # invalidate_certs("sentinel_failure") clears a real cert rather than a no-op.
@@ -104,7 +105,9 @@ Operation = Literal["skip", "route", "compress", "audit", "reexamine"]
 # tareth:      tested; substitution propagates; distinction is load-bearing
 # trass:       tested; substitution does not propagate; collapse allowed
 # false_trass: locally trass but jointly tareth with another var; composition invalidated
-Role = Literal["tareth", "trass", "untested", "false_trass"]
+Role = Literal["tareth", "trass", "untested", "false_trass", "reusable", "not_reusable"]
+# "reusable" / "not_reusable" are used by the audit cert only (invariant 11 in spec:
+# trass/tareth vocabulary is wrong for audit; see _install_var audit cert write).
 Authority = Literal["none", "prefer", "guarded_reuse", "skip", "propagate"]
 
 @dataclass
@@ -115,7 +118,18 @@ class NethraCertificate:
     requires observed failure or an active dependency event (parent set changed,
     sentinel contradiction, composite revoked). Structural context alone (e.g.
     new variable visible) does not revoke unless it is itself a dependency event.
-    See DRETH_TAXONOMY.md for full semantics."""
+    See DRETH_TAXONOMY.md for full semantics.
+
+    earned_by: what event produced this cert. Required — every cert must carry
+      its provenance. Allowed values: substitution_test, joint_interaction,
+      separating_probe, stable_audit, sentinel_pass_after_failure, frontier_survival,
+      compression_equivalence, composite_repair, manual_bootstrap, counterfactual_fit.
+
+    revoked_by: what event revoked this cert's authority (set on demotion; None
+      while cert is live). Allowed values: sentinel_failure, downstream_contradiction,
+      parent_change, composite_failure, fit_instability, envelope_drift,
+      structural_mutation, manual_reset.
+    """
     operation: Operation
     role: Role
     authority: Authority
@@ -126,11 +140,13 @@ class NethraCertificate:
     substitutions_tested: Tuple[str, ...]  # what was swapped
     changes: int                       # how many substitutions propagated
     trials: int                        # total substitutions tested
+    earned_by: str                     # provenance — required, see docstring above
     joint_members: Optional[Tuple[int, ...]] = None
     joint_R0: Optional[float] = None
     joint_RA: Optional[float] = None
     joint_RB: Optional[float] = None
     joint_RAB: Optional[float] = None
+    revoked_by: Optional[str] = None   # set on authority demotion; None while live
     witnesses: Tuple = ()
     # For skip certs: Tuple of (state_snapshot: Tuple[float,...], iv_val: float) pairs.
     # Each pair is a specific (world context, intervention) that produced a propagation
@@ -298,6 +314,11 @@ class CompositeNethra:
     trials: int
     certified_at_cycle: int
     context_visible: int
+    earned_by: str = "joint_interaction"
+    sentinels: List["CompositeSentinel"] = field(default_factory=list)
+    # sentinels: per-composite sentinels monitoring the RELATION (not individual
+    # members). Each CompositeSentinel probes the joint intervention and checks
+    # the downstream sentinel_var. Populated after composite is certified.
 
 
 @dataclass
@@ -322,6 +343,59 @@ class TemporalTrassEntry:
     delta: float
     cost_weight: float
     reason: str
+
+
+@dataclass
+class DormantAlternative:
+    """An inactive but revivable hypothesis archived from a collapsed frontier.
+
+    When a TiedFrontier collapses (one candidate pulls ahead), losing candidates
+    are archived here rather than discarded. If a dormant hypothesis later wins
+    a full audit, it is revived into active candidacy (invariant 28-30).
+
+    Certification rule (invariant 31): revival_count >= 2 AND context_keys_seen
+    contains >= 2 distinct values earns frontier_survival evidence — the hypothesis
+    has proven itself across distinct evidence contexts, not just a single regime.
+
+    Fields:
+      parents, func:        the hypothesis signature
+      last_score:           score from the last audit where this was a candidate
+      revival_count:        times this hypothesis won a later audit after archiving
+      context_keys_seen:    distinct context_key values seen across revivals
+      last_seen_cycle:      last cycle where this hypothesis was active/revived
+    """
+    parents: Tuple[int, ...]
+    func: str
+    last_score: int
+    revival_count: int = 0
+    context_keys_seen: Set[int] = field(default_factory=set)
+    last_seen_cycle: int = 0
+
+
+@dataclass
+class CompositeSentinel:
+    """Sentinel for a composite nethra. Monitors the RELATION between members,
+    not individual member values (invariant 36).
+
+    A composite sentinel probes a joint intervention on all members and checks
+    whether a downstream sentinel_var responds as expected. This is structurally
+    different from a per-variable sentinel because the probe involves multiple
+    members simultaneously.
+
+    Fields:
+      members:         tuple of member var indices (a, b, ...)
+      probe_values:    intervention value for each member (parallel to members)
+      sentinel_var:    downstream var that shows the joint effect
+      baseline:        R0[sentinel_var] when no intervention is applied
+      expected_joint:  RAB[sentinel_var] value observed when composite was certified
+      tolerance:       |RAB - R0| must exceed this to confirm interaction
+    """
+    members: Tuple[int, ...]
+    probe_values: Tuple[float, ...]
+    sentinel_var: int
+    baseline: float
+    expected_joint: float
+    tolerance: float
 
 
 @dataclass
@@ -358,6 +432,10 @@ class TiedFrontier:
     first_seen_cycle: int
     last_seen_cycle: int
     stable_count: int = 1
+    distinct_contexts_seen: int = 1
+    # distinct_contexts_seen: number of distinct context_key values the same
+    # candidate set has persisted through. Collapse requires both stable_count
+    # >= threshold AND distinct_contexts_seen >= 2 (invariant 20 of spec).
 
 
 @dataclass
@@ -438,11 +516,31 @@ class VarNethra:
     # (parents_changed) and on invalidation. Losing candidates archived to
     # dormant_alternatives when the frontier collapses.
     tied_frontier: Optional["TiedFrontier"] = None
-    dormant_alternatives: List[Tuple[Tuple[int, ...], str, int]] = field(default_factory=list)
+    dormant_alternatives: List[DormantAlternative] = field(default_factory=list)
+    # Sentinel failure backoff: counts consecutive cycles where the sentinel
+    # failed and the subsequent audit returned the same fit (no sig_change).
+    # When this reaches SENTINEL_BACKOFF_THRESHOLD, the var is rate-limited:
+    # only re-audited every SENTINEL_BACKOFF_INTERVAL cycles. Reset to 0 on
+    # any sentinel pass, sig_change, or structural mutation.
+    # Invariant 7: high-cost domains require stricter thresholds — this is
+    # threshold policy, not a cert authority claim.
+    consecutive_sentinel_failures: int = 0
+    # Envelope-stable audit counter: counts consecutive full audits where the
+    # noise envelope did not re-certify (ε unchanged) AND envelope_failing is
+    # False. When this reaches AUDIT_STABLE_THRESHOLD, the var exits the audit
+    # queue entirely — best fit accepted at the current noise floor. Re-entry
+    # only via sentinel failure (which resets this to 0 via invalidate_certs).
+    audit_stable_count: int = 0
     # Per-operation certificates. Keys are Operation literals ("skip", "route", etc.).
     # Populated by _certify_operation_role (skip) and form cert functions (route).
     # During migration, falls back to legacy operation_role if key absent.
     certificates: Dict[str, NethraCertificate] = field(default_factory=dict)
+    # Per-candidate route certs. Keyed by candidate parent var index.
+    # route_certs[P] holds the route cert for this var T relative to candidate P.
+    # P route-trass for T: including P vs excluding P produces the same fit winner.
+    # P route-tareth for T: including P changes the winner. Default: include all
+    # (invariant 50 — route/include by default unless excluded by cert).
+    route_certs: Dict[int, NethraCertificate] = field(default_factory=dict)
 
     def role_for(self, operation: Operation) -> Role:
         """Return the certified role for a named operation, or 'untested' if
@@ -485,29 +583,37 @@ class VarNethra:
         """
         if event == "structural_mutation":
             self.certificates.clear()
+            self.route_certs.clear()
+            self.consecutive_sentinel_failures = 0
+            self.audit_stable_count = 0
             return
         if event == "parent_change":
             self.certificates.pop("predict", None)
             self.certificates.pop("compress", None)
             self.certificates.pop("audit", None)
+            self.route_certs.clear()
+            self.audit_stable_count = 0
             if "skip" in self.certificates:
                 # Parent change is an active dependency event — cert was scoped
                 # to the old parent set; the old evidence no longer applies.
                 self.certificates["skip"] = dataclasses.replace(
-                    self.certificates["skip"], role="untested"
+                    self.certificates["skip"], role="untested", revoked_by="parent_change"
                 )
         if event in ("sentinel_failure", "false_trass_contradiction"):
             self.certificates.pop("audit", None)
             self.certificates.pop("compress", None)
+            self.audit_stable_count = 0
+            revoked_by = "sentinel_failure" if event == "sentinel_failure" else "composite_failure"
             if "skip" in self.certificates:
                 # Observed failure (sentinel) or composite contradiction earns revocation.
                 self.certificates["skip"] = dataclasses.replace(
-                    self.certificates["skip"], role="untested"
+                    self.certificates["skip"], role="untested", revoked_by=revoked_by
                 )
         if event == "drift":
+            self.audit_stable_count = 0
             for op in list(self.certificates):
                 self.certificates[op] = dataclasses.replace(
-                    self.certificates[op], role="untested"
+                    self.certificates[op], role="untested", revoked_by="fit_instability"
                 )
 
     @property

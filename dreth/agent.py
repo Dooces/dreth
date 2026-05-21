@@ -78,7 +78,8 @@ from typing import Callable, Dict, FrozenSet, List, Optional, Protocol, Set, Tup
 
 from .functions import FUNC_LIBRARY
 from .world import CausalWorld, HiddenMutation
-from .ledger import ChainedLedger, Compression, CompositeNethra, NethraCertificate, TiedFrontier
+from .ledger import (ChainedLedger, Compression, CompositeNethra,
+                     DormantAlternative, NethraCertificate, Role, TiedFrontier)
 from .fit import fit_var
 from .sentinels import select_var_sentinels, check_var_sentinels_with_envelope
 from .records import CycleRecord, FitDiagnostic
@@ -276,28 +277,25 @@ class ChainedAgent:
 
     def _full_audit_var(self, var: int, cycle: int) -> Tuple[Tuple[int, ...], str, int, int]:
         """Run a full hypothesis-space search for one variable. Steps:
-          1. Build available_parents set (tareth + provisionally-committed vars)
+          1. Build available_parents set (exclude only cert-excluded candidates)
           2. Call fit_var which enumerates, scores, and ranks hypotheses
           3. Record FitDiagnostic for offline analysis
         Returns (best_parents, best_func, best_score, second_score).
         Increments full_audit_count and total_interventions."""
         self.full_audit_count += 1
         n = self.ledger.vars[var]
-        # Q7: available_parents — all vars not cert-excluded for route.
-        # Filter ledger default: include unless a route cert explicitly excludes.
-        # No instance-level route certs exist → role_for("route") always returns
-        # "untested" → nothing excluded → all certified/proposed vars are candidates.
-        # Hypothesis space is larger than the prior skip-cert-proxy implementation;
-        # that is correct — the prior restriction was a utility heuristic, not cert logic.
+        # available_parents: include by default (invariant 50 — route/include unless excluded by cert).
+        # Exclusion is per-target: n.route_certs[P] with role "trass" means P was shown not to
+        # change the fit winner for this target T. Absent cert → include.
         # Q4: no joint composition test. Individual route certs (when they exist) won't
         # guarantee the combination is non-redundant. Requires predict_under_joint_intervention.
         available = {
             other_var for other_var, other_n in self.ledger.vars.items()
             if other_var != var
-            and other_n.role_for("route") != "trass"  # cert-excluded for route → omit; absent cert → include
+            and (n.route_certs.get(other_var) is None or n.route_certs[other_var].role != "trass")
             and (
                 other_n.status == "certified"
-                or other_n.status == "trass"   # trass vars have been fit; no route cert excludes them
+                or other_n.status == "trass"
                 or (other_n.status == "proposed" and bool(other_n.sentinels))
             )
         }
@@ -407,6 +405,7 @@ class ChainedAgent:
                     context_visible=self.world.visible_count, context_cycle=cycle,
                     targets=(), substitutions_tested=("declared_salience",),
                     changes=0, trials=0,
+                    earned_by="manual_bootstrap",
                 )
             return "tareth"
 
@@ -501,6 +500,7 @@ class ChainedAgent:
             substitutions_tested=("perturbation",),
             changes=changes,
             trials=n_trials,
+            earned_by="substitution_test",
             witnesses=tuple(witnesses) if role == "tareth" else (),
         )
         n.certificates["skip"] = cert
@@ -660,6 +660,16 @@ class ChainedAgent:
         to_remove = []
         for cn in self.ledger.composites:
             a, b = cn.members
+            # Activation-scoped: if both members are dormant (not in live_set),
+            # the composite interaction has no active consequence path this cycle.
+            # Assume passing — no probe needed (invariant 70: polling only when
+            # tied to an active consequence path).
+            if (self._live_set is not None
+                    and a not in self._live_set
+                    and b not in self._live_set):
+                passing_members.add(a)
+                passing_members.add(b)
+                continue
             if cn.context_visible != self.world.visible_count:
                 to_remove.append(cn)
                 continue
@@ -958,6 +968,7 @@ class ChainedAgent:
             n.strong_observations += 1
         else:
             n.strong_observations = 1
+            n.consecutive_sentinel_failures = 0  # world genuinely changed
 
         # v28+: if the current fit lists a parent that's currently trass, that's
         # a contradiction — we declared the parent "doesn't matter operationally"
@@ -983,16 +994,12 @@ class ChainedAgent:
         # confidence label) and means the same fit has been stable for
         # promote_after consecutive cycles.
         if not n.sentinels and n.strong_observations >= 1:
-            # Q7: sentinel parent set — vars the sentinel selector uses to find
-            # discriminating probes against the current hypothesis.
-            # Filter ledger default: include all vars not cert-excluded for route.
-            # No instance-level route certs exist → nothing excluded → all eligible
-            # vars enter the probe pool. Broader pool means sentinels can discriminate
-            # against more alternative hypotheses, including those involving skip-trass vars.
+            # Sentinel parent pool: include all vars not cert-excluded for route.
+            # Per-target route certs gate exclusion (invariant 50 — route/include by default).
             available = {
                 other_var for other_var, other_n in self.ledger.vars.items()
                 if other_var != var
-                and other_n.role_for("route") != "trass"  # cert-excluded for route → omit; absent cert → include
+                and (n.route_certs.get(other_var) is None or n.route_certs[other_var].role != "trass")
                 and (
                     other_n.status == "certified"
                     or (other_n.status == "proposed" and bool(other_n.sentinels))
@@ -1008,14 +1015,55 @@ class ChainedAgent:
                 n.expected_outcomes = expected
 
         # Promotion to "certified" status (informational confidence label)
+        just_promoted = False
         if n.status != "certified" and n.strong_observations >= self.promote_after and n.sentinels:
             n.status = "certified"
+            just_promoted = True
             if n.first_certified_cycle == 0:
                 n.first_certified_cycle = cycle
         elif n.status in ("quarantined", "uncertain"):
             # Audit produced a fit; revert to proposed so it can re-accumulate
             # observations toward promotion.
             n.status = "proposed"
+
+        if just_promoted:
+            # Route certs: counterfactual fit per non-parent candidate.
+            # Earned at promotion — the fit is stable enough to trust the comparison.
+            avail_for_route = {
+                other_var for other_var, other_n in self.ledger.vars.items()
+                if other_var != var
+                and (other_n.status == "certified" or other_n.status == "trass"
+                     or (other_n.status == "proposed" and bool(other_n.sentinels)))
+            }
+            self._certify_route_certs(var, new_parents, avail_for_route, cycle)
+            # Audit cert: stable fit earned enough observations; mark as reusable.
+            n.certificates["audit"] = NethraCertificate(
+                operation="audit",
+                role="reusable",
+                authority="guarded_reuse",
+                context_parents=new_parents,
+                context_visible=self.world.visible_count,
+                context_cycle=cycle,
+                targets=(),
+                substitutions_tested=("stable_audit",),
+                changes=0,
+                trials=self.promote_after,
+                earned_by="stable_audit",
+            )
+            # Dormant revival check: if any archived alternative now wins,
+            # increment its revival_count and track the context.
+            context_key = near_tie_context_key
+            for alt in n.dormant_alternatives:
+                if alt.parents == new_parents and alt.func == new_func:
+                    alt.revival_count += 1
+                    alt.context_keys_seen.add(context_key)
+                    alt.last_seen_cycle = cycle
+                    if alt.revival_count >= 2 and len(alt.context_keys_seen) >= 2:
+                        self.ledger.event_log.append(
+                            f"c{cycle}: x{var} dormant alternative "
+                            f"{alt.func}({list(alt.parents)}) achieved frontier_survival "
+                            f"(revivals={alt.revival_count} contexts={len(alt.context_keys_seen)})"
+                        )
 
         # Compression discovery: triggered when the variable has stable sentinels
         # AND enough strong observations. Status label not the gate.
@@ -1066,6 +1114,129 @@ class ChainedAgent:
 
         return semantic_changed
 
+    def _certify_route_certs(
+        self, var: int, parents: Tuple[int, ...], available: Set[int], cycle: int
+    ) -> None:
+        """Issue per-candidate route certs for target `var` at promotion time.
+
+        Only certifies candidates that were ACTIVELY COMPETING in the last audit
+        (appeared in near_tie_candidates but not in the winner's parents). A clean
+        fit with no near-ties earns no route certs — invariant 2: use succeeds → do
+        nothing. Proactively scanning all available vars violates invariant 17.
+
+        For each competing non-parent candidate P:
+          - Fit `var` with P excluded from available.
+          - Same winner as the baseline → P is route-trass (safe to exclude).
+          - Different winner → P is route-tareth (P influences the ranking).
+
+        Uses a reduced budget (intervention_budget // 3, min 6) because route cert
+        fits are secondary evidence: the main fit already ran at full budget.
+
+        Target-owned: cert is stored in n.route_certs[P], not on P.
+        """
+        if (self._last_fit_diag is None
+                or self._last_fit_diag.var != var
+                or self._last_fit_diag.cycle != cycle):
+            return
+        diag = self._last_fit_diag
+        if not diag.near_tie_candidates:
+            return  # clean fit, no competition → invariant 2, nothing earned
+
+        # Build candidate pool: vars in near-tie parents that aren't in winner.
+        parents_set = set(parents)
+        competing = {
+            p
+            for cand_parents, _, _ in diag.near_tie_candidates
+            for p in cand_parents
+            if p not in parents_set and p in available
+        }
+        if not competing:
+            return
+
+        n = self.ledger.vars[var]
+        # Skip candidates already certified in this parent context — re-promotion
+        # does not earn a re-test if the evidence context hasn't changed.
+        competing = {
+            p for p in competing
+            if p not in n.route_certs
+            or n.route_certs[p].context_parents != tuple(parents)
+        }
+        if not competing:
+            return
+
+        rc_budget = max(6, self.intervention_budget // 3)
+        base_parents = tuple(parents)
+        base_func = n.func
+
+        for p in competing:
+            avail_excl = available - {p}
+            if len(avail_excl) < len(parents_set):
+                continue
+            excl_parents, excl_func, _, _ = fit_var(
+                var, self.world, self.rng, rc_budget,
+                n.current_tolerance, available_parents=avail_excl,
+            )
+            same_winner = (base_parents == excl_parents and base_func == excl_func)
+            role: Role = "trass" if same_winner else "tareth"
+            n.route_certs[p] = NethraCertificate(
+                operation="route",
+                role=role,
+                authority="none" if role == "tareth" else "guarded_reuse",
+                context_parents=tuple(parents),
+                context_visible=self.world.visible_count,
+                context_cycle=cycle,
+                targets=(var,),
+                substitutions_tested=("counterfactual_fit",),
+                changes=0 if same_winner else 1,
+                trials=1,
+                earned_by="counterfactual_fit",
+            )
+
+    def _derive_separating_probes(
+        self, var: int, frontier: "TiedFrontier"
+    ) -> Tuple[Tuple[int, float], ...]:
+        """Derive separating probes from the last FitDiagnostic for `var`.
+
+        Phase 1: use existing audit probes (no new world calls). For each probe
+        (iv_var, iv_val), compute the pairwise prediction disagreement across all
+        frontier candidates using FUNC_LIBRARY. Retain the top 3 probes by max
+        pairwise disagreement.
+
+        Returns a tuple of (iv_var, iv_val) pairs (at most 3).
+        """
+        if (self._last_fit_diag is None
+                or self._last_fit_diag.var != var
+                or not self._last_fit_diag.probes):
+            return ()
+        probes = self._last_fit_diag.probes  # Tuple[Tuple[int, float], ...]
+        candidates = list(frontier.candidates)  # List[(parents, func)]
+        if len(candidates) < 2:
+            return ()
+        from .functions import FUNC_LIBRARY
+        state = self.world.state
+        scored: List[Tuple[float, Tuple[int, float]]] = []
+        for iv_var, iv_val in probes:
+            # Build an intervened state snapshot
+            intervened = list(state)
+            intervened[iv_var] = iv_val
+            preds = []
+            for cand_parents, cand_func in candidates:
+                fn = FUNC_LIBRARY.get(cand_func)
+                if fn is None:
+                    continue
+                args = [intervened[p] for p in cand_parents]
+                preds.append(fn(*args) if args else 0.0)
+            if len(preds) < 2:
+                continue
+            max_disagree = max(
+                abs(preds[i] - preds[j])
+                for i in range(len(preds))
+                for j in range(i + 1, len(preds))
+            )
+            scored.append((max_disagree, (iv_var, iv_val)))
+        scored.sort(key=lambda x: -x[0])
+        return tuple(p for _, p in scored[:3])
+
     def _update_tied_frontier(
         self, var: int, cycle: int,
         near_tie_set: FrozenSet[Tuple[Tuple[int, ...], str]],
@@ -1081,7 +1252,7 @@ class ChainedAgent:
         """
         n = self.ledger.vars[var]
         existing = n.tied_frontier
-        if existing is None or existing.context_key != context_key:
+        if existing is None:
             n.tied_frontier = TiedFrontier(
                 candidates=near_tie_set,
                 scores={h: scores_dict.get(h, 0) for h in near_tie_set},
@@ -1089,18 +1260,31 @@ class ChainedAgent:
                 context_key=context_key,
                 collapse_sig=None,
                 separating_probes=(),
-                first_seen_cycle=cycle if existing is None else existing.first_seen_cycle,
+                first_seen_cycle=cycle,
                 last_seen_cycle=cycle,
                 stable_count=1,
+                distinct_contexts_seen=1,
             )
         elif near_tie_set == existing.candidates:
             existing.scores = {h: scores_dict.get(h, 0) for h in near_tie_set}
             existing.last_seen_cycle = cycle
             existing.stable_count += 1
-        else:
-            # Frontier changed — archive any candidates that dropped out.
+            if context_key != existing.context_key:
+                # Same candidates survived a context change — that is cross-context
+                # evidence (invariant distinct_contexts_seen rule). Update key and count.
+                existing.context_key = context_key
+                existing.distinct_contexts_seen += 1
+        elif existing.context_key != context_key:
+            # Context changed AND candidate set differs — fresh frontier.
+            # Archive dropped candidates from old frontier.
             for h in existing.candidates - near_tie_set:
-                n.dormant_alternatives.append((h[0], h[1], existing.scores.get(h, 0)))
+                n.dormant_alternatives.append(
+                    DormantAlternative(
+                        parents=h[0], func=h[1],
+                        last_score=existing.scores.get(h, 0),
+                        last_seen_cycle=cycle,
+                    )
+                )
             n.tied_frontier = TiedFrontier(
                 candidates=near_tie_set,
                 scores={h: scores_dict.get(h, 0) for h in near_tie_set},
@@ -1111,6 +1295,29 @@ class ChainedAgent:
                 first_seen_cycle=existing.first_seen_cycle,
                 last_seen_cycle=cycle,
                 stable_count=1,
+                distinct_contexts_seen=1,
+            )
+        else:
+            # Same context, different candidate set — archive dropped candidates.
+            for h in existing.candidates - near_tie_set:
+                n.dormant_alternatives.append(
+                    DormantAlternative(
+                        parents=h[0], func=h[1],
+                        last_score=existing.scores.get(h, 0),
+                        last_seen_cycle=cycle,
+                    )
+                )
+            n.tied_frontier = TiedFrontier(
+                candidates=near_tie_set,
+                scores={h: scores_dict.get(h, 0) for h in near_tie_set},
+                margin=self.near_tie_margin,
+                context_key=context_key,
+                collapse_sig=None,
+                separating_probes=(),
+                first_seen_cycle=existing.first_seen_cycle,
+                last_seen_cycle=cycle,
+                stable_count=1,
+                distinct_contexts_seen=existing.distinct_contexts_seen,
             )
 
     def _collapse_tied_frontier(
@@ -1118,21 +1325,39 @@ class ChainedAgent:
         winning_hyp: Optional[Tuple[Tuple[int, ...], str]],
         cycle: int,
     ) -> None:
-        """Collapse the TiedFrontier for `var`. Archives losing candidates to
-        dormant_alternatives and clears the frontier."""
+        """Collapse the TiedFrontier for `var`.
+
+        Guard: collapse only if stable_count >= 3 AND distinct_contexts_seen >= 2.
+        If threshold not met, the tie is ambiguity, not resolved — clear without
+        archiving (the candidates have not proven themselves across regimes).
+        If threshold met, archive losing candidates as DormantAlternatives.
+        """
         n = self.ledger.vars[var]
         if n.tied_frontier is None:
             return
-        for h in n.tied_frontier.candidates:
-            if h != winning_hyp:
-                n.dormant_alternatives.append(
-                    (h[0], h[1], n.tied_frontier.scores.get(h, 0))
+        f = n.tied_frontier
+        threshold_met = f.stable_count >= 3 and f.distinct_contexts_seen >= 2
+        if threshold_met:
+            for h in f.candidates:
+                if h != winning_hyp:
+                    n.dormant_alternatives.append(
+                        DormantAlternative(
+                            parents=h[0], func=h[1],
+                            last_score=f.scores.get(h, 0),
+                            last_seen_cycle=cycle,
+                        )
+                    )
+            if winning_hyp is not None:
+                self.ledger.event_log.append(
+                    f"c{cycle}: x{var} frontier collapsed → "
+                    f"{winning_hyp[1]}({list(winning_hyp[0])}); "
+                    f"{len(n.dormant_alternatives)} candidates archived"
                 )
-        if winning_hyp is not None:
+        else:
+            # Threshold not met: ambiguity is unresolved; discard without archiving.
             self.ledger.event_log.append(
-                f"c{cycle}: x{var} frontier collapsed → "
-                f"{winning_hyp[1]}({list(winning_hyp[0])}); "
-                f"{len(n.dormant_alternatives)} candidates archived"
+                f"c{cycle}: x{var} frontier cleared (threshold not met: "
+                f"stable={f.stable_count} contexts={f.distinct_contexts_seen})"
             )
         n.tied_frontier = None
 
@@ -1390,12 +1615,9 @@ class ChainedAgent:
         self._uncertain_this_cycle.clear()
 
         # Dormant partition maintenance.
-        if self._live_set is not None:
-            # Periodic safety sweep: check sentinels of dormant vars so
-            # structural mutations can't permanently hide from the hot pass.
-            if cycle - self._last_dormant_recheck >= self._dormant_recheck_period:
-                self._dormant_safety_sweep(cycle)
-                self._last_dormant_recheck = cycle
+        # No periodic sweep needed: the first-pass loop runs sentinel checks
+        # for ALL vars (including dormant) every cycle. Sentinel failure
+        # promotes dormant vars back to live immediately, not on a timer.
 
         truth_novelty = any(
             self.world.funcs[i] == "SIN"
@@ -1446,6 +1668,11 @@ class ChainedAgent:
         # The dormant partition blocks dormant vars from PROACTIVE audit
         # queueing (e.g. watch-parent propagation) but does NOT skip the
         # sentinel check itself — that would freeze envelopes.
+        # Build open-novelty set once per cycle (used in needs_audit rate-limit).
+        _novelty_vars: Set[int] = {
+            nv.affected_var for nv in self.ledger.novelty if nv.status == "open"
+        }
+
         for var in topo_order:
             n = self.ledger.vars[var]
 
@@ -1529,6 +1756,7 @@ class ChainedAgent:
                                         substitutions_tested=("compression_match",),
                                         changes=comp.pred_passes,
                                         trials=comp.pred_passes,
+                                        earned_by="compression_equivalence",
                                         witnesses=((tuple(self.world.state), comp.simplified_value),),
                                     )
                         else:
@@ -1587,6 +1815,7 @@ class ChainedAgent:
                 if passed:
                     # Sentinel passed — shortcut fires. No accounting, no witness replay.
                     # Filter ledger: pass means not otherwise excluded; fire and continue.
+                    n.consecutive_sentinel_failures = 0
                     self.skip_count += 1
                     self.sentinel_skip_count += 1
                     n.skip_count += 1
@@ -1630,6 +1859,7 @@ class ChainedAgent:
                 if _authority_expired:
                     continue
                 # Case (b): world changed — proceed with invalidation cascade.
+                n.consecutive_sentinel_failures += 1
                 self.ledger.vars[var].invalidate_certs("sentinel_failure")
                 self._uncertain_this_cycle.add(var)
                 closure = self.ledger.invalidate({var}, cycle, f"sentinel: {reason}")
@@ -1641,7 +1871,31 @@ class ChainedAgent:
                         # been queued. They'll go through tractability ordering
                         # below.
                         needs_audit.append(d)
-            # Needs full audit
+            # Needs full audit — rate-limit in two cases:
+            #
+            # Case A: sentinel-stable loop. Sentinel failed but audit returns
+            # the same fit every time (consecutive_sentinel_failures accumulated,
+            # no sig_change to reset it). The sentinel failure is real but the
+            # full audit learns nothing new. Only re-audit every BACKOFF_INTERVAL.
+            #
+            # Case B: open vocabulary novelty. _maybe_novelty fires when
+            # weak_streak >= novelty_weak_streak — the fit keeps swinging,
+            # meaning the library is insufficient or the world changes faster
+            # than the audit can track. Re-auditing every cycle consumes
+            # interventions without converging. Rate-limit to once per
+            # NOVELTY_INTERVAL cycles. Invariant 7: threshold policy for
+            # high-cost domains.
+            _BACKOFF_THRESHOLD  = 4
+            _BACKOFF_INTERVAL   = 8
+            _NOVELTY_INTERVAL   = 5
+            _STABLE_THRESHOLD   = 3
+            if n.audit_stable_count >= _STABLE_THRESHOLD:
+                continue  # Case C: envelope stable — best fit accepted at noise floor; sentinel re-opens
+            if (n.consecutive_sentinel_failures >= _BACKOFF_THRESHOLD
+                    and cycle % _BACKOFF_INTERVAL != 0):
+                continue  # Case A: sentinel-stable loop
+            if var in _novelty_vars and cycle % _NOVELTY_INTERVAL != 0:
+                continue  # Case B: vocabulary gap — don't thrash
             needs_audit.append(var)
 
         # Parent-as-leading-indicator: if a var enters watch state, pre-queue its
@@ -1692,6 +1946,17 @@ class ChainedAgent:
                         self._live_set.add(_dep)
             else:
                 self._maybe_demote(var, cycle)
+                # Envelope stability: did this audit move ε at all?
+                # sig_changed == False means same fit; now check if the noise
+                # floor itself has shifted. If not AND no OOB cluster, the var
+                # has converged — increment toward the Case C exit.
+                _n = self.ledger.vars[var]
+                if len(_n.envelope.deltas) >= self.envelope_certify_after:
+                    _env_updated = _n.envelope.maybe_certify(cycle)
+                    if not _env_updated and not _n.envelope.envelope_failing():
+                        _n.audit_stable_count += 1
+                    else:
+                        _n.audit_stable_count = 0
             if self._maybe_novelty(var, score, second, cycle, sig_changed=sig_changed):
                 novelty_fired = True
 

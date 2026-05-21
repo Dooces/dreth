@@ -24,6 +24,7 @@ def make_agent(n_vars=4):
             operation="skip", role="tareth", authority="none",
             context_parents=(), context_visible=n_vars, context_cycle=0,
             targets=(), substitutions_tested=("test_setup",), changes=1, trials=1,
+            earned_by="manual_bootstrap",
         )
         nethra.status = "certified"
     return agent
@@ -62,6 +63,7 @@ def seed_fit(agent, var, parents=(0, 1), func="MEAN"):
         operation="skip", role="tareth", authority="none",
         context_parents=tuple(parents), context_visible=4, context_cycle=0,
         targets=(), substitutions_tested=("test_setup",), changes=1, trials=1,
+        earned_by="manual_bootstrap",
     )
     n.strong_observations = 7
     n.sentinels = [(0, 0.25), (1, 0.75)]
@@ -153,6 +155,7 @@ class FitTransitionBoundaryTests(unittest.TestCase):
                 operation="skip", role="trass", authority="skip",
                 context_parents=(), context_visible=3, context_cycle=0,
                 targets=(), substitutions_tested=("test_setup",), changes=0, trials=1,
+                earned_by="manual_bootstrap",
             )
             agent.ledger.vars[parent].status = "trass"
         n = seed_fit(agent, 2, (0, 1), "MEAN")

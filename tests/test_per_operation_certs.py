@@ -185,6 +185,7 @@ def test_invalidate_certs_sentinel_failure():
         context_parents=(1, 2), context_visible=5, context_cycle=10,
         targets=(3, 4), substitutions_tested=("perturbation",),
         changes=3, trials=5,
+        earned_by="manual_bootstrap",
     )
     assert n.role_for("skip") == "tareth"
 
@@ -204,6 +205,7 @@ def test_invalidate_certs_sentinel_failure():
         context_parents=(), context_visible=5, context_cycle=20,
         targets=(), substitutions_tested=("perturbation",),
         changes=0, trials=5,
+        earned_by="manual_bootstrap",
     )
     assert n.role_for("skip") == "trass"
     n.invalidate_certs("structural_mutation")
