@@ -737,7 +737,11 @@ class ChainedLedger:
         """Transitive closure: all variables that the agent BELIEVES depend
         (directly or indirectly) on any var in `changed`, including the
         original set. Computed by repeatedly expanding via variable_dependents
-        until no new vars are added. Used for cascading invalidation."""
+        until no new vars are added. Used for cascading invalidation.
+
+        Route-trass prune: if descendant d has a route-trass cert for parent v
+        (certified that v is interchangeable in d's fit), v's change does not
+        propagate to d. Only route-tareth or uncertified edges cascade."""
         out = set(changed)
         frontier = set(changed)
         while frontier:
@@ -745,6 +749,9 @@ class ChainedLedger:
             for v in frontier:
                 for d in self.variable_dependents(v):
                     if d not in out:
+                        rc = self.vars[d].route_certs.get(v)
+                        if rc is not None and rc.role == "trass":
+                            continue  # v certified irrelevant to d's fit
                         out.add(d)
                         new_front.add(d)
             frontier = new_front

@@ -1620,13 +1620,6 @@ class ChainedAgent:
         cycle = mutation.cycle
         self._uncertain_this_cycle.clear()
 
-        # Dormant partition maintenance: periodic sweep checks sentinels for
-        # vars removed from the hot pass. Noise_floor vars use 3×ε threshold
-        # (set in check_var_sentinels_with_envelope); regular dormant vars use 1×ε.
-        if self._live_set is not None:
-            if cycle - self._last_dormant_recheck >= self._dormant_recheck_period:
-                self._dormant_safety_sweep(cycle)
-                self._last_dormant_recheck = cycle
 
         truth_novelty = any(
             self.world.funcs[i] == "SIN"
