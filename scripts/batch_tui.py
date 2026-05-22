@@ -2,19 +2,19 @@
 """
 Rich dashboard wrapper for scripts/batch_run.py.
 
-The underlying batch runner stays unchanged. This script launches it with
-single-worker progress enabled, captures stdout, and renders the stream as a
+The underlying batch runner stays unchanged. This script passes argv through to
+batch_run.py exactly as provided, captures stdout, and renders the stream as a
 static terminal dashboard instead of line-by-line output.
 
 Examples:
     python scripts/batch_tui.py
-    python scripts/batch_tui.py --ui-progress 10 -- --compare --vars 8,12
-    python scripts/batch_tui.py -- --vars 5,8 --cycles 100 --seeds 1,2,3
+    python scripts/batch_tui.py --compare --vars 8,12
+    python scripts/batch_tui.py --vars 5,8 --cycles 100 --seeds 1,2,3
+    python scripts/batch_tui.py --vars 8 --cycles 100 --seeds 1 --progress 10
 """
 
 from __future__ import annotations
 
-import argparse
 import os
 import re
 import signal
@@ -23,7 +23,7 @@ import sys
 import time
 from collections import deque
 from pathlib import Path
-from typing import Deque, Iterable, List, Optional, Sequence, Tuple
+from typing import Deque, List, Optional, Sequence, Tuple
 
 from rich import box
 from rich.align import Align
@@ -210,65 +210,34 @@ def _escape(value: str) -> str:
     return value.replace("[", "\\[").replace("]", "\\]")
 
 
-def _split_passthrough(argv: Sequence[str]) -> Tuple[List[str], List[str]]:
-    if "--" not in argv:
-        return list(argv), []
-    index = argv.index("--")
-    return list(argv[:index]), list(argv[index + 1 :])
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
 
 
-def _strip_batch_flags(args: Iterable[str], names: Sequence[str]) -> List[str]:
-    names_set = set(names)
-    output: List[str] = []
-    skip_next = False
-    for arg in args:
-        if skip_next:
-            skip_next = False
-            continue
-        if any(arg == name for name in names_set):
-            skip_next = True
-            continue
-        if any(arg.startswith(name + "=") for name in names_set):
-            continue
-        output.append(arg)
-    return output
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
 
 
-def _parse_args(argv: Sequence[str]) -> Tuple[argparse.Namespace, List[str]]:
-    own_args, passthrough = _split_passthrough(argv)
-    parser = argparse.ArgumentParser(
-        description="Render scripts/batch_run.py progress as a Rich terminal dashboard",
-        epilog="Arguments after -- are passed to scripts/batch_run.py.",
-    )
-    parser.add_argument("--ui-progress", type=int, default=10,
-                        help="batch_run.py cycle interval for live progress (default: 10)")
-    parser.add_argument("--refresh-rate", type=float, default=8.0,
-                        help="Rich live refresh rate in frames per second (default: 8)")
-    parser.add_argument("--tail", type=int, default=10,
-                        help="number of recent progress/result/message rows to keep")
-    parser.add_argument("--python", default=sys.executable,
-                        help="Python executable used to launch batch_run.py")
-    parsed, unknown = parser.parse_known_args(own_args)
-    return parsed, unknown + passthrough
-
-
-def _command(options: argparse.Namespace, batch_args: List[str]) -> List[str]:
-    cleaned = _strip_batch_flags(batch_args, ("--workers", "--progress"))
-    return [
-        options.python,
-        str(BATCH_RUN),
-        *cleaned,
-        "--workers",
-        "1",
-        "--progress",
-        str(max(1, options.ui_progress)),
-    ]
+def _command(argv: Sequence[str]) -> List[str]:
+    return [sys.executable, str(BATCH_RUN), *argv]
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
-    options, batch_args = _parse_args(list(argv if argv is not None else sys.argv[1:]))
-    screen = BatchScreen(tail_size=options.tail)
-    cmd = _command(options, batch_args)
+    batch_args = list(argv if argv is not None else sys.argv[1:])
+    screen = BatchScreen(tail_size=_env_int("DRETH_TUI_TAIL", 10))
+    cmd = _command(batch_args)
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
 
@@ -296,7 +265,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         with Live(
             screen.render(),
             console=Console(),
-            refresh_per_second=max(1.0, options.refresh_rate),
+            refresh_per_second=max(1.0, _env_float("DRETH_TUI_REFRESH_RATE", 8.0)),
             screen=False,
             transient=False,
         ) as live:
