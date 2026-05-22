@@ -72,6 +72,7 @@ from __future__ import annotations
 #   and must be replaced with stable_count + distinct_contexts_seen gating (P1.2).
 # ════════════════════════════════════════════════════════════════════════════════
 
+import dataclasses
 import math
 import random
 from typing import Callable, Dict, FrozenSet, List, Optional, Protocol, Set, Tuple
@@ -83,6 +84,31 @@ from .ledger import (ChainedLedger, Compression, CompositeNethra,
 from .fit import fit_var
 from .sentinels import select_var_sentinels, check_var_sentinels_with_envelope
 from .records import CycleRecord, FitDiagnostic
+
+# ── Trass authority thresholds ────────────────────────────────────────────────
+# A trass cert suppresses future sentinel monitoring — the strongest authority
+# the framework grants. It must require more evidence than any cert that merely
+# prioritizes or routes attention (tareth, compression, dormancy).
+#
+# Newly issued trass certs are *provisional*: each hot-pass cycle that reaches
+# the trass block without a prior cascade invalidation increments cert.sentinel_passes
+# (a stable-cycle counter, not a probe counter). Only after _STRONG_TRASS_SENTINEL_PASSES
+# stable cycles (scaled by consequence tier) does the cert earn hard-suppress authority.
+# Trass vars are always counted as skips during the provisional period — they are NOT
+# queued for full audit. If cascade invalidates the cert, provisional evidence resets.
+#
+# Consequence-tier scaling: _STRONG_TRASS_SENTINEL_PASSES + tier * 3
+#   Tier 0 (leaf):  1 stable cycle
+#   Tier 1 (1–2 deps): 4 stable cycles
+#   Tier 2 (3+ deps): 7 stable cycles
+_STRONG_TRASS_SENTINEL_PASSES = 1
+
+# Repair-authority escalation: if a sentinel fires and re-audit returns the same
+# fit _REPAIR_FAILURE_ESCALATION_THRESHOLD times, the var's audit budget is
+# multiplied by _BUDGET_ESCALATION_FACTOR (capped at _BUDGET_ESCALATION_CAP).
+_REPAIR_FAILURE_ESCALATION_THRESHOLD = 3
+_BUDGET_ESCALATION_FACTOR            = 4
+_BUDGET_ESCALATION_CAP               = 400
 class AgentExtension(Protocol):
     derive_compressions: Callable[["ChainedAgent", int, int], List[Compression]]
     derive_equivalence_compressions: Callable[["ChainedAgent", int, int], List[Compression]]
@@ -199,6 +225,33 @@ class ChainedAgent:
         self.sentinel_skip_count = 0
         self.composite_skip_count = 0
         self.total_interventions = 0
+        # Graded cascade event counters — track the four outcomes of sentinel
+        # failure separately so logs can show the distinction the policy recovers:
+        #   sentinel_miss_count:       any sentinel failure (case b, world-changed branch)
+        #   local_reaudit_count:       sentinel-failed var queued for and completed full audit
+        #   signature_changed_count:   re-audit produced a different fit (genuine change)
+        #   descendant_cascade_count:  vars reached by ledger.invalidate after confirmed change
+        #   noisy_miss_no_cascade_count: re-audit found same fit → no cascade (noisy miss)
+        self.sentinel_miss_count = 0
+        self.local_reaudit_count = 0
+        self.signature_changed_count = 0
+        self.descendant_cascade_count = 0
+        self.noisy_miss_no_cascade_count = 0
+        # Repair-authority tracking
+        # oscillation_count: fit changed for a var that had already changed fit before
+        #   (correct→wrong or wrong→correct reversal). Distinguishes repair failure from
+        #   genuine world change.
+        # budget_escalation_count: times any var's audit budget was stepped up due to
+        #   repeated repair failures.
+        self.oscillation_count = 0
+        self.budget_escalation_count = 0
+        # Per-var repair state (not on VarNethra — operative agent policy, not cert data)
+        # _var_repair_failures: sentinel fired → same fit found. Resets on genuine change.
+        # _var_budget_escalation: escalated intervention budget for that var (abs value).
+        # _var_sig_changes: total fit changes for oscillation detection.
+        self._var_repair_failures: Dict[int, int] = {}
+        self._var_budget_escalation: Dict[int, int] = {}
+        self._var_sig_changes: Dict[int, int] = {}
         # Attention contract: trass/compression paths are deliberately lazy.
         # Do not add periodic revalidation, salience polling, or compression
         # spot-checks just to protect hidden truth. Escalate only when observed
@@ -300,6 +353,7 @@ class ChainedAgent:
             and (
                 other_n.status == "certified"
                 or other_n.status == "trass"
+                or other_n.role_for("skip") == "trass"  # provisional trass: status="proposed", role="trass"
                 or (other_n.status == "proposed" and bool(other_n.sentinels))
             )
         }
@@ -318,7 +372,9 @@ class ChainedAgent:
         # size interacts with the targeted-probe selection in ways that need
         # independent calibration before activating scale-up.
         _ = self._adaptive_probe_budget(_n_hyp)  # keeps the intent visible
-        budget = self.intervention_budget
+        # Use escalated budget if this var has accumulated repeated repair failures.
+        # _var_budget_escalation stores the absolute budget to use; falls back to base.
+        budget = self._var_budget_escalation.get(var, self.intervention_budget)
         diag_dict: Dict[str, object] = {
             "cycle": cycle,
             "var": var,
@@ -506,6 +562,7 @@ class ChainedAgent:
             trials=n_trials,
             earned_by="substitution_test",
             witnesses=tuple(witnesses) if role == "tareth" else (),
+            audits_at_issuance=n.full_audits,
         )
         n.certificates["skip"] = cert
         return role
@@ -961,7 +1018,14 @@ class ChainedAgent:
             self._certify_operation_role(var, cycle)
 
         if n.role_for("skip") == "trass":
-            n.status = "trass"
+            # Trass vars: no sentinel monitoring. Clear any sentinels that were
+            # installed before this audit (e.g., from an earlier tareth period).
+            # The hot-pass accumulates stable-cycle evidence in cert.sentinel_passes
+            # and sets status="trass" when threshold is reached. Trass vars never
+            # reach n.authoritative (which requires tareth/noise_floor role), so
+            # sentinel_passes is cycle-counted in the hot-pass trass block, not here.
+            n.sentinels = []
+            n.expected_outcomes = []
             if self._last_fit_diag is not None and self._last_fit_diag.var == var and self._last_fit_diag.cycle == cycle:
                 self._last_fit_diag.status_after = n.status
                 self._last_fit_diag.role_after = n.role_for("skip")
@@ -1006,6 +1070,8 @@ class ChainedAgent:
                 and (n.route_certs.get(other_var) is None or n.route_certs[other_var].role != "trass")
                 and (
                     other_n.status == "certified"
+                    or other_n.status == "trass"
+                    or other_n.role_for("skip") == "trass"
                     or (other_n.status == "proposed" and bool(other_n.sentinels))
                 )
             }
@@ -1045,6 +1111,7 @@ class ChainedAgent:
                 other_var for other_var, other_n in self.ledger.vars.items()
                 if other_var != var
                 and (other_n.status == "certified" or other_n.status == "trass"
+                     or other_n.role_for("skip") == "trass"
                      or (other_n.status == "proposed" and bool(other_n.sentinels)))
             }
             self._certify_route_certs(var, new_parents, avail_for_route, cycle)
@@ -1654,6 +1721,10 @@ class ChainedAgent:
 
         # First pass: cheap paths and queue full audits.
         needs_audit: List[int] = []
+        # Graded cascade: sentinel failures in this cycle that have not yet been
+        # confirmed by a local re-audit. Value = reason string for the cascade
+        # event log. Cascade fires only after _install_var confirms sig_changed.
+        _sentinel_failed_vars: Dict[int, str] = {}
 
         # v28+: process variables in dependency order (parents first) so a
         # parent's sentinel failure invalidates descendants BEFORE they take
@@ -1709,7 +1780,7 @@ class ChainedAgent:
                 skipped.append(var)
                 continue
 
-            # Trass: the skip shortcut fires.
+            # Trass: the skip shortcut fires — but only for CONFIRMED trass certs.
             # FILTER LEDGER: the trass cert IS the shortcut — "not otherwise excluded
             # from skip." It was earned by testing; it fires here by default. The cert
             # carries scope, witnesses, and invalidation conditions. When those conditions
@@ -1721,12 +1792,63 @@ class ChainedAgent:
             # witnesses, no invalidation conditions. Using it as a gate bypasses the
             # filter ledger entirely and makes the var permanently invisible to
             # _retest_trass_vars (scope-expansion revalidation).
+            #
+            # PROVISIONAL TRASS: a trass cert is provisional until a subsequent full
+            # audit has occurred AFTER the cert was issued. cert.audits_at_issuance
+            # records n.full_audits at issuance; confirmation requires n.full_audits
+            # > cert.audits_at_issuance. This is cert-local, not a lifetime counter,
+            # so it catches mid-run new certs (world changes → wrong fit → trass cert
+            # at full_audits=N → provisional until audit N+1 occurs).
+            #
+            # Provisional path: queue for audit WITHOUT resetting the cert. _install_var
+            # increments full_audits and returns early (role is "trass" → no
+            # _certify_operation_role call → cert unchanged → gate passes next cycle).
             if n.role_for("skip") == "trass":
+                cert = n.certificates["skip"]
+                _trass_strong_threshold = (
+                    _STRONG_TRASS_SENTINEL_PASSES + self._consequence_tier(var) * 3
+                )
+                if cert.confirmed and cert.sentinel_passes >= _trass_strong_threshold:
+                    # Strong confirmed trass: cert has accumulated enough stable cycles
+                    # without cascade — hard-suppress future detection.
+                    self.skip_count += 1
+                    self.trass_skip_count += 1
+                    n.skip_count += 1
+                    skipped.append(var)
+                    if self._live_set is not None:
+                        self._live_set.discard(var)
+                    continue
+                # Provisional trass: cert exists but has not yet accumulated enough
+                # stable cycles. Each cycle this block is reached (without prior
+                # cascade invalidating the cert) increments sentinel_passes (stable-
+                # cycle counter). On first confirmation, mark confirmed=True.
+                # Count as a skip regardless — provisional trass IS an earned shortcut;
+                # we accumulate evidence in the background without full-audit cost.
+                # If cascade reaches this var, the cert is invalidated BEFORE this
+                # point and the trass block is never entered — var goes to audit queue.
+                if not cert.confirmed:
+                    _new_sp = 1
+                    n.certificates["skip"] = dataclasses.replace(
+                        cert, confirmed=True, sentinel_passes=_new_sp
+                    )
+                    self.ledger.event_log.append(
+                        f"c{cycle}: x{var} provisional_trass confirmed "
+                        f"(stable_cycles=1/{_trass_strong_threshold} needed)"
+                    )
+                else:
+                    _new_sp = cert.sentinel_passes + 1
+                    n.certificates["skip"] = dataclasses.replace(cert, sentinel_passes=_new_sp)
+                if _new_sp >= _trass_strong_threshold:
+                    n.status = "trass"
+                    self.ledger.event_log.append(
+                        f"c{cycle}: x{var} trass STRONG "
+                        f"({_new_sp}/{_trass_strong_threshold} stable cycles — hard-suppress earned)"
+                    )
                 self.skip_count += 1
                 self.trass_skip_count += 1
                 n.skip_count += 1
                 skipped.append(var)
-                if self._live_set is not None:
+                if _new_sp >= _trass_strong_threshold and self._live_set is not None:
                     self._live_set.discard(var)
                 continue
 
@@ -1882,19 +2004,27 @@ class ChainedAgent:
                         _authority_expired = True
                 if _authority_expired:
                     continue
-                # Case (b): world changed — proceed with invalidation cascade.
+                # Case (b): world changed — local demotion only (graded cascade).
+                # Single sentinel miss earns local re-audit, not immediate
+                # descendant cascade. Cascade fires only after _install_var
+                # confirms sig_changed (genuine parent mutation). Noisy misses
+                # that resolve to the same fit produce zero cascade work.
                 n.consecutive_sentinel_failures += 1
                 self.ledger.vars[var].invalidate_certs("sentinel_failure")
                 self._uncertain_this_cycle.add(var)
-                closure = self.ledger.invalidate({var}, cycle, f"sentinel: {reason}")
+                # Demote local var without touching descendants.
+                if n.status == "certified":
+                    n.status = "uncertain"
+                    n.collapse_log.append(f"c{cycle}: sentinel — local demotion (pending re-audit)")
+                elif n.status in ("proposed", "quarantined"):
+                    n.strong_observations = 0
+                    n.status = "uncertain"
+                    n.collapse_log.append(f"c{cycle}: sentinel — local demotion (pending re-audit)")
+                n.tied_frontier = None
                 if self._live_set is not None:
-                    self._live_set.update(closure)
-                for d in closure:
-                    if d != var and d not in needs_audit:
-                        # Force re-audit of descendants if they haven't already
-                        # been queued. They'll go through tractability ordering
-                        # below.
-                        needs_audit.append(d)
+                    self._live_set.add(var)
+                _sentinel_failed_vars[var] = f"sentinel: {reason}"
+                self.sentinel_miss_count += 1
             # Needs full audit — rate-limit in two cases:
             #
             # Case A: sentinel-stable loop. Sentinel failed but audit returns
@@ -1939,13 +2069,59 @@ class ChainedAgent:
             parents, func, score, second = self._full_audit_var(var, cycle)
             sig_changed = self._install_var(var, parents, func, score, second, cycle)
             audited.append(var)
+            if var in _sentinel_failed_vars:
+                self.local_reaudit_count += 1
             if sig_changed:
                 drift.append(var)
                 self.ledger.record_drift(var, cycle)
                 if self._live_set is not None:
                     for _dep in self.ledger.variable_dependents(var):
                         self._live_set.add(_dep)
+                # Graded cascade: if this var had a sentinel failure this cycle
+                # AND re-audit confirms the fit changed, cascade to descendants.
+                # Noisy misses (sig_changed=False) produce no cascade.
+                if var in _sentinel_failed_vars:
+                    self.signature_changed_count += 1
+                    _cascade_reason = _sentinel_failed_vars[var]
+                    closure = self.ledger.invalidate({var}, cycle, _cascade_reason)
+                    self.descendant_cascade_count += len(closure) - 1
+                    if self._live_set is not None:
+                        self._live_set.update(closure)
+                    self.ledger.event_log.append(
+                        f"c{cycle}: x{var} sentinel confirmed — cascading {len(closure)-1} descendants"
+                    )
+                    # Genuine change: reset repair-failure counter (the sentinel was right).
+                    self._var_repair_failures.pop(var, None)
+                # Oscillation: fit changed for a var that has changed before.
+                # Distinguishes repair oscillation (wrong→correct→wrong) from
+                # genuine world change (stable→changed once).
+                _prev_changes = self._var_sig_changes.get(var, 0)
+                self._var_sig_changes[var] = _prev_changes + 1
+                if _prev_changes >= 1:
+                    self.oscillation_count += 1
             else:
+                if var in _sentinel_failed_vars:
+                    self.noisy_miss_no_cascade_count += 1
+                    # Repair failure: sentinel fired but re-audit found same fit.
+                    # Accumulate toward budget escalation.
+                    _rf = self._var_repair_failures.get(var, 0) + 1
+                    self._var_repair_failures[var] = _rf
+                    if _rf >= _REPAIR_FAILURE_ESCALATION_THRESHOLD:
+                        _current_budget = self._var_budget_escalation.get(
+                            var, self.intervention_budget
+                        )
+                        _new_budget = min(
+                            _current_budget * _BUDGET_ESCALATION_FACTOR,
+                            _BUDGET_ESCALATION_CAP,
+                        )
+                        if _new_budget > _current_budget:
+                            self._var_budget_escalation[var] = _new_budget
+                            self.budget_escalation_count += 1
+                            self.ledger.event_log.append(
+                                f"c{cycle}: x{var} audit budget escalated "
+                                f"{_current_budget}→{_new_budget} "
+                                f"(repair_failures={_rf})"
+                            )
                 self._maybe_demote(var, cycle)
                 # Envelope stability: did this audit move ε at all?
                 # sig_changed == False means same fit; now check if the noise

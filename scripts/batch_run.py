@@ -61,6 +61,7 @@ class RunConfig:
     noise_sigma: float
     compare: bool = False
     ablate: bool = False
+    log_interval: int = 0   # 0 = disabled; N = print progress every N cycles
 
 
 # ── per-run result ─────────────────────────────────────────────────────────────
@@ -399,10 +400,24 @@ def _compute_tier_metrics(
 def _build_and_run_dreth(
     cfg: RunConfig,
     consequence_weight: bool = True,
+    log_interval: int = 0,
+    log_tag: str = "",
+    agent_seed_offset: int = 0,
 ) -> Tuple[ChainedAgent, CausalWorld, int, List[int], List[int]]:
-    """Returns (agent, world, snap_cycle, wrong_at_20pct, wrong_at_end)."""
+    """Returns (agent, world, snap_cycle, wrong_at_20pct, wrong_at_end).
+
+    When log_interval > 0, prints a one-line status every log_interval cycles
+    to stdout. log_tag prefixes each line (useful to distinguish CW ON vs OFF).
+
+    agent_seed_offset shifts rng_a independently of rng_w, so two runs on the
+    same world (same rng_w seed) can have independent agent randomness. Use a
+    non-zero offset for the ablation branch to decouple RNG trajectories —
+    otherwise CW ON (which places more sentinels via P1) consumes more RNG,
+    shifting all subsequent fit_var calls and making the comparison confounded
+    by trajectory divergence rather than policy difference.
+    """
     rng_w = random.Random(cfg.seed)
-    rng_a = random.Random(cfg.seed + 10_000)
+    rng_a = random.Random(cfg.seed + 10_000 + agent_seed_offset)
 
     initial_visible = 1 if cfg.schedule == "incremental" else cfg.n_vars
     world = CausalWorld(cfg.n_vars, rng_w, noise_sigma=cfg.noise_sigma,
@@ -417,22 +432,98 @@ def _build_and_run_dreth(
     snap_cycle = max(1, cfg.cycles // 5)
     dreth_wrong_at_20: List[int] = []
     agent.initialize()
+
+    # ── progress-logging state ────────────────────────────────────────────────
+    # fit_history[var] = list of (cycle, parents, correct) for each fit change
+    fit_history: Dict[int, List[Tuple[int, tuple, bool]]] = {}
+    prev_iv = 0
+    prev_sent_skip = 0
+
+    def _snap_parents() -> Dict[int, tuple]:
+        return {v: agent.ledger.vars[v].parents for v in range(world.visible_count)}
+
+    def _wrong_now() -> List[int]:
+        return sorted(
+            v for v in range(world.visible_count)
+            if set(agent.ledger.vars[v].parents) != set(world.parents[v])
+        )
+
     for cycle in range(1, cfg.cycles + 1):
+        if log_interval > 0:
+            pre_parents = _snap_parents()
+
         m = world.perturb_by_schedule(cycle, cfg.schedule,
                                       settle_cycles=cfg.settle_cycles)
         if m.kind == "REVEAL":
             agent.on_variable_revealed(m.affected_var, cycle)
         else:
             agent.run_cycle(m)
+
         if cycle == snap_cycle:
             dreth_wrong_at_20 = sorted(
                 var for var in range(world.visible_count)
                 if set(agent.ledger.vars[var].parents) != set(world.parents[var])
             )
+
+        if log_interval > 0:
+            # Track fit changes this cycle
+            changed = []
+            for v in range(world.visible_count):
+                cur = agent.ledger.vars[v].parents
+                if cur != pre_parents.get(v):
+                    correct = set(cur) == set(world.parents[v])
+                    if v not in fit_history:
+                        fit_history[v] = []
+                    fit_history[v].append((cycle, cur, correct))
+                    changed.append(v)
+
+            if cycle % log_interval == 0:
+                wrong = _wrong_now()
+                iv_delta = agent.total_interventions - prev_iv
+                sent_delta = agent.sentinel_skip_count - prev_sent_skip
+                vis = world.visible_count
+                tag = f"[{log_tag}] " if log_tag else ""
+                changed_str = (
+                    " fits=[" + ",".join(
+                        f"x{v}→{'ok' if set(agent.ledger.vars[v].parents)==set(world.parents[v]) else 'WRG'}"
+                        for v in changed
+                    ) + "]"
+                ) if changed else ""
+                wrong_str = ("{" + ",".join(f"x{v}" for v in wrong) + "}"
+                             if wrong else "∅")
+                print(
+                    f"  {tag}c{cycle:4d}/{cfg.cycles} vis={vis:2d} "
+                    f"wrong={wrong_str} "
+                    f"Δiv={iv_delta:4d} Δsent={sent_delta:3d}"
+                    f"{changed_str}",
+                    flush=True,
+                )
+                prev_iv = agent.total_interventions
+                prev_sent_skip = agent.sentinel_skip_count
+
     dreth_wrong_at_end = sorted(
         var for var in range(world.visible_count)
         if set(agent.ledger.vars[var].parents) != set(world.parents[var])
     )
+
+    # ── end-of-run wrong-fit trace ────────────────────────────────────────────
+    if log_interval > 0 and dreth_wrong_at_end:
+        tag = f"[{log_tag}] " if log_tag else ""
+        print(f"  {tag}end wrong-fit trace:", flush=True)
+        for v in dreth_wrong_at_end:
+            n = agent.ledger.vars[v]
+            t = agent._consequence_tier(v)
+            hist = fit_history.get(v, [])
+            hist_str = " → ".join(
+                f"c{c}:{list(p)}({'ok' if ok else 'WRG'})" for c, p, ok in hist
+            )
+            print(
+                f"    x{v} T{t} {n.status}: parents={list(n.parents)} true={world.parents[v]} "
+                f"strong_obs={n.strong_observations} sent={len(n.sentinels)} "
+                f"history=[{hist_str}]",
+                flush=True,
+            )
+
     return agent, world, snap_cycle, dreth_wrong_at_20, dreth_wrong_at_end
 
 
@@ -571,7 +662,9 @@ def _check_invariants(arch: ArchMetrics) -> List[str]:
 def _run_one(cfg: RunConfig) -> RunResult:
     t0 = time.monotonic()
     try:
-        agent, world, snap_cycle, dreth_wrong_at_20, dreth_wrong_at_end = _build_and_run_dreth(cfg)
+        agent, world, snap_cycle, dreth_wrong_at_20, dreth_wrong_at_end = _build_and_run_dreth(
+            cfg, log_interval=cfg.log_interval, log_tag="CW" if cfg.ablate else ""
+        )
         elapsed = time.monotonic() - t0
         tier = _compute_tier_metrics(agent, world, set(dreth_wrong_at_end))
 
@@ -659,7 +752,11 @@ def _run_one(cfg: RunConfig) -> RunResult:
     # ── ablation: re-run with consequence_weight=False ────────────────────────
     if cfg.ablate:
         try:
-            a2, w2, _, _, end2 = _build_and_run_dreth(cfg, consequence_weight=False)
+            a2, w2, _, _, end2 = _build_and_run_dreth(
+                cfg, consequence_weight=False,
+                log_interval=cfg.log_interval, log_tag="CW-OFF",
+                agent_seed_offset=5_000,
+            )
             result.tier_no_cw = _compute_tier_metrics(a2, w2, set(end2))
         except Exception:
             pass  # ablation failure is non-fatal; tier_no_cw stays None
@@ -981,11 +1078,18 @@ def main():
                    help="run sparse_cached_refit baseline alongside Dreth and report comparison")
     p.add_argument("--ablate-consequence", action="store_true",
                    help="re-run each config with consequence_weight=False and compare tier metrics")
+    p.add_argument("--progress", type=int, default=0, metavar="N",
+                   help="print a per-cycle status line every N cycles (forces --workers 1)")
     args = p.parse_args()
 
     var_list   = [int(x) for x in args.vars.split(",")]
     cycle_list = [int(x) for x in args.cycles.split(",")]
     seed_list  = [int(x) for x in args.seeds.split(",")]
+
+    # --progress forces single-worker to avoid interleaved output
+    n_workers = args.workers
+    if args.progress > 0:
+        n_workers = 1
 
     configs = [
         RunConfig(n_vars=v, cycles=c, seed=s,
@@ -993,7 +1097,8 @@ def main():
                   settle_cycles=args.settle_cycles,
                   noise_sigma=args.noise_sigma,
                   compare=args.compare,
-                  ablate=args.ablate_consequence)
+                  ablate=args.ablate_consequence,
+                  log_interval=args.progress)
         for v in var_list
         for c in cycle_list
         for s in seed_list
@@ -1003,13 +1108,17 @@ def main():
     mode = " +compare" if args.compare else ""
     if args.ablate_consequence:
         mode += " +ablate"
+    if args.progress:
+        mode += f" +progress({args.progress})"
     print(f"dreth arch-test{mode}: {total} runs | "
           f"vars={var_list} cycles={cycle_list} seeds={seed_list} "
           f"schedule={args.schedule}", flush=True)
-    print(f"  workers={args.workers or 'cpu'}  settle={args.settle_cycles}  "
+    print(f"  workers={n_workers}  settle={args.settle_cycles}  "
           f"noise={args.noise_sigma}", flush=True)
     if args.compare:
         print(f"  baseline: sparse_cached_refit (K=10 window=8 threshold=3 refresh_interval=100)", flush=True)
+    if args.progress:
+        print(f"  progress: every {args.progress} cycles — wrong-fit vars, Δiv, Δsent, fit changes", flush=True)
     print(f"  checking: I1(earned_by) I2(audit-role) I3(dormant-type) "
           f"I4(revoked_by) I5(route-target-owned)", flush=True)
     print()
@@ -1022,7 +1131,7 @@ def main():
     done = 0
     out_fh = open(args.out, "w") if args.out else None
 
-    with ProcessPoolExecutor(max_workers=args.workers) as pool:
+    with ProcessPoolExecutor(max_workers=n_workers) as pool:
         futures = {pool.submit(_run_one, cfg): cfg for cfg in configs}
         for fut in as_completed(futures):
             r = fut.result()

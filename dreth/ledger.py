@@ -153,6 +153,20 @@ class NethraCertificate:
     # during _certify_operation_role. The sentinel path replays these each cycle.
     # For compress certs: Tuple of one (state_snapshot: Tuple[float,...], simplified_value: float).
     # Trass certs carry no witnesses (no intervention that produced change to store).
+    audits_at_issuance: int = 0
+    # full_audits value of the var when this cert was issued (diagnostic only — do not
+    # use as a skip gate; full_audits is a count of _full_audit_var calls and must not
+    # be incremented for provisional trass confirmation).
+    confirmed: bool = False
+    # For trass certs: True once a second hot-pass cycle has passed since issuance,
+    # confirming the verdict is not provisional. Gates the hard-skip in run_cycle.
+    sentinel_passes: int = 0
+    # Sentinel passes accumulated AFTER the trass cert was issued. Hard-suppress of
+    # future sentinels requires sentinel_passes >= _STRONG_TRASS_SENTINEL_PASSES
+    # (scaled by consequence tier). Until that threshold, the trass cert exists but
+    # sentinels still run — the cert has provisional authority, not detector-suppressing
+    # authority. A cert that suppresses future evidence must require stronger authority
+    # than one that merely prioritizes attention.
 
 
 # ── PER-VARIABLE NETHRA ───────────────────────────────────────────────────────
@@ -621,6 +635,16 @@ class VarNethra:
             for op in list(self.certificates):
                 self.certificates[op] = dataclasses.replace(
                     self.certificates[op], role="untested", revoked_by="fit_instability"
+                )
+        if event == "provisional_trass_retest":
+            # A trass cert earned on the first audit only has not been independently
+            # confirmed. Reset the skip cert so _certify_operation_role re-runs on
+            # the next audit. Does not clear audit/compress — they may still be valid.
+            if "skip" in self.certificates:
+                self.certificates["skip"] = dataclasses.replace(
+                    self.certificates["skip"],
+                    role="untested",
+                    revoked_by="provisional_trass_retest",
                 )
 
     @property

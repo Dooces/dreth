@@ -78,15 +78,30 @@ def test_02_trass_vars_skip_every_cycle_and_count_grows():
                   if agent.ledger.vars[v].role_for("skip") == "trass"]
     assert trass_vars, "expected at least one trass var in seed-3 world"
 
+    # Provisional trass: initialize() issues the cert unconfirmed.
+    # Cycle 1 is the provisional confirmation cycle — the hot-pass marks
+    # cert.confirmed=True (O(1), no fit_var call). Hard-skip fires from cycle 2.
+    # full_audits is NOT incremented in the provisional path: it counts
+    # _full_audit_var calls only.
+    agent.run_cycle(_steady(1))
+    for v in trass_vars:
+        cert = agent.ledger.vars[v].certificates.get("skip")
+        assert cert is not None and cert.confirmed, (
+            f"x{v} trass cert must be confirmed after cycle 1"
+        )
+        assert agent.ledger.vars[v].role_for("skip") == "trass", (
+            f"x{v} must still be trass after provisional re-audit"
+        )
+
     skip_counts_before = {v: agent.ledger.vars[v].skip_count for v in trass_vars}
 
-    n_cycles = 10
-    for c in range(1, n_cycles + 1):
+    n_cycles = 9
+    for c in range(2, n_cycles + 2):
         agent.run_cycle(_steady(c))
         r = agent.records[-1]
         for v in trass_vars:
             assert v in r.skipped_vars, \
-                f"x{v} (trass) must appear in skipped_vars every cycle; missing at c{c}"
+                f"x{v} (confirmed trass) must appear in skipped_vars; missing at c{c}"
 
     for v in trass_vars:
         after = agent.ledger.vars[v].skip_count
@@ -174,10 +189,14 @@ def test_06_skip_path_breakdown_matches_cert_roles():
     After N cycles with a stable world (no mutations), the agent's skip counters
     must exactly account for all vars and all cycles.
 
-    - trass_skip_count == n_trass_vars × n_cycles
-    - sentinel_skip_count == n_tareth_vars × n_cycles
-    - skip_count == trass_skip_count + sentinel_skip_count
-    - full_audit_count == n_visible (only from initialize())
+    Trass certs earned at initialize() are provisional (full_audits=1). Cycle 1 is a
+    mandatory provisional re-audit that confirms them; trass skips begin at cycle 2.
+    Measurement window: cycles 2–9 (delta from post-warmup counters).
+
+    - trass_skip_count Δ == n_trass_vars × n_cycles
+    - sentinel_skip_count Δ == n_tareth_vars × n_cycles
+    - skip_count Δ == trass_skip_count Δ + sentinel_skip_count Δ
+    - full_audit_count unchanged after warm-up (stable world, no new failures)
     """
     agent, world = _make_agent()
     agent.initialize()
@@ -192,30 +211,46 @@ def test_06_skip_path_breakdown_matches_cert_roles():
     assert n_tareth > 0, "seed world must have tareth vars"
     assert n_trass + n_tareth == n_visible
 
-    # Capture init-time full_audit_count before running cycles
-    audits_at_init = agent.full_audit_count  # == n_visible from initialize()
+    # Cycle 1: provisional confirmation — hot-pass marks cert.confirmed=True (O(1)).
+    # full_audits is NOT incremented (no _full_audit_var call in provisional path).
+    agent.run_cycle(_steady(1))
+    for v in range(n_visible):
+        if agent.ledger.vars[v].role_for("skip") == "trass":
+            cert = agent.ledger.vars[v].certificates.get("skip")
+            assert cert is not None and cert.confirmed, \
+                f"x{v} trass cert must be confirmed after cycle 1"
+
+    # Snapshot counters after warm-up; measurement window starts at cycle 2.
+    trass_skips_base = agent.trass_skip_count
+    sentinel_skips_base = agent.sentinel_skip_count
+    skip_count_base = agent.skip_count
+    audits_after_warmup = agent.full_audit_count
 
     n_cycles = 8
-    for c in range(1, n_cycles + 1):
+    for c in range(2, n_cycles + 2):
         agent.run_cycle(_steady(c))
 
     expected_trass_skips = n_trass * n_cycles
     expected_sentinel_skips = n_tareth * n_cycles
 
-    assert agent.trass_skip_count == expected_trass_skips, (
-        f"trass_skip_count={agent.trass_skip_count} expected {expected_trass_skips} "
+    actual_trass = agent.trass_skip_count - trass_skips_base
+    actual_sentinel = agent.sentinel_skip_count - sentinel_skips_base
+    actual_skip = agent.skip_count - skip_count_base
+
+    assert actual_trass == expected_trass_skips, (
+        f"trass_skip_count Δ={actual_trass} expected {expected_trass_skips} "
         f"({n_trass} trass vars × {n_cycles} cycles)"
     )
-    assert agent.sentinel_skip_count == expected_sentinel_skips, (
-        f"sentinel_skip_count={agent.sentinel_skip_count} expected {expected_sentinel_skips} "
+    assert actual_sentinel == expected_sentinel_skips, (
+        f"sentinel_skip_count Δ={actual_sentinel} expected {expected_sentinel_skips} "
         f"({n_tareth} tareth vars × {n_cycles} cycles)"
     )
-    assert agent.skip_count == expected_trass_skips + expected_sentinel_skips, (
-        "skip_count must equal trass + sentinel skips (no compression skips in stable world)"
+    assert actual_skip == expected_trass_skips + expected_sentinel_skips, (
+        "skip_count Δ must equal trass + sentinel skips (no compression skips in stable world)"
     )
-    # No new full audits after init in a stable world (all vars on cheap path)
-    assert agent.full_audit_count == audits_at_init, \
-        "no new full audits expected in a stable world after initialization"
+    # No new full audits after provisional warm-up in a stable world
+    assert agent.full_audit_count == audits_after_warmup, \
+        "no new full audits expected after provisional warm-up in a stable world"
 
 
 # ── 07 ────────────────────────────────────────────────────────────────────────
