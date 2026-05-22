@@ -60,7 +60,7 @@ def select_var_sentinels(
     kept as a legacy field.
     """
     candidates = [(rng.randint(0, world.visible_count - 1), rng.random()) for _ in range(pool)]
-    if available_parents is None or len(available_parents - {var}) < 2:
+    if available_parents is None:
         neighbors = enumerate_var_hypotheses(var, world.visible_count)
     else:
         neighbors = enumerate_var_hypotheses_restricted(

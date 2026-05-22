@@ -276,7 +276,11 @@ def fit_var(
     Diagnostics never affect fit selection.
     """
     n_vars = world.visible_count
-    restricted_used = not (available_parents is None or len(available_parents - {var}) < 2)
+    # Use unrestricted enumeration only when available_parents was not provided
+    # (legacy/no-constraint callers). An explicitly empty set means "no committed
+    # parents yet" → restrict to constants; do NOT fall back to the full n_vars²
+    # hypothesis space which causes blowup when the agent is bootstrapping.
+    restricted_used = available_parents is not None
     if not restricted_used:
         hypotheses = enumerate_var_hypotheses(var, n_vars)
     else:

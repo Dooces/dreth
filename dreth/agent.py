@@ -81,7 +81,7 @@ from typing import Callable, Dict, FrozenSet, List, Optional, Protocol, Set, Tup
 from .functions import FUNC_LIBRARY
 from .world import CausalWorld, HiddenMutation
 from .ledger import (ChainedLedger, Compression, CompositeNethra,
-                     DormantAlternative, NethraCertificate, Role, TiedFrontier)
+                     DEFAULT_TOLERANCE, DormantAlternative, NethraCertificate, Role, TiedFrontier)
 from .fit import fit_var
 from .sentinels import select_var_sentinels, check_var_sentinels_with_envelope
 from .records import CycleRecord, FitDiagnostic
@@ -166,6 +166,7 @@ class ChainedAgent:
         role_salience: str = "all-visible",
         salience_targets: Optional[Set[int]] = None,
         consequence_weight: bool = True,
+        frontier_k: int = 4,
     ):
         """Construct agent. Initializes empty ledger, zero counters, and
         applies any provided per-var cost weight overrides."""
@@ -294,6 +295,13 @@ class ChainedAgent:
         self._topo_cache: Optional[List[int]] = None
         self._topo_cache_visible_count: int = -1
 
+        # Sparse init: how many vars to full-audit at cold start.
+        self.frontier_k: int = frontier_k
+        # Vars screened as causally inert at init (no downstream movement across
+        # 0.05/0.95 perturbation range). Not admitted to frontier unless woken by
+        # a descendant sentinel failure or direct dependency event.
+        self._inert_vars: Set[int] = set()
+
         # Dormant partition: certified+stable vars are removed from the hot
         # pass. Re-entry is failure-driven: only a sentinel failure (cascade
         # invalidation) wakes a dormant var. None until initialize() runs.
@@ -359,14 +367,11 @@ class ChainedAgent:
             )
         }
         # Estimate hypothesis space size so the probe budget can scale with
-        # ambiguity. Uses the same restricted-vs-full selection rule as fit_var
-        # (restricted when available has ≥ 2 candidates).
+        # ambiguity. Always use restricted formula: fit_var now uses restricted
+        # enumeration for any explicitly-provided available set (even empty).
+        # Empty available → _n_hyp = 2 (constants only). Full set → full restricted.
         _n_av = len(available)
-        if _n_av >= 2:
-            _n_hyp = 2 + _n_av + (_n_av * (_n_av - 1) // 2 * 5)
-        else:
-            _nv = self.world.visible_count - 1
-            _n_hyp = 2 + _nv + (_nv * (_nv - 1) // 2 * 5)
+        _n_hyp = 2 + _n_av + (_n_av * (_n_av - 1) // 2 * 5)
         # Adaptive probe budget: scale up with hypothesis space size.
         # Only scales UP from base (see _adaptive_probe_budget docstring).
         # Failure-earned repair escalation (_var_budget_escalation) can exceed
@@ -1707,16 +1712,85 @@ class ChainedAgent:
                 and cycle - n.envelope.certified_at_cycle >= min_cert_age):
             self._live_set.discard(var)
 
+    def _cheap_salience_screen(self) -> Set[int]:
+        """Two-probe causal salience screen run once at cold start.
+
+        For each visible var, force it to 0.05 and 0.95 and check whether
+        any OTHER visible var moves by more than DEFAULT_TOLERANCE across
+        that range. If yes → salient (potentially load-bearing cause).
+        If no → inert (no observable downstream effect at this state).
+
+        Cost: 2 × predict_under_intervention per var = O(n_vars) probes total,
+        vs the O(n_vars × hypotheses × probes) cost of full auditing all vars.
+        """
+        salient: Set[int] = set()
+        visible = self.world.visible_count
+        for var in range(visible):
+            state_lo = self.world.predict_under_intervention(var, 0.05)
+            state_hi = self.world.predict_under_intervention(var, 0.95)
+            self.total_interventions += 2
+            for j in range(visible):
+                if j == var:
+                    continue
+                if abs(state_lo[j] - state_hi[j]) > DEFAULT_TOLERANCE:
+                    salient.add(var)
+                    break
+        return salient
+
+    def _priority_score(self, var: int, cycle: int) -> float:
+        """Frontier priority score. Higher = audit sooner.
+
+          failure_signal         consecutive sentinel failures (most urgent)
+        + consequence_weight     var's cost weight from ledger
+        + dep_score              1 per live var that currently believes this var as parent
+        + uncertainty_age        time since last change, if never audited (novel vars age in)
+        - clean_passes           skip count × 0.1 (penalises boring stable vars)
+        """
+        n = self.ledger.vars[var]
+        failure_signal = n.consecutive_sentinel_failures * 2.0
+        consequence = n.cost_weight
+        dep_score = sum(
+            1.0 for fv in (self._live_set or set())
+            if var in self.ledger.vars[fv].parents
+        )
+        uncertainty_age = (cycle - n.last_changed_cycle) * 0.01 if n.full_audits == 0 else 0.0
+        clean_passes = n.skip_count * 0.1
+        return failure_signal + consequence + dep_score + uncertainty_age - clean_passes
+
+    def _pick_initial_frontier(self, salient: Set[int], K: int) -> Set[int]:
+        """Return top-K salient vars by priority score.
+
+        K >= visible_count acts as a full-audit flag: return all visible vars
+        regardless of salience (old behavior, useful in tests and small worlds).
+        Falls back to all visible vars if the salience screen found nothing.
+        """
+        visible = self.world.visible_count
+        if K >= visible:
+            return set(range(visible))
+        candidates = list(salient) if salient else list(range(visible))
+        if len(candidates) <= K:
+            return set(candidates)
+        scored = sorted(candidates, key=lambda v: self._priority_score(v, 0), reverse=True)
+        return set(scored[:K])
+
     def initialize(self) -> None:
-        """First-time audit pass: full audit on every currently-visible
-        variable, in tractability order. Used at agent startup before
-        cycle 1. In incremental mode this audits only the initial visible
-        set; new variables get their first audit via on_variable_revealed."""
-        first_pass_order = self._audit_priority_order(list(range(self.world.visible_count)))
+        """Sparse initialization: cheap salience screen → pick K frontier vars → audit only those.
+
+        Replaces the previous full audit of every visible var. Cost drops from
+        O(n_vars × hypotheses × probes) to O(n_vars × 2) for the screen plus
+        O(K × hypotheses × probes) for the K frontier audits.
+
+        Vars screened as inert are stored in _inert_vars and skipped at startup.
+        They remain eligible for wakeup via sentinel cascade or dependency events.
+        """
+        salient = self._cheap_salience_screen()
+        self._inert_vars = set(range(self.world.visible_count)) - salient
+        frontier = self._pick_initial_frontier(salient, self.frontier_k)
+        first_pass_order = self._audit_priority_order(list(frontier))
         for var in first_pass_order:
             parents, func, score, second = self._full_audit_var(var, 0)
             self._install_var(var, parents, func, score, second, 0)
-        self._live_set = set(range(self.world.visible_count))
+        self._live_set = set(frontier)
 
     def on_variable_revealed(self, new_var: int, cycle: int) -> None:
         """Hook fired when world reveals a new variable. Audits the new var;
@@ -2236,6 +2310,35 @@ class ChainedAgent:
                 self.max_defer_streak[v] = max(self.max_defer_streak[v], self.defer_streak[v])
             else:
                 self.defer_streak[v] = 0
+
+        # Frontier admission: when the live set has no unresolved vars, admit
+        # the next highest-priority unknowns (up to frontier_k at a time) so the
+        # agent keeps making forward progress without ever auditing everything upfront.
+        # "Unresolved" = status not yet certified/trass and not dormant-eligible.
+        # "Unknown" = never audited, not inert, not already live.
+        if self._live_set is not None:
+            unresolved = {
+                v for v in self._live_set
+                if (self.ledger.vars[v].status in ("uncertain", "proposed")
+                    and self.ledger.vars[v].role_for("skip") != "trass")
+            }
+            if not unresolved:
+                unknown = [
+                    v for v in range(self.world.visible_count)
+                    if v not in self._live_set
+                    and self.ledger.vars[v].full_audits == 0
+                    and v not in self._inert_vars
+                ]
+                if unknown:
+                    admit = sorted(unknown,
+                                   key=lambda v: self._priority_score(v, cycle),
+                                   reverse=True)[:self.frontier_k]
+                    for v in admit:
+                        self._live_set.add(v)
+                    self.ledger.event_log.append(
+                        f"c{cycle}: frontier admit {[f'x{v}' for v in admit]} "
+                        f"({len(unknown)-len(admit)} unknown remaining)"
+                    )
 
         if self._uncertain_this_cycle:
             self._find_joint_trass_candidates(cycle)

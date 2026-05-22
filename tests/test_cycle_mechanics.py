@@ -45,6 +45,7 @@ def _make_agent(cost_weights=None, **kwargs):
         compression_promote_after=3,
         priority_audit_budget=5,
         cost_weights=cost_weights,
+        frontier_k=world.n_vars,  # audit all vars: these tests probe cert quality, not init sparseness
         **kwargs,
     )
     return agent, world
@@ -275,6 +276,7 @@ def test_07_variable_reveal_audits_new_var_with_trass_vars_as_candidates():
         compression_discover_after=3,
         compression_promote_after=3,
         priority_audit_budget=6,
+        frontier_k=world.n_vars,  # audit all vars at init so x4 has trass cert before x5 reveal
     )
     agent.initialize()
 
