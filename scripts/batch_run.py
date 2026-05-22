@@ -60,6 +60,7 @@ class RunConfig:
     settle_cycles: int
     noise_sigma: float
     compare: bool = False
+    ablate: bool = False
 
 
 # ── per-run result ─────────────────────────────────────────────────────────────
@@ -121,6 +122,27 @@ class BaselineMetrics:
 
 
 @dataclass
+class TierMetrics:
+    """Per-consequence-tier breakdown: wrong fits, avg sentinel count, avg cycles-to-cert."""
+    # var counts per tier
+    n_t0: int = 0
+    n_t1: int = 0
+    n_t2: int = 0
+    # wrong fits per tier
+    wf_t0: int = 0
+    wf_t1: int = 0
+    wf_t2: int = 0
+    # avg sentinel count per tier (len(n.sentinels) at end of run)
+    sent_t0: float = 0.0
+    sent_t1: float = 0.0
+    sent_t2: float = 0.0
+    # avg cycles to first certification per tier (None vars excluded)
+    promo_t0: float = 0.0
+    promo_t1: float = 0.0
+    promo_t2: float = 0.0
+
+
+@dataclass
 class RunResult:
     config: RunConfig
     elapsed: float
@@ -150,6 +172,10 @@ class RunResult:
     snap_cycle: int = 0
     dreth_wrong_at_20: List[int] = field(default_factory=list)
     dreth_wrong_at_end: List[int] = field(default_factory=list)
+    # Consequence-weight tier breakdown (always populated)
+    tier: TierMetrics = field(default_factory=TierMetrics)
+    # Ablation: second run with CW disabled (populated only when cfg.ablate=True)
+    tier_no_cw: Optional[TierMetrics] = None
 
 
 # ── sparse-cached-refit baseline agent ────────────────────────────────────────
@@ -335,8 +361,44 @@ class SparseCachedRefitAgent:
 
 # ── in-process run ─────────────────────────────────────────────────────────────
 
+def _compute_tier_metrics(
+    agent: ChainedAgent, world: CausalWorld, wrong_set: set
+) -> TierMetrics:
+    """Bucket visible vars by consequence tier and collect per-tier stats."""
+    tm = TierMetrics()
+    n_buckets   = [0, 0, 0]
+    wf_buckets  = [0, 0, 0]
+    sent_sums   = [0.0, 0.0, 0.0]
+    promo_sums  = [0.0, 0.0, 0.0]
+    promo_cnts  = [0, 0, 0]
+
+    for v in range(world.visible_count):
+        t = agent._consequence_tier(v)
+        t = min(t, 2)
+        n = agent.ledger.vars[v]
+        n_buckets[t] += 1
+        if v in wrong_set:
+            wf_buckets[t] += 1
+        sent_sums[t] += len(n.sentinels)
+        fc = getattr(n, "first_certified_cycle", None)
+        if fc is not None:
+            promo_sums[t] += fc
+            promo_cnts[t] += 1
+
+    tm.n_t0, tm.n_t1, tm.n_t2 = n_buckets
+    tm.wf_t0, tm.wf_t1, tm.wf_t2 = wf_buckets
+    tm.sent_t0 = sent_sums[0] / max(1, n_buckets[0])
+    tm.sent_t1 = sent_sums[1] / max(1, n_buckets[1])
+    tm.sent_t2 = sent_sums[2] / max(1, n_buckets[2])
+    tm.promo_t0 = promo_sums[0] / max(1, promo_cnts[0])
+    tm.promo_t1 = promo_sums[1] / max(1, promo_cnts[1])
+    tm.promo_t2 = promo_sums[2] / max(1, promo_cnts[2])
+    return tm
+
+
 def _build_and_run_dreth(
     cfg: RunConfig,
+    consequence_weight: bool = True,
 ) -> Tuple[ChainedAgent, CausalWorld, int, List[int], List[int]]:
     """Returns (agent, world, snap_cycle, wrong_at_20pct, wrong_at_end)."""
     rng_w = random.Random(cfg.seed)
@@ -350,6 +412,7 @@ def _build_and_run_dreth(
         sentinel_count=5, sentinel_pool=60,
         promote_after=2,
         priority_audit_budget=max(1, cfg.n_vars // 2),
+        consequence_weight=consequence_weight,
     )
     snap_cycle = max(1, cfg.cycles // 5)
     dreth_wrong_at_20: List[int] = []
@@ -510,6 +573,7 @@ def _run_one(cfg: RunConfig) -> RunResult:
     try:
         agent, world, snap_cycle, dreth_wrong_at_20, dreth_wrong_at_end = _build_and_run_dreth(cfg)
         elapsed = time.monotonic() - t0
+        tier = _compute_tier_metrics(agent, world, set(dreth_wrong_at_end))
 
         records = agent.records
         structural = [m for m in world.hidden_log if m.rule_changed]
@@ -551,6 +615,7 @@ def _run_one(cfg: RunConfig) -> RunResult:
             snap_cycle=snap_cycle,
             dreth_wrong_at_20=dreth_wrong_at_20,
             dreth_wrong_at_end=dreth_wrong_at_end,
+            tier=tier,
         )
     except Exception as exc:
         elapsed = time.monotonic() - t0
@@ -591,6 +656,14 @@ def _run_one(cfg: RunConfig) -> RunResult:
                 error=f"{type(exc).__name__}: {exc}",
             )
 
+    # ── ablation: re-run with consequence_weight=False ────────────────────────
+    if cfg.ablate:
+        try:
+            a2, w2, _, _, end2 = _build_and_run_dreth(cfg, consequence_weight=False)
+            result.tier_no_cw = _compute_tier_metrics(a2, w2, set(end2))
+        except Exception:
+            pass  # ablation failure is non-fatal; tier_no_cw stays None
+
     return result
 
 
@@ -627,8 +700,22 @@ def _fmt_row(r: RunResult) -> str:
         f"stb={r.arch.vars_envelope_stable:2d} nf={r.arch.vars_noise_floor:2d} "
         f"| {viols}"
     )
+    # ── tier breakdown sub-line (always shown) ───────────────────────────────
+    tm = r.tier
+    def _tier_line(t: TierMetrics, label: str) -> str:
+        return (
+            f"  {'':>3s} {'':>4s} {'':>5s}   {label}"
+            f"tier n=({t.n_t0}/{t.n_t1}/{t.n_t2})  "
+            f"wf=({t.wf_t0}/{t.wf_t1}/{t.wf_t2})  "
+            f"sent=({t.sent_t0:.1f}/{t.sent_t1:.1f}/{t.sent_t2:.1f})  "
+            f"promo=({t.promo_t0:.0f}/{t.promo_t1:.0f}/{t.promo_t2:.0f})"
+        )
+    tier_lines = _tier_line(tm, "[CW ON ] ")
+    if r.tier_no_cw is not None:
+        tier_lines += "\n" + _tier_line(r.tier_no_cw, "[CW OFF] ")
+
     if r.baseline is None:
-        return dreth_line
+        return dreth_line + "\n" + tier_lines
 
     b = r.baseline
     if not b.ok:
@@ -671,7 +758,7 @@ def _fmt_row(r: RunResult) -> str:
         f"  │  D:res={_fv(d20 - dend)} new={_fv(dend - d20)}"
         f"  B:res={_fv(b20 - bend)} new={_fv(bend - b20)}"
     )
-    return dreth_line + "\n" + base_line + "\n" + snap_line + "\n" + end_line
+    return dreth_line + "\n" + tier_lines + "\n" + base_line + "\n" + snap_line + "\n" + end_line
 
 
 def _fmt_header() -> str:
@@ -687,6 +774,55 @@ def _fmt_header() -> str:
 
 
 # ── aggregate ──────────────────────────────────────────────────────────────────
+
+def _print_tier_aggregate(ok_runs: List[RunResult]) -> None:
+    if not ok_runs:
+        return
+
+    def _tier_sum(attr: str) -> Tuple[int, int, int]:
+        return (
+            sum(getattr(r.tier, attr + "_t0") for r in ok_runs),
+            sum(getattr(r.tier, attr + "_t1") for r in ok_runs),
+            sum(getattr(r.tier, attr + "_t2") for r in ok_runs),
+        )
+
+    wf0, wf1, wf2 = _tier_sum("wf")
+    n0,  n1,  n2  = _tier_sum("n")
+    avg_sent0 = sum(r.tier.sent_t0 for r in ok_runs) / len(ok_runs)
+    avg_sent1 = sum(r.tier.sent_t1 for r in ok_runs) / len(ok_runs)
+    avg_sent2 = sum(r.tier.sent_t2 for r in ok_runs) / len(ok_runs)
+    avg_pr0   = sum(r.tier.promo_t0 for r in ok_runs) / len(ok_runs)
+    avg_pr1   = sum(r.tier.promo_t1 for r in ok_runs) / len(ok_runs)
+    avg_pr2   = sum(r.tier.promo_t2 for r in ok_runs) / len(ok_runs)
+
+    print()
+    print("── consequence-weight tier breakdown ───────────────────────────────")
+    print(f"  tier        T0(leaf)   T1(1-2dep)  T2(3+dep)")
+    print(f"  var count   {n0:8d}   {n1:9d}  {n2:8d}")
+    print(f"  wrong fits  {wf0:8d}   {wf1:9d}  {wf2:8d}")
+    print(f"  avg sent    {avg_sent0:8.2f}   {avg_sent1:9.2f}  {avg_sent2:8.2f}")
+    print(f"  avg promo   {avg_pr0:8.1f}   {avg_pr1:9.1f}  {avg_pr2:8.1f}  (cycles to first cert)")
+
+    ablate_runs = [r for r in ok_runs if r.tier_no_cw is not None]
+    if ablate_runs:
+        wf0_off   = sum(r.tier_no_cw.wf_t0   for r in ablate_runs)
+        wf1_off   = sum(r.tier_no_cw.wf_t1   for r in ablate_runs)
+        wf2_off   = sum(r.tier_no_cw.wf_t2   for r in ablate_runs)
+        sent0_off = sum(r.tier_no_cw.sent_t0  for r in ablate_runs) / len(ablate_runs)
+        sent1_off = sum(r.tier_no_cw.sent_t1  for r in ablate_runs) / len(ablate_runs)
+        sent2_off = sum(r.tier_no_cw.sent_t2  for r in ablate_runs) / len(ablate_runs)
+        pr0_off   = sum(r.tier_no_cw.promo_t0 for r in ablate_runs) / len(ablate_runs)
+        pr1_off   = sum(r.tier_no_cw.promo_t1 for r in ablate_runs) / len(ablate_runs)
+        pr2_off   = sum(r.tier_no_cw.promo_t2 for r in ablate_runs) / len(ablate_runs)
+        print()
+        print(f"  ablation ({len(ablate_runs)} runs with CW disabled):")
+        print(f"  CW OFF wrong fits  {wf0_off:5d}   {wf1_off:9d}  {wf2_off:8d}")
+        print(f"  CW ON  wrong fits  {wf0:5d}   {wf1:9d}  {wf2:8d}  ← should be ≤ CW OFF for T1/T2")
+        print(f"  CW OFF avg sent    {sent0_off:5.2f}   {sent1_off:9.2f}  {sent2_off:8.2f}")
+        print(f"  CW ON  avg sent    {avg_sent0:5.2f}   {avg_sent1:9.2f}  {avg_sent2:8.2f}  ← should be > CW OFF for T1/T2")
+        print(f"  CW OFF avg promo   {pr0_off:5.1f}   {pr1_off:9.1f}  {pr2_off:8.1f}")
+        print(f"  CW ON  avg promo   {avg_pr0:5.1f}   {avg_pr1:9.1f}  {avg_pr2:8.1f}  ← should be > CW OFF for T1/T2")
+
 
 def _print_aggregate(results: List[RunResult]) -> None:
     ok_runs = [r for r in results if r.ok]
@@ -741,6 +877,8 @@ def _print_aggregate(results: List[RunResult]) -> None:
     # ── baseline comparison aggregate ────────────────────────────────────────
     base_runs = [r for r in ok_runs if r.baseline is not None and r.baseline.ok]
     if not base_runs:
+        # still print tier aggregate even without baseline comparison
+        _print_tier_aggregate(ok_runs)
         return
 
     b_n = len(base_runs)
@@ -811,6 +949,7 @@ def _print_aggregate(results: List[RunResult]) -> None:
     print("  wrong_fits: lower is better; both should converge to the same answer.")
     print("  Advantage comes from: route-trass cascade pruning + failure-localized")
     print("  invalidation vs. sparse_cached_refit's window-gated candidate-set refit.")
+    _print_tier_aggregate(ok_runs)
 
 
 # ── main ───────────────────────────────────────────────────────────────────────
@@ -832,7 +971,7 @@ def main():
                    help="settle cycles between reveals for incremental (default: 8)")
     p.add_argument("--noise-sigma", type=float, default=0.02,
                    help="noise sigma (default: 0.02)")
-    p.add_argument("--workers", type=int, default=None,
+    p.add_argument("--workers", type=int, default=20,
                    help="max parallel workers (default: cpu count)")
     p.add_argument("--out", default=None,
                    help="write one JSON line per run to this file")
@@ -840,6 +979,8 @@ def main():
                    help="print full violation details for each failing run")
     p.add_argument("--compare", action="store_true",
                    help="run sparse_cached_refit baseline alongside Dreth and report comparison")
+    p.add_argument("--ablate-consequence", action="store_true",
+                   help="re-run each config with consequence_weight=False and compare tier metrics")
     args = p.parse_args()
 
     var_list   = [int(x) for x in args.vars.split(",")]
@@ -851,7 +992,8 @@ def main():
                   schedule=args.schedule,
                   settle_cycles=args.settle_cycles,
                   noise_sigma=args.noise_sigma,
-                  compare=args.compare)
+                  compare=args.compare,
+                  ablate=args.ablate_consequence)
         for v in var_list
         for c in cycle_list
         for s in seed_list
@@ -859,6 +1001,8 @@ def main():
 
     total = len(configs)
     mode = " +compare" if args.compare else ""
+    if args.ablate_consequence:
+        mode += " +ablate"
     print(f"dreth arch-test{mode}: {total} runs | "
           f"vars={var_list} cycles={cycle_list} seeds={seed_list} "
           f"schedule={args.schedule}", flush=True)

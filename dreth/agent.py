@@ -138,6 +138,7 @@ class ChainedAgent:
         priority_audit_budget: Optional[int] = None,
         role_salience: str = "all-visible",
         salience_targets: Optional[Set[int]] = None,
+        consequence_weight: bool = True,
     ):
         """Construct agent. Initializes empty ledger, zero counters, and
         applies any provided per-var cost weight overrides."""
@@ -169,6 +170,9 @@ class ChainedAgent:
             self.priority_audit_budget = max(2, world.n_vars // 2)
         else:
             self.priority_audit_budget = priority_audit_budget
+        # [CONSEQUENCE-WEIGHT] ablation gate — set False to disable all CW policy.
+        # Revert: remove this line and the gate check in _consequence_tier.
+        self._consequence_weight_enabled = consequence_weight
 
         self.ledger = ChainedLedger(world.n_vars)
         # weak_streak: consecutive cycles where the fit signature CHANGED
@@ -1005,9 +1009,13 @@ class ChainedAgent:
                     or (other_n.status == "proposed" and bool(other_n.sentinels))
                 )
             }
+            # [CONSEQUENCE-WEIGHT P1] sentinel count scaled by downstream consequence.
+            # Original: self.sentinel_count (uniform).
+            # Revert: replace _eff_sentinel_count arg with self.sentinel_count and delete this line.
+            _eff_sentinel_count = self.sentinel_count + self._consequence_tier(var) * 2
             sentinels, expected = select_var_sentinels(
                 var, parents, func, self.world, self.rng,
-                self.sentinel_count, self.sentinel_pool, n.current_tolerance,
+                _eff_sentinel_count, self.sentinel_pool, n.current_tolerance,
                 available_parents=available,
             )
             if sentinels:
@@ -1016,7 +1024,11 @@ class ChainedAgent:
 
         # Promotion to "certified" status (informational confidence label)
         just_promoted = False
-        if n.status != "certified" and n.strong_observations >= self.promote_after and n.sentinels:
+        # [CONSEQUENCE-WEIGHT P2] promotion threshold scaled by downstream consequence.
+        # Original: n.strong_observations >= self.promote_after
+        # Revert: delete _eff_promote_after line, replace _eff_promote_after with self.promote_after.
+        _eff_promote_after = self.promote_after + self._consequence_tier(var) * 2
+        if n.status != "certified" and n.strong_observations >= _eff_promote_after and n.sentinels:
             n.status = "certified"
             just_promoted = True
             if n.first_certified_cycle == 0:
@@ -1456,6 +1468,44 @@ class ChainedAgent:
         scored.sort(reverse=True, key=lambda x: x[0])
         return [v for _, v in scored]
 
+    # ── [CONSEQUENCE-WEIGHT] new method ──────────────────────────────────────────
+    # To revert: delete this method and revert the three call sites below
+    # (search "# [CONSEQUENCE-WEIGHT]" to find them all).
+    def _consequence_tier(self, var: int) -> int:
+        """Structural consequence tier under current beliefs.
+
+        Counts how many vars directly list `var` as a parent (direct downstream
+        dependents). Used to scale sentinel count, promotion threshold, and
+        dormancy threshold — importance affects the *action policy*, not scoring.
+
+        Tier 0: no dependents (leaf in current belief graph).
+        Tier 1: 1–2 dependents.
+        Tier 2: 3+ dependents.
+
+        This is endogenous (uses agent beliefs, not world truth) and dynamic
+        (updates automatically as fits change). It is NOT global importance
+        (invariant #19); it is the repair-operation consequence of this var's
+        fit being wrong right now.
+
+        To revert this feature entirely, delete this method and replace all
+        three [CONSEQUENCE-WEIGHT] call sites with their originals:
+          P1 sentinel:  self.sentinel_count
+          P2 promote:   self.promote_after
+          P3 dormancy:  self._min_dormant_cert_age
+        """
+        # [CONSEQUENCE-WEIGHT ablation] — returning 0 here disables all three
+        # policy effects (P1/P2/P3 add 0 to their respective thresholds).
+        if not self._consequence_weight_enabled:
+            return 0
+        deps = len(self.ledger.variable_dependents(var))
+        if deps <= 0:
+            return 0
+        elif deps <= 2:
+            return 1
+        else:
+            return 2
+    # ── [/CONSEQUENCE-WEIGHT] ─────────────────────────────────────────────────
+
     def _cost_biased_topo_audit_order(self, needs_audit_set: Set[int]) -> List[int]:
         """Return needs_audit vars in topological order (parents before children).
         Uses the cached DFS topo order, which groups parent+child adjacently so
@@ -1522,7 +1572,10 @@ class ChainedAgent:
             # re-triggers at 3×ε if the fit genuinely changes.
             self._live_set.discard(var)
             return
-        min_cert_age = self._min_dormant_cert_age
+        # [CONSEQUENCE-WEIGHT P3] dormancy age floor scaled by downstream consequence.
+        # Original: min_cert_age = self._min_dormant_cert_age (100 cycles, uniform).
+        # Revert: replace right-hand side with just self._min_dormant_cert_age.
+        min_cert_age = self._min_dormant_cert_age + self._consequence_tier(var) * 50
         if (n.status == "certified"
                 and n.authoritative
                 and self.weak_streak.get(var, 0) == 0
