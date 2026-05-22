@@ -143,6 +143,8 @@ class ChainedAgent:
       cost_low/high_threshold: dispatch boundaries
       envelope_certify_after: deltas needed before envelope certification
       priority_audit_budget:  max full audits per cycle (default n_vars//2)
+      parent_screen_m:        per-target sensitivity screen top-M candidates
+                              (0 = disabled, use certified-only pool; default 8)
     """
 
     def __init__(
@@ -167,6 +169,7 @@ class ChainedAgent:
         salience_targets: Optional[Set[int]] = None,
         consequence_weight: bool = True,
         frontier_k: int = 4,
+        parent_screen_m: int = 8,
     ):
         """Construct agent. Initializes empty ledger, zero counters, and
         applies any provided per-var cost weight overrides."""
@@ -297,6 +300,9 @@ class ChainedAgent:
 
         # Sparse init: how many vars to full-audit at cold start.
         self.frontier_k: int = frontier_k
+        # Per-target parent screen: top-M candidates by sensitivity to this target.
+        # 0 = disabled (use certified-only pool, old behavior).
+        self.parent_screen_m: int = parent_screen_m
         # Vars screened as causally inert at init (no downstream movement across
         # 0.05/0.95 perturbation range). Not admitted to frontier unless woken by
         # a descendant sentinel failure or direct dependency event.
@@ -350,22 +356,32 @@ class ChainedAgent:
         Increments full_audit_count and total_interventions."""
         self.full_audit_count += 1
         n = self.ledger.vars[var]
-        # available_parents: include by default (invariant 50 — route/include unless excluded by cert).
-        # Exclusion is per-target: n.route_certs[P] with role "trass" means P was shown not to
-        # change the fit winner for this target T. Absent cert → include.
-        # Q4: no joint composition test. Individual route certs (when they exist) won't
-        # guarantee the combination is non-redundant. Requires predict_under_joint_intervention.
-        available = {
-            other_var for other_var, other_n in self.ledger.vars.items()
-            if other_var != var
-            and (n.route_certs.get(other_var) is None or n.route_certs[other_var].role != "trass")
-            and (
-                other_n.status == "certified"
-                or other_n.status == "trass"
-                or other_n.role_for("skip") == "trass"  # provisional trass: status="proposed", role="trass"
-                or (other_n.status == "proposed" and bool(other_n.sentinels))
-            )
-        }
+        # available_parents: either from a per-target sensitivity screen (sparse
+        # mode, parent_screen_m > 0) or from the certified/trass pool (full mode).
+        #
+        # Screen path: probe every candidate at 0.05/0.95, rank by |Δtarget|,
+        # keep top M. Does not require candidates to be pre-certified — any var
+        # can be a parent as long as it moves the target. Route certs (trass role
+        # for this target) are respected: explicitly excluded vars are dropped.
+        #
+        # Certified pool path (legacy): include certified/trass/proposed+sentinel
+        # vars that haven't been route-cert-excluded for this target.
+        # Q4: no joint composition test. Individual route certs (when they exist)
+        # won't guarantee the combination is non-redundant.
+        if self.parent_screen_m > 0:
+            available = self._screen_candidate_parents(var, self.parent_screen_m)
+        else:
+            available = {
+                other_var for other_var, other_n in self.ledger.vars.items()
+                if other_var != var
+                and (n.route_certs.get(other_var) is None or n.route_certs[other_var].role != "trass")
+                and (
+                    other_n.status == "certified"
+                    or other_n.status == "trass"
+                    or other_n.role_for("skip") == "trass"
+                    or (other_n.status == "proposed" and bool(other_n.sentinels))
+                )
+            }
         # Estimate hypothesis space size so the probe budget can scale with
         # ambiguity. Always use restricted formula: fit_var now uses restricted
         # enumeration for any explicitly-provided available set (even empty).
@@ -1712,6 +1728,37 @@ class ChainedAgent:
                 and cycle - n.envelope.certified_at_cycle >= min_cert_age):
             self._live_set.discard(var)
 
+    def _screen_candidate_parents(self, target: int, m: int) -> Set[int]:
+        """Per-target sensitivity screen. For each candidate var x, force x to
+        0.05 and 0.95 and measure how much `target` moves. Return the top-M
+        candidates by movement magnitude.
+
+        Cost: 2 × (n_visible - 1) × predict_var_under_intervention calls.
+        Replaces the certified-only `available` set when parent_screen_m > 0.
+
+        Only vars with non-zero movement compete; if fewer than M have any
+        movement at all, the returned set may be smaller than M. Route certs
+        (trass role) for this target are respected: positively-excluded vars
+        are dropped from the result even if they score highly.
+        """
+        n = self.ledger.vars[target]
+        visible = self.world.visible_count
+        scored: List[Tuple[float, int]] = []
+        for x in range(visible):
+            if x == target:
+                continue
+            lo = self.world.predict_var_under_intervention(target, x, 0.05)
+            hi = self.world.predict_var_under_intervention(target, x, 0.95)
+            self.total_interventions += 2
+            delta = abs(hi - lo)
+            if delta > DEFAULT_TOLERANCE:
+                scored.append((delta, x))
+        scored.sort(reverse=True)
+        return {
+            x for _, x in scored[:m]
+            if n.route_certs.get(x) is None or n.route_certs[x].role != "trass"
+        }
+
     def _cheap_salience_screen(self) -> Set[int]:
         """Two-probe causal salience screen run once at cold start.
 
@@ -2108,6 +2155,18 @@ class ChainedAgent:
                     skipped.append(var)
                     if "TEMPORAL_TRASS" in reason:
                         self.ledger.event_log.append(f"c{cycle}: x{var} {reason}")
+                    # For proposed vars, sentinel passes count as matching observations
+                    # toward promotion. In sparse-init, cascade audits are rare so the
+                    # second matching audit may never come via re-audit; sentinel
+                    # evidence fills the same role.
+                    if n.status == "proposed" and n.sentinels:
+                        _eff_promote_after = self.promote_after + self._consequence_tier(var) * 2
+                        if n.strong_observations < _eff_promote_after:
+                            n.strong_observations += 1
+                            if n.strong_observations >= _eff_promote_after:
+                                n.status = "certified"
+                                if n.first_certified_cycle == 0:
+                                    n.first_certified_cycle = cycle
                     self._maybe_demote(var, cycle)
                     continue
                 # Sentinel failed — failure signal earned. Replay witnesses to attribute.
@@ -2311,18 +2370,16 @@ class ChainedAgent:
             else:
                 self.defer_streak[v] = 0
 
-        # Frontier admission: when the live set has no unresolved vars, admit
-        # the next highest-priority unknowns (up to frontier_k at a time) so the
-        # agent keeps making forward progress without ever auditing everything upfront.
-        # "Unresolved" = status not yet certified/trass and not dormant-eligible.
+        # Frontier admission: when no never-audited vars remain in the live set,
+        # admit the next highest-priority unknowns (up to frontier_k at a time).
+        # "Fresh" = in live_set but full_audits == 0 (not yet looked at once).
+        # Condition is much looser than "no unresolved": structural disruptions
+        # keep live vars perpetually in uncertain/proposed, so waiting for full
+        # resolution would stall admission indefinitely.
         # "Unknown" = never audited, not inert, not already live.
         if self._live_set is not None:
-            unresolved = {
-                v for v in self._live_set
-                if (self.ledger.vars[v].status in ("uncertain", "proposed")
-                    and self.ledger.vars[v].role_for("skip") != "trass")
-            }
-            if not unresolved:
+            fresh_in_live = {v for v in self._live_set if self.ledger.vars[v].full_audits == 0}
+            if not fresh_in_live:
                 unknown = [
                     v for v in range(self.world.visible_count)
                     if v not in self._live_set

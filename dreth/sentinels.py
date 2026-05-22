@@ -144,7 +144,13 @@ def check_var_sentinels_with_envelope(
     # noise_floor vars: widen re-trigger threshold. The 5% statistical tail of
     # a certified noise floor should not count as signal. Only fail on
     # deviations that exceed the noise floor by a meaningful margin (3×ε).
-    _base_eps = n.envelope.certified_eps if n.envelope.certified_eps > 0 else tol_fallback
+    # Floor at tol_fallback: the envelope certifies on the actual noise deltas
+    # which can be as small as noise_sigma (~0.01-0.02). A certified_eps below
+    # DEFAULT_TOLERANCE would cluster OOB events even for correct fits (the 5%
+    # tail of noise draws exceeds a tight envelope). Flooring prevents spurious
+    # envelope_failing on correctly-fitted vars.
+    _raw_eps = n.envelope.certified_eps if n.envelope.certified_eps > 0 else tol_fallback
+    _base_eps = max(_raw_eps, tol_fallback)
     _NOISE_FLOOR_K = 3.0
     effective_tol = _NOISE_FLOOR_K * _base_eps if n.role_for("skip") == "noise_floor" else _base_eps
     for iv, _stale_exp in zip(n.sentinels, n.expected_outcomes):
