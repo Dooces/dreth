@@ -84,6 +84,7 @@ from .ledger import (ChainedLedger, Compression, CompositeNethra,
                      DEFAULT_TOLERANCE, DormantAlternative, NethraCertificate, Role, TiedFrontier)
 from .fit import fit_var
 from .sentinels import select_var_sentinels, check_var_sentinels_with_envelope
+from .regime import RegimeRegister, CertEvent as RegimeCertEvent
 from .records import CycleRecord, FitDiagnostic
 
 # ── Trass authority thresholds ────────────────────────────────────────────────
@@ -319,6 +320,10 @@ class ChainedAgent:
         # sentinel failure this cycle. Cleared at start of each run_cycle.
         # Trass pairs where both appear here are candidates for joint test.
         self._uncertain_this_cycle: Set[int] = set()
+
+        # Regime detection: collects per-cycle cert failure/repair events and
+        # clusters them into recurring co-failure patterns (regimes).
+        self.regime_register: RegimeRegister = RegimeRegister()
 
     def _adaptive_probe_budget(self, n_hypotheses: int) -> int:
         """Return the number of probes to use for a hypothesis space of size
@@ -1895,13 +1900,14 @@ class ChainedAgent:
         drift: List[int] = []
         deferred: List[int] = []
         novelty_fired = False
+        _cert_events: List[RegimeCertEvent] = []
 
         # First pass: cheap paths and queue full audits.
         needs_audit: List[int] = []
         # Graded cascade: sentinel failures in this cycle that have not yet been
         # confirmed by a local re-audit. Value = reason string for the cascade
         # event log. Cascade fires only after _install_var confirms sig_changed.
-        _sentinel_failed_vars: Dict[int, str] = {}
+        _sentinel_failed_vars: Dict[int, Tuple[str, float]] = {}
 
         # v28+: process variables in dependency order (parents first) so a
         # parent's sentinel failure invalidates descendants BEFORE they take
@@ -2138,7 +2144,7 @@ class ChainedAgent:
             # attribution handles for failure diagnosis — not for pass-path confirmation.
             if n.authoritative:
                 self.total_interventions += len(n.sentinels)
-                passed, _, _, reason = check_var_sentinels_with_envelope(
+                passed, _, _, reason, _sentinel_max_dev = check_var_sentinels_with_envelope(
                     var, n, self.world, cycle,
                     self.cost_low_threshold, self.cost_high_threshold,
                 )
@@ -2222,8 +2228,12 @@ class ChainedAgent:
                 n.tied_frontier = None
                 if self._live_set is not None:
                     self._live_set.add(var)
-                _sentinel_failed_vars[var] = f"sentinel: {reason}"
+                _sentinel_failed_vars[var] = (f"sentinel: {reason}", _sentinel_max_dev)
                 self.sentinel_miss_count += 1
+                _cert_events.append(RegimeCertEvent(
+                    var=var, cert_key="skip", event_type="failed",
+                    delta=_sentinel_max_dev, cert_age=n.full_audits,
+                ))
             # Needs full audit — rate-limit in two cases:
             #
             # Case A: sentinel-stable loop. Sentinel failed but audit returns
@@ -2265,11 +2275,30 @@ class ChainedAgent:
                     f"topological rank {i+1}/{len(priority_order)})"
                 )
                 continue
+            _pre_parents = tuple(self.ledger.vars[var].parents)
+            _pre_func = self.ledger.vars[var].func
             parents, func, score, second = self._full_audit_var(var, cycle)
             sig_changed = self._install_var(var, parents, func, score, second, cycle)
             audited.append(var)
             if var in _sentinel_failed_vars:
                 self.local_reaudit_count += 1
+                _new_parents = tuple(parents)
+                _p_changed = _new_parents != _pre_parents
+                _f_changed = func != _pre_func
+                if _p_changed and _f_changed:
+                    _rshape = "full_change"
+                elif _p_changed:
+                    _rshape = "parent_change"
+                elif _f_changed:
+                    _rshape = "func_change"
+                else:
+                    _rshape = "stable"
+                _cert_events.append(RegimeCertEvent(
+                    var=var, cert_key="skip", event_type="repaired",
+                    delta=_sentinel_failed_vars[var][1],
+                    repair_shape=_rshape,
+                    cert_age=self.ledger.vars[var].full_audits,
+                ))
             if sig_changed:
                 drift.append(var)
                 self.ledger.record_drift(var, cycle)
@@ -2281,7 +2310,7 @@ class ChainedAgent:
                 # Noisy misses (sig_changed=False) produce no cascade.
                 if var in _sentinel_failed_vars:
                     self.signature_changed_count += 1
-                    _cascade_reason = _sentinel_failed_vars[var]
+                    _cascade_reason = _sentinel_failed_vars[var][0]
                     closure = self.ledger.invalidate({var}, cycle, _cascade_reason)
                     self.descendant_cascade_count += len(closure) - 1
                     if self._live_set is not None:
@@ -2399,6 +2428,15 @@ class ChainedAgent:
 
         if self._uncertain_this_cycle:
             self._find_joint_trass_candidates(cycle)
+
+        if _cert_events:
+            _n_failed = sum(1 for e in _cert_events if e.event_type == "failed")
+            _mean_dev = (sum(e.delta for e in _cert_events) / len(_cert_events))
+            self.regime_register.observe(
+                _cert_events,
+                cycle,
+                {"n_failed": float(_n_failed), "mean_delta": _mean_dev},
+            )
 
         self.records.append(CycleRecord(
             cycle=cycle, truth_kind=mutation.kind,
@@ -2648,4 +2686,7 @@ class ChainedAgent:
         lines.append(f"  hits lifetime: {total_comp_hits_lifetime} | misses lifetime: {total_comp_misses_lifetime}")
         lines.append(f"  est cost saved by hits: {hits_saved} iv | "
                      f"est discovery cost: {est_disc_total} iv | amortization: {amort}")
+
+        lines.append("\n── regime register ────────────────────────────────────")
+        lines.append(self.regime_register.summary())
         return "\n".join(lines)

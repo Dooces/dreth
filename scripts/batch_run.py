@@ -177,6 +177,8 @@ class RunResult:
     tier: TierMetrics = field(default_factory=TierMetrics)
     # Ablation: second run with CW disabled (populated only when cfg.ablate=True)
     tier_no_cw: Optional[TierMetrics] = None
+    # Regime register summary (populated for all dreth runs)
+    regime_summary: str = ""
 
 
 # ── sparse-cached-refit baseline agent ────────────────────────────────────────
@@ -687,6 +689,7 @@ def _run_one(cfg: RunConfig) -> RunResult:
 
         arch = _extract_arch_metrics(agent, world)
         violations = _check_invariants(arch)
+        regime_summary = agent.regime_register.summary()
 
         result = RunResult(
             config=cfg, elapsed=elapsed, ok=True, error="",
@@ -709,6 +712,7 @@ def _run_one(cfg: RunConfig) -> RunResult:
             dreth_wrong_at_20=dreth_wrong_at_20,
             dreth_wrong_at_end=dreth_wrong_at_end,
             tier=tier,
+            regime_summary=regime_summary,
         )
     except Exception as exc:
         elapsed = time.monotonic() - t0
@@ -811,8 +815,13 @@ def _fmt_row(r: RunResult) -> str:
     if r.tier_no_cw is not None:
         tier_lines += "\n" + _tier_line(r.tier_no_cw, "[CW OFF] ")
 
+    regime_line = (
+        "\n" + r.regime_summary
+        if r.regime_summary and "confirmed" in r.regime_summary and "0 confirmed" not in r.regime_summary
+        else ""
+    )
     if r.baseline is None:
-        return dreth_line + "\n" + tier_lines
+        return dreth_line + "\n" + tier_lines + regime_line
 
     b = r.baseline
     if not b.ok:

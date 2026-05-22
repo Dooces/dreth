@@ -109,7 +109,7 @@ def select_var_sentinels(
 def check_var_sentinels_with_envelope(
     var: int, n: VarNethra, world: CausalWorld, cycle: int,
     cost_low_threshold: float, cost_high_threshold: float,
-) -> Tuple[bool, int, int, str]:
+) -> Tuple[bool, int, int, str, float]:
     """Run sentinel checks for one variable. Returns (passed, score, total,
     reason). This is the cheap-path validation: cheaper than full audit
     (only uses sentinel-count probes vs intervention_budget) and requires
@@ -165,26 +165,26 @@ def check_var_sentinels_with_envelope(
         n.envelope.add_delta(delta, cycle)
 
     if score == total:
-        return True, score, total, "all_within"
+        return True, score, total, "all_within", 0.0
 
     out_of_band = total - score
     max_dev = max(deviations) if deviations else 0.0
 
     if n.cost_weight >= cost_high_threshold:
-        return False, score, total, f"high_cost_strict (max_dev={max_dev:.3f})"
+        return False, score, total, f"high_cost_strict (max_dev={max_dev:.3f})", max_dev
 
     if n.cost_weight < cost_low_threshold:
         n.temporal_trass_log.append(TemporalTrassEntry(
             cycle=cycle, var=var, delta=max_dev, cost_weight=n.cost_weight,
             reason="low_cost_dismissed_persistent" if n.envelope.envelope_failing(threshold_count=8) else "low_cost_dismissed",
         ))
-        return True, score, total, f"low_cost_dismissed (max_dev={max_dev:.3f}) #TEMPORAL_TRASS"
+        return True, score, total, f"low_cost_dismissed (max_dev={max_dev:.3f}) #TEMPORAL_TRASS", max_dev
 
     if n.envelope.envelope_failing(threshold_count=5):
-        return False, score, total, f"mid_cost_persistent (max_dev={max_dev:.3f})"
+        return False, score, total, f"mid_cost_persistent (max_dev={max_dev:.3f})", max_dev
     else:
         n.temporal_trass_log.append(TemporalTrassEntry(
             cycle=cycle, var=var, delta=max_dev, cost_weight=n.cost_weight,
             reason="outlier_within_tolerance",
         ))
-        return True, score, total, f"mid_cost_outlier (max_dev={max_dev:.3f}) #TEMPORAL_TRASS"
+        return True, score, total, f"mid_cost_outlier (max_dev={max_dev:.3f}) #TEMPORAL_TRASS", max_dev
