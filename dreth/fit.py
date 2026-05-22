@@ -21,12 +21,11 @@ from __future__ import annotations
 #   fit_var, score_var_hypothesis, enumerate_var_hypotheses,
 #   enumerate_var_hypotheses_restricted, predict_var
 #
-# Disabled (intentionally):
-#   _adaptive_probe_budget — exists in agent.py, deliberately bypassed.
-#     Reason: changing probe pool size perturbs probe selection and RNG
-#     trajectory, cascading into different form discovery timing (TODO P2).
-#   frontier_candidates param is accepted but the probe-bias block is
-#     commented out for the same reason.
+# Active:
+#   _adaptive_probe_budget — activated in agent.py _full_audit_var (P1-A).
+#   forced_probes param (P1-B) — when a TiedFrontier exists, its separating
+#     probes are injected before the discrimination pool so they are always
+#     included in the audit regardless of pool randomness.
 #
 # ════════════════════════════════════════════════════════════════════════════════
 # CORE INVARIANT — READ BEFORE MODIFYING THIS FILE
@@ -256,6 +255,7 @@ def fit_var(
     available_parents: Optional[Set[int]] = None,
     diag: Optional[Dict[str, object]] = None,
     near_tie_margin: int = 0,
+    forced_probes: Optional[Tuple[Tuple[int, float], ...]] = None,
 ) -> Tuple[Tuple[int, ...], str, int, int]:
     """Find the best (parents, func) for one variable. Returns the tuple
     (parents, func, best_score, second_best_score).
@@ -266,6 +266,8 @@ def fit_var(
       2. Build intervention pool. If targeted=True, generate 4×budget candidates,
          score each by hypothesis-discrimination (number of distinct
          predictions across hypotheses), pick top-budget. Else random sample.
+         If forced_probes is given (P1-B), those (iv_var, iv_val) pairs are
+         injected first; remaining slots filled from discrimination pool.
       3. Score all hypotheses against chosen interventions (vectorized).
       4. Return rank-1 hypothesis and its margin to rank-2.
 
@@ -280,8 +282,15 @@ def fit_var(
     else:
         hypotheses = enumerate_var_hypotheses_restricted(var, available_parents)
 
+    # P1-B: forced_probes from TiedFrontier.separating_probes are guaranteed
+    # inclusions — budget slots they consume are unavailable to the pool.
+    _forced: List[Tuple[int, float]] = list(forced_probes) if forced_probes else []
+    _forced_count = min(len(_forced), intervention_budget)
+    _forced = _forced[:_forced_count]
+    _remaining_budget = intervention_budget - _forced_count
+
     if targeted:
-        pool_size = max(intervention_budget * 4, 40)
+        pool_size = max(max(_remaining_budget, 1) * 4, 40)
         candidates = [(rng.randint(0, n_vars - 1), rng.random())
                       for _ in range(pool_size)]
         # Use batched evaluation for discrimination too
@@ -306,26 +315,19 @@ def fit_var(
         # Frontier bias (not yet activated): when near-tied candidates from a
         # prior audit are known, probes that split those candidates could be
         # upweighted here. Disabled for the same reason as _adaptive_probe_budget:
-        # changing which pool probes are selected alters the discrimination
-        # landscape in ways that cascade through form discovery. Needs independent
-        # calibration before activation.
-        # if frontier_candidates:
-        #     f_indices = [h_idx for h_idx, hyp in enumerate(hypotheses)
-        #                  if hyp in frontier_candidates]
-        #     if len(f_indices) >= 2:
-        #         f_rounded = rounded[np.array(f_indices), :]
-        #         f_by_probe = np.sort(f_rounded.T, axis=1)
-        #         n_distinct_f = 1 + np.count_nonzero(
-        #             np.diff(f_by_probe, axis=1), axis=1)
-        #         discrim = discrim + (n_distinct_f - 1)
-        # Pick top intervention_budget by discrimination
+        # Pick top _remaining_budget by discrimination; prepend forced probes.
+        # P1-B: forced_probes (from TiedFrontier.separating_probes) are guaranteed
+        # inclusions — they don't compete in the discrimination pool so the pool
+        # randomness is preserved for the non-forced slots.
         order = np.argsort(-discrim)
-        interventions = [candidates[idx] for idx in order[:intervention_budget]]
-        while len(interventions) < intervention_budget:
-            interventions.append((rng.randint(0, n_vars - 1), rng.random()))
+        pool_selected = [candidates[idx] for idx in order[:_remaining_budget]]
+        while len(pool_selected) < _remaining_budget:
+            pool_selected.append((rng.randint(0, n_vars - 1), rng.random()))
+        interventions = _forced + pool_selected
     else:
-        interventions = [(rng.randint(0, n_vars - 1), rng.random())
-                         for _ in range(intervention_budget)]
+        pool_random = [(rng.randint(0, n_vars - 1), rng.random())
+                       for _ in range(_remaining_budget)]
+        interventions = _forced + pool_random
 
     # Score all hypotheses with per-probe data captured (used for diagnostic
     # classification AND for downstream extension consumers).

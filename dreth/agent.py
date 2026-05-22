@@ -29,10 +29,11 @@ from __future__ import annotations
 #   vars. A variable's certification directly controls what hypotheses are
 #   enumerated for every variable that might depend on it.
 #
-# Active but disabled:
-#   _adaptive_probe_budget — computes scaled budget but result is ignored.
-#     Disabled because changing probe pool size perturbs RNG trajectory
-#     and cascades into different form discovery timing (TODO P2).
+# Active:
+#   _adaptive_probe_budget — now activated in _full_audit_var (P1-A).
+#     Scales probe budget up with hypothesis space; only scales UP from base.
+#     RNG trajectory changes when pool size changes — downstream test seeds
+#     that relied on the old flat budget will diverge (expected, not a bug).
 #
 # ════════════════════════════════════════════════════════════════════════════════
 # CORE INVARIANT — READ BEFORE MODIFYING THIS FILE
@@ -366,15 +367,13 @@ class ChainedAgent:
         else:
             _nv = self.world.visible_count - 1
             _n_hyp = 2 + _nv + (_nv * (_nv - 1) // 2 * 5)
-        # _adaptive_probe_budget() computes the budget that should be used
-        # here once the probe-selection strategy is validated end-to-end.
-        # Currently using the base budget because the discrimination-pool
-        # size interacts with the targeted-probe selection in ways that need
-        # independent calibration before activating scale-up.
-        _ = self._adaptive_probe_budget(_n_hyp)  # keeps the intent visible
-        # Use escalated budget if this var has accumulated repeated repair failures.
-        # _var_budget_escalation stores the absolute budget to use; falls back to base.
-        budget = self._var_budget_escalation.get(var, self.intervention_budget)
+        # Adaptive probe budget: scale up with hypothesis space size.
+        # Only scales UP from base (see _adaptive_probe_budget docstring).
+        # Failure-earned repair escalation (_var_budget_escalation) can exceed
+        # the adaptive value; take the max so escalation still dominates.
+        # P1-A: activated — was previously computed but discarded.
+        _adaptive = self._adaptive_probe_budget(_n_hyp)
+        budget = max(self._var_budget_escalation.get(var, 0), _adaptive)
         diag_dict: Dict[str, object] = {
             "cycle": cycle,
             "var": var,
@@ -382,9 +381,17 @@ class ChainedAgent:
             "role_before": n.role_for("skip"),
             "available_parents": tuple(sorted(available)),
         }
+        # P1-B: if this var has an active TiedFrontier with separating probes,
+        # inject them as forced inclusions so the tie has a chance to resolve.
+        _frontier_probes = (
+            n.tied_frontier.separating_probes
+            if n.tied_frontier is not None and n.tied_frontier.separating_probes
+            else None
+        )
         result = fit_var(var, self.world, self.rng, budget,
                          n.current_tolerance, available_parents=available, diag=diag_dict,
-                         near_tie_margin=self.near_tie_margin)
+                         near_tie_margin=self.near_tie_margin,
+                         forced_probes=_frontier_probes)
         self.total_interventions += budget
         fd = FitDiagnostic(
             cycle=int(diag_dict["cycle"]),
@@ -566,6 +573,40 @@ class ChainedAgent:
         )
         n.certificates["skip"] = cert
         return role
+
+    def _provisional_trass_probe(self, var: int) -> bool:
+        """One-shot cheap op-role check for provisional trass detection.
+
+        Picks the spread perturbation furthest from the current state value
+        among [0.05, 0.5, 0.95], runs one baseline + one perturbed world
+        query, returns True if any visible target var changed beyond tolerance
+        (cert is stale and should be invalidated).
+
+        Cost: 2 world queries. Called once per provisional-trass var per cycle
+        to prevent wrong-trass lock-in without running the full 5×5-sample
+        op-role test.
+
+        P1-C: provisional trass must not suppress detection. A single probe is
+        the minimum that makes 'provisional' meaningfully different from the
+        hard-suppress path.
+        """
+        saved = self.world.state
+        var_tol = self.ledger.vars[var].current_tolerance
+        candidates = [v for v in (0.05, 0.5, 0.95) if abs(v - saved[var]) > var_tol]
+        if not candidates:
+            return False
+        iv_val = max(candidates, key=lambda v: abs(v - saved[var]))
+        baseline = self.world.predict_under_intervention(var, saved[var])
+        self.world.state = saved
+        perturbed = self.world.predict_under_intervention(var, iv_val)
+        self.world.state = saved
+        for j in range(self.world.visible_count):
+            if j == var:
+                continue
+            j_tol = self.ledger.vars[j].current_tolerance
+            if abs(baseline[j] - perturbed[j]) > j_tol:
+                return True
+        return False
 
     def _test_joint_false_trass(self, var_a: int, var_b: int, cycle: int) -> str:
         """Joint substitution test for two individually-trass vars.
@@ -1304,7 +1345,7 @@ class ChainedAgent:
                 if fn is None:
                     continue
                 args = [intervened[p] for p in cand_parents]
-                preds.append(fn(*args) if args else 0.0)
+                preds.append(fn(args) if args else 0.0)
             if len(preds) < 2:
                 continue
             max_disagree = max(
@@ -1332,7 +1373,7 @@ class ChainedAgent:
         n = self.ledger.vars[var]
         existing = n.tied_frontier
         if existing is None:
-            n.tied_frontier = TiedFrontier(
+            new_frontier = TiedFrontier(
                 candidates=near_tie_set,
                 scores={h: scores_dict.get(h, 0) for h in near_tie_set},
                 margin=self.near_tie_margin,
@@ -1344,6 +1385,10 @@ class ChainedAgent:
                 stable_count=1,
                 distinct_contexts_seen=1,
             )
+            # P1-B: derive separating probes from the just-completed audit so the
+            # next audit can use them as forced inclusions.
+            new_frontier.separating_probes = self._derive_separating_probes(var, new_frontier)
+            n.tied_frontier = new_frontier
         elif near_tie_set == existing.candidates:
             existing.scores = {h: scores_dict.get(h, 0) for h in near_tie_set}
             existing.last_seen_cycle = cycle
@@ -1353,6 +1398,9 @@ class ChainedAgent:
                 # evidence (invariant distinct_contexts_seen rule). Update key and count.
                 existing.context_key = context_key
                 existing.distinct_contexts_seen += 1
+            # Refresh separating probes from latest audit — the last-used probe
+            # set may discriminate better than the one derived at frontier creation.
+            existing.separating_probes = self._derive_separating_probes(var, existing)
         elif existing.context_key != context_key:
             # Context changed AND candidate set differs — fresh frontier.
             # Archive dropped candidates from old frontier.
@@ -1364,7 +1412,7 @@ class ChainedAgent:
                         last_seen_cycle=cycle,
                     )
                 )
-            n.tied_frontier = TiedFrontier(
+            new_frontier = TiedFrontier(
                 candidates=near_tie_set,
                 scores={h: scores_dict.get(h, 0) for h in near_tie_set},
                 margin=self.near_tie_margin,
@@ -1376,6 +1424,8 @@ class ChainedAgent:
                 stable_count=1,
                 distinct_contexts_seen=1,
             )
+            new_frontier.separating_probes = self._derive_separating_probes(var, new_frontier)
+            n.tied_frontier = new_frontier
         else:
             # Same context, different candidate set — archive dropped candidates.
             for h in existing.candidates - near_tie_set:
@@ -1386,7 +1436,7 @@ class ChainedAgent:
                         last_seen_cycle=cycle,
                     )
                 )
-            n.tied_frontier = TiedFrontier(
+            new_frontier = TiedFrontier(
                 candidates=near_tie_set,
                 scores={h: scores_dict.get(h, 0) for h in near_tie_set},
                 margin=self.near_tie_margin,
@@ -1398,6 +1448,8 @@ class ChainedAgent:
                 stable_count=1,
                 distinct_contexts_seen=existing.distinct_contexts_seen,
             )
+            new_frontier.separating_probes = self._derive_separating_probes(var, new_frontier)
+            n.tied_frontier = new_frontier
 
     def _collapse_tied_frontier(
         self, var: int,
@@ -1631,7 +1683,11 @@ class ChainedAgent:
         if self._live_set is None:
             return
         n = self.ledger.vars[var]
-        if n.role_for("skip") == "trass" or n.status == "trass":
+        # P2: gate on cert only — status=="trass" is a write-only sync field and
+        # must not trigger dormancy independently. A status-only-trass var has no
+        # cert scope, no evidence, and no invalidation conditions; parking it via
+        # status bypasses the cert-stability criteria below.
+        if n.role_for("skip") == "trass":
             self._live_set.discard(var)
             return
         if n.role_for("skip") == "noise_floor":
@@ -1800,17 +1856,20 @@ class ChainedAgent:
             # so it catches mid-run new certs (world changes → wrong fit → trass cert
             # at full_audits=N → provisional until audit N+1 occurs).
             #
-            # Provisional path: queue for audit WITHOUT resetting the cert. _install_var
-            # increments full_audits and returns early (role is "trass" → no
-            # _certify_operation_role call → cert unchanged → gate passes next cycle).
+            # Provisional path: on each cycle, run one cheap probe (P1-C).
+            # If the probe detects propagation, the cert was wrong — invalidate
+            # and queue for full audit this cycle. If no propagation, increment
+            # sentinel_passes and count as a skip (shortcut is still valid).
+            # Hard-suppress is only earned after _trass_strong_threshold quiet
+            # probe cycles — until then detection is active, not suppressed.
             if n.role_for("skip") == "trass":
                 cert = n.certificates["skip"]
                 _trass_strong_threshold = (
                     _STRONG_TRASS_SENTINEL_PASSES + self._consequence_tier(var) * 3
                 )
                 if cert.confirmed and cert.sentinel_passes >= _trass_strong_threshold:
-                    # Strong confirmed trass: cert has accumulated enough stable cycles
-                    # without cascade — hard-suppress future detection.
+                    # Strong confirmed trass: cert has accumulated enough quiet probe
+                    # cycles — hard-suppress future detection.
                     self.skip_count += 1
                     self.trass_skip_count += 1
                     n.skip_count += 1
@@ -1818,14 +1877,21 @@ class ChainedAgent:
                     if self._live_set is not None:
                         self._live_set.discard(var)
                     continue
-                # Provisional trass: cert exists but has not yet accumulated enough
-                # stable cycles. Each cycle this block is reached (without prior
-                # cascade invalidating the cert) increments sentinel_passes (stable-
-                # cycle counter). On first confirmation, mark confirmed=True.
-                # Count as a skip regardless — provisional trass IS an earned shortcut;
-                # we accumulate evidence in the background without full-audit cost.
-                # If cascade reaches this var, the cert is invalidated BEFORE this
-                # point and the trass block is never entered — var goes to audit queue.
+                # Provisional trass: run one cheap probe before crediting the skip.
+                # P1-C: this is what separates provisional from hard-suppress.
+                # Cost: 2 world queries. total_interventions accounts for them.
+                self.total_interventions += 2
+                if self._provisional_trass_probe(var):
+                    # Probe detected propagation — cert is stale. Invalidate and
+                    # queue for full audit. The full op-role test will re-certify.
+                    n.certificates.pop("skip", None)
+                    self.ledger.event_log.append(
+                        f"c{cycle}: x{var} provisional_trass PROBE FAILED "
+                        f"— cert invalidated, queued for audit"
+                    )
+                    needs_audit.append(var)
+                    continue
+                # Probe passed — no propagation detected. Increment stable counter.
                 if not cert.confirmed:
                     _new_sp = 1
                     n.certificates["skip"] = dataclasses.replace(
