@@ -122,6 +122,17 @@ class ArchMetrics:
     regime_sentinel_passes: int = 0   # cycles where regime sentinel passed → rsk credited
     regime_sentinel_fails: int = 0    # cycles where regime sentinel failed → leaf checks ran
     regime_no_sentinel: int = 0       # cycles where regime had no active sentinel (annotate only)
+    # Sentinel utility accounting (end-of-run snapshot from VarNethra fields)
+    vars_with_unique_failures: int = 0   # vars whose leaf sentinel caught something higher missed
+    vars_parkable: int = 0               # vars: covered by regime, 0 unique failures, ≥200 quiet cycles
+    total_unique_failures: int = 0       # sum of unique_failures_caught across all vars
+    total_higher_caught: int = 0         # sum of failures_also_caught_by_higher across all vars
+    # Sentinel parking metrics
+    parked_skip_count: int = 0           # sentinel checks skipped due to parking
+    woken_count: int = 0                 # times a parked var was woken for revalidation
+    # Passive residual monitoring metrics
+    passive_saved_iv: int = 0            # IV calls saved by passive-OK skips
+    passive_stress_count: int = 0        # var-cycles where passive was stressed
 
 
 @dataclass
@@ -395,6 +406,9 @@ def _build_and_run_dreth(
     initial_visible = 1 if cfg.schedule == "incremental" else cfg.n_vars
     world = CausalWorld(cfg.n_vars, rng_w, noise_sigma=cfg.noise_sigma,
                         initial_visible=initial_visible)
+    # Pre-install schedule-specific subgraph so agent.initialize() audits the
+    # intended world structure, not the random base.
+    world.prepare_schedule(cfg.schedule, cfg.settle_cycles)
     agent = ChainedAgent(
         world=world, rng=rng_a,
         sentinel_count=5, sentinel_pool=60,
@@ -553,7 +567,7 @@ def _extract_arch_metrics(agent: ChainedAgent, world: CausalWorld) -> ArchMetric
     # Composite nethra (nethra-of-nethra) handle metrics
     m.composite_skip_count = agent.composite_skip_count
     m.vars_under_composite = len({mem for cn in agent.ledger.composites for mem in cn.members})
-    m.active_composites = sum(1 for cn in agent.ledger.composites if cn.certified)
+    m.active_composites = len(agent.ledger.composites)
 
     # Regime-based skip metrics
     m.regime_skip_count = agent._regime_skip_count
@@ -562,6 +576,26 @@ def _extract_arch_metrics(agent: ChainedAgent, world: CausalWorld) -> ArchMetric
     m.regime_sentinel_passes = agent._regime_sentinel_passes
     m.regime_sentinel_fails = agent._regime_sentinel_fails
     m.regime_no_sentinel = agent._regime_no_sentinel
+
+    # Sentinel utility accounting
+    _PARK_W = 200
+    m.vars_with_unique_failures = sum(1 for n in visible if n.unique_failures_caught > 0)
+    m.vars_parkable = sum(
+        1 for n in visible
+        if n.unique_failures_caught == 0
+        and n.covered_by_regime_id is not None
+        and n.cycles_since_unique_failure >= _PARK_W
+    )
+    m.total_unique_failures = sum(n.unique_failures_caught for n in visible)
+    m.total_higher_caught = sum(n.failures_also_caught_by_higher for n in visible)
+
+    # Parking metrics
+    m.parked_skip_count = agent._parked_skip_count
+    m.woken_count = agent._woken_count
+
+    # Passive residual monitoring metrics
+    m.passive_saved_iv = agent._passive_saved_iv
+    m.passive_stress_count = agent._passive_stress_count
 
     return m
 
@@ -727,8 +761,15 @@ def _fmt_row(r: RunResult) -> str:
         if r.regime_summary and "confirmed" in r.regime_summary and "0 confirmed" not in r.regime_summary
         else ""
     )
+    parking_line = ""
+    if r.arch.parked_skip_count > 0 or r.arch.woken_count > 0:
+        parking_line = (
+            f"\n    parking: psk={r.arch.parked_skip_count:5d}  woken={r.arch.woken_count:4d}"
+            f"  parkable={r.arch.vars_parkable:2d}  uniq_fail={r.arch.total_unique_failures:4d}"
+            f"  higher_caught={r.arch.total_higher_caught:4d}"
+        )
     if r.baseline is None:
-        return dreth_line + "\n" + tier_lines + regime_line
+        return dreth_line + "\n" + tier_lines + regime_line + parking_line
 
     b = r.baseline
     if not b.ok:
@@ -748,7 +789,7 @@ def _fmt_row(r: RunResult) -> str:
         f"| rfail={b.sentinel_fails:4d} ref={b.candidate_refreshes:3d} "
         f"| Δiv={iv_diff:>6s} Δaud={aud_diff:>6s} Δt={t_diff:>6s}"
     )
-    return dreth_line + "\n" + tier_lines + "\n" + base_line
+    return dreth_line + "\n" + tier_lines + "\n" + base_line + parking_line
 
 
 def _fmt_header() -> str:
@@ -838,19 +879,33 @@ def _print_aggregate(results: List[RunResult]) -> None:
     avg_comp_sk  = sum(r.arch.composite_skip_count for r in ok_runs) / n
     avg_compr_sk = sum(r.compression_skips for r in ok_runs) / n
     avg_rsk      = sum(r.arch.regime_skip_count for r in ok_runs) / n
-    total_sk_avg = avg_trass_sk + avg_sent_sk + avg_comp_sk + avg_compr_sk + avg_rsk
-    handle_avg   = avg_comp_sk + avg_rsk
+    avg_psk_agg  = sum(r.arch.parked_skip_count for r in ok_runs) / n
+    total_sk_avg = avg_trass_sk + avg_sent_sk + avg_comp_sk + avg_compr_sk + avg_rsk + avg_psk_agg
+    handle_avg   = avg_comp_sk + avg_rsk + avg_psk_agg
     amort_pct    = 100.0 * handle_avg / total_sk_avg if total_sk_avg > 0 else 0.0
 
     print(f"  runs ok={n}/{len(results)}")
     print(f"  avg: skip%={avg_skip:.1f}  iv={avg_iv:.0f}")
     print(f"  handle amortization: {amort_pct:.1f}%  "
-          f"(composite={avg_comp_sk:.0f} regime={avg_rsk:.0f} of {total_sk_avg:.0f} avg total skips)")
+          f"(composite={avg_comp_sk:.0f} regime={avg_rsk:.0f} park={avg_psk_agg:.0f} of {total_sk_avg:.0f} avg total skips)")
     total_rpass = sum(r.arch.regime_sentinel_passes for r in ok_runs)
     total_rfail = sum(r.arch.regime_sentinel_fails for r in ok_runs)
     total_rno   = sum(r.arch.regime_no_sentinel for r in ok_runs)
     if total_rpass + total_rfail + total_rno > 0:
         print(f"  regime sentinel: pass={total_rpass}  fail={total_rfail}  no_sentinel={total_rno}")
+    avg_unique_fail = sum(r.arch.total_unique_failures for r in ok_runs) / n
+    avg_higher_caught = sum(r.arch.total_higher_caught for r in ok_runs) / n
+    avg_parkable = sum(r.arch.vars_parkable for r in ok_runs) / n
+    avg_uniq_vars = sum(r.arch.vars_with_unique_failures for r in ok_runs) / n
+    print(f"  sentinel utility: unique_fails={avg_unique_fail:.0f}  higher_caught={avg_higher_caught:.0f}  "
+          f"parkable_vars={avg_parkable:.1f}  vars_w_unique={avg_uniq_vars:.1f}")
+    avg_psk = sum(r.arch.parked_skip_count for r in ok_runs) / n
+    avg_woken = sum(r.arch.woken_count for r in ok_runs) / n
+    if avg_psk > 0 or avg_woken > 0:
+        print(f"  parking: avg_psk={avg_psk:.0f}  avg_woken={avg_woken:.1f}")
+    avg_passive_iv = sum(r.arch.passive_saved_iv for r in ok_runs) / n
+    avg_passive_stress = sum(r.arch.passive_stress_count for r in ok_runs) / n
+    print(f"  passive monitor: saved_iv={avg_passive_iv:.0f}  stressed={avg_passive_stress:.0f}")
     print(f"  arch avg: route_certs={avg_rc:.1f}  audit_certs={avg_ac:.1f}  "
           f"dormant={avg_dorm:.1f}  revocations={avg_rev:.1f}")
     print(f"  frontier: collapses={total_fc}  cleared(guard)={total_fclr}  "
@@ -920,7 +975,7 @@ def main():
                    help="comma-separated seeds (default: 42,7,99)")
     p.add_argument("--schedule", default="incremental",
                    choices=["incremental", "periodic_shifts", "novelty", "shaped",
-                            "rare_catastrophe", "regime_switch"],
+                            "rare_catastrophe", "regime_switch", "false_trass"],
                    help="mutation schedule (default: incremental)")
     p.add_argument("--settle-cycles", type=int, default=8,
                    help="settle cycles for incremental reveals or regime_switch initial window (default: 8)")

@@ -115,6 +115,7 @@ class RegimeRegister:
         events: List[CertEvent],
         cycle: int,
         fingerprint: Dict[str, float],
+        seed_only: bool = False,
     ) -> Tuple[Optional[int], bool]:
         """Record a set of co-occurring cert events.
 
@@ -122,6 +123,11 @@ class RegimeRegister:
           - regime_id: the matched/promoted regime id, or None
           - newly_confirmed: True only when a candidate was just promoted to
             confirmed this call — signals the caller to commission a sentinel
+
+        seed_only=True: only create a new candidate entry — do not match against
+          confirmed regimes or existing candidates. Used for passive-stress seeding:
+          passive evidence may propose candidates but may not confirm them; only
+          active failures (seed_only=False) can confirm a regime.
 
         Side effects:
           - Prunes stale candidates
@@ -138,9 +144,15 @@ class RegimeRegister:
             if cycle - c <= self._candidate_max_age
         ]
 
-        # Check against confirmed regimes
+        if seed_only:
+            # Passive-stress seeding: add as new candidate without matching.
+            # Confirmation requires a subsequent active-failure match.
+            self._candidates.append((cycle, list(events)))
+            return None, False
+
+        # Check against confirmed regimes (strict: only "failed" events count)
         if self._confirmed:
-            best_ci, best_csim = self._best_match(events, [s.events for s in self._confirmed])
+            best_ci, best_csim = self._best_match(events, [s.events for s in self._confirmed], strict=True)
             if best_csim >= self._threshold:
                 sig = self._confirmed[best_ci]
                 sig.authority += 1
@@ -148,7 +160,7 @@ class RegimeRegister:
                 sig.events = _merge_events(sig.events, events)
                 return sig.regime_id, False
 
-        # Check against candidates
+        # Check against candidates (lenient: "failed" + "stressed" events contribute)
         if self._candidates:
             best_ki, best_ksim = self._best_match(events, [evts for _, evts in self._candidates])
             if best_ksim >= self._threshold:
@@ -195,20 +207,25 @@ class RegimeRegister:
                 sig.active_sentinel = (iv_slot, iv_val, target_vars, tol)
                 return
 
-    def check_sentinels(self, world) -> Tuple[Set[int], int, int, int]:
+    def check_sentinels(self, world) -> Tuple[Set[int], int, int, int, Set[int]]:
         """Replay each confirmed regime's active probe against the current world.
 
-        Returns (covered_vars, passes, fails, no_sentinel_count).
+        Returns (covered_vars, passes, fails, no_sentinel_count, failed_member_vars).
 
         Pass condition: the stored probe still elicits a response (delta >= tol)
         from >= 2 target vars. On pass, all member vars of the regime are added
         to covered_vars — leaf sentinel checks for those vars may be skipped.
         Cost: 2 world calls per regime with an active_sentinel.
 
+        failed_member_vars: vars belonging to regimes whose sentinel FAILED this
+        cycle. Used for sentinel utility accounting — if a leaf sentinel fires on
+        one of these vars, the failure was also detected by a higher handle.
+
         Regimes without an active_sentinel contribute to no_sentinel_count.
         They annotate only and may not authorize rsk.
         """
         covered: Set[int] = set()
+        failed_members: Set[int] = set()
         passes = 0
         fails = 0
         no_sent = 0
@@ -233,7 +250,20 @@ class RegimeRegister:
                 covered.update(member_vars)
             else:
                 fails += 1
-        return covered, passes, fails, no_sent
+                failed_members.update(member_vars)
+        return covered, passes, fails, no_sent, failed_members
+
+    def regime_membership(self) -> Dict[int, int]:
+        """Return {var: regime_id} for all vars belonging to confirmed regimes.
+        Used to populate covered_by_regime_id on VarNethra each cycle.
+        A var appearing in multiple regimes gets the lowest regime_id.
+        """
+        result: Dict[int, int] = {}
+        for sig in self._confirmed:
+            for e in sig.events:
+                if e.var not in result:
+                    result[e.var] = sig.regime_id
+        return result
 
     def summary(self) -> str:
         """One-line per confirmed regime for final_summary output."""
@@ -260,8 +290,23 @@ class RegimeRegister:
         self,
         events: List[CertEvent],
         pool: List[List[CertEvent]],
+        strict: bool = False,
     ) -> Tuple[int, float]:
-        sims = [_jaccard(events, p) for p in pool]
+        """Compute best Jaccard match between events and each pool entry.
+
+        strict=True  (confirmed-regime pool): match only on "failed" events.
+          Active witnesses required — repair events must not widen the union
+          when a candidate has them and a later occurrence only has failures.
+
+        strict=False (candidate pool): match on "failed" + "stressed" events.
+          Passive-stress evidence can seed and confirm candidates; this lets
+          two co-stress cycles propose a regime before any active failure occurs.
+          The regime still cannot authorize rsk until it has a passing active sentinel.
+        """
+        allowed = {"failed"} if strict else {"failed", "stressed"}
+        filtered = [e for e in events if e.event_type in allowed]
+        filtered_pool = [[e for e in p if e.event_type in allowed] for p in pool]
+        sims = [_jaccard(filtered, fp) for fp in filtered_pool]
         best_i = max(range(len(sims)), key=lambda i: sims[i])
         return best_i, sims[best_i]
 

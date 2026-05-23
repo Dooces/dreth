@@ -60,6 +60,11 @@ def f_const_high(parents: List[float]) -> float:
     """Constant 0.8. Used for variables with no parents in the agent's hypothesis."""
     return 0.8
 
+def f_const_tiny(parents: List[float]) -> float:
+    """Constant 0.1. Used as baseline for joint-false-trass test worlds where
+    two vars are individually below the salience threshold but jointly tareth."""
+    return 0.1
+
 # Agent's available functions, addressed by name. The agent enumerates
 # (parents, func) hypotheses using only these names.
 FUNC_LIBRARY: Dict[str, Callable[[List[float]], float]] = {
@@ -71,6 +76,7 @@ FUNC_LIBRARY: Dict[str, Callable[[List[float]], float]] = {
     "FIRST": f_first,
     "LOW":   f_const_low,
     "HIGH":  f_const_high,
+    "TINY":  f_const_tiny,
 }
 
 def f_sin_gate(parents: List[float]) -> float:

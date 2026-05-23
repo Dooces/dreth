@@ -555,6 +555,23 @@ class VarNethra:
     # P route-tareth for T: including P changes the winner. Default: include all
     # (invariant 50 — route/include by default unless excluded by cert).
     route_certs: Dict[int, NethraCertificate] = field(default_factory=dict)
+    # Sentinel utility accounting. Tracks whether this leaf sentinel's failures
+    # were already covered by a higher-level handle (regime or composite). Used
+    # to determine parking eligibility: if no unique failures over W cycles and
+    # a higher handle covered this var for K passes, the leaf probe is redundant.
+    unique_failures_caught: int = 0          # failures NOT covered by any higher handle
+    failures_also_caught_by_higher: int = 0  # failures where regime/composite also flagged
+    cycles_since_unique_failure: int = 0     # resets to 0 on each unique failure
+    covered_by_regime_id: Optional[int] = None      # regime currently covering this var
+    covered_by_composite_id: Optional[int] = None   # composite currently covering this var
+    # Sentinel parking. A parked var skips its individual leaf sentinel check
+    # each cycle as long as wake conditions (below) are not met. Parking is
+    # earned by observed redundancy: covered by a higher sentinel, no unique
+    # failures in W cycles, higher sentinel passed K times across ≥2 recurrences.
+    # Wake conditions: covering regime/composite fails, parent change event,
+    # local downstream contradiction, or scheduled sparse revalidation.
+    parked: bool = False
+    park_cycle: int = 0        # cycle when parking was last applied
 
     def role_for(self, operation: Operation) -> Role:
         """Return the certified role for a named operation, or 'untested' if
@@ -600,6 +617,7 @@ class VarNethra:
             self.route_certs.clear()
             self.consecutive_sentinel_failures = 0
             self.audit_stable_count = 0
+            self.parked = False
             return
         if event == "parent_change":
             self.certificates.pop("predict", None)
@@ -607,6 +625,7 @@ class VarNethra:
             self.certificates.pop("audit", None)
             self.route_certs.clear()
             self.audit_stable_count = 0
+            self.parked = False
             if "skip" in self.certificates:
                 # Parent change is an active dependency event — cert was scoped
                 # to the old parent set; the old evidence no longer applies.
@@ -616,6 +635,7 @@ class VarNethra:
         if event in ("sentinel_failure", "false_trass_contradiction"):
             self.certificates.pop("audit", None)
             self.certificates.pop("compress", None)
+            self.parked = False
             # Reset audit_stable_count only for noise_floor vars. A failure at
             # k×ε is genuine signal for an already-stable var and warrants a
             # re-audit. For normal tareth vars, don't reset — the count must

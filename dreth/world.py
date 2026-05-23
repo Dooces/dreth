@@ -297,6 +297,58 @@ class CausalWorld:
         m = HiddenMutation(cycle, "FUNC", f"FUNC x{var}: {old}→{new}", True, var)
         self.hidden_log.append(m); return m
 
+    def _init_false_trass(self, settle_cycles: int, shock_interval: int = 50) -> None:
+        """One-time setup for the false_trass schedule.
+
+        Wires a minimal joint-false-trass subgraph alongside the random world:
+          xA (TINY≈0.1, root) — individually below salience threshold
+          xB (TINY≈0.1, root) — individually below salience threshold
+          T  (PROD([xA,xB])) — ≈0.01 at baseline; TINY constant fits within tol
+          C  (FIRST([T]))    — tareth sentinel: responds to T; has collector dep
+          D  (MEAN([C]))     — makes C tareth (C has a downstream dependent)
+
+        Jointly: PROD(0.95,0.95)=0.9025 >> 0.01 baseline → strong joint interaction
+        at any tareth var downstream of T.
+
+        Every shock_interval cycles (after settle), both xA and xB jump to HIGH
+        for one cycle. T spikes, triggering T's re-audit with parent_screen discovering
+        xA and xB as parents. They are woken from inert state, audited, and certified
+        trass. The proactive joint scan then detects the PROD(TINY,TINY) interaction
+        and installs a CompositeNethra.
+
+        shock_interval=50 (default) ensures the first shock fires within any test
+        window of ≥ 100 cycles (first shock at settle_cycles+50).
+
+        Layout uses the LAST five vars to avoid colliding with random structure:
+          n-5=xA, n-4=xB, n-3=T, n-2=C, n-1=D
+        """
+        n = self.n_vars
+        if n < 5:
+            self._ft_initialized = True
+            return
+        self._ft_xA: int = n - 5
+        self._ft_xB: int = n - 4
+        self._ft_T: int = n - 3
+        self._ft_C: int = n - 2
+        self._ft_D: int = n - 1
+        self._ft_settle: int = settle_cycles
+        self._ft_shock_interval: int = shock_interval
+        # Wire the false-trass subgraph
+        self.funcs[self._ft_xA] = "TINY"
+        self.parents[self._ft_xA] = []
+        self.funcs[self._ft_xB] = "TINY"
+        self.parents[self._ft_xB] = []
+        self.funcs[self._ft_T] = "PROD"
+        self.parents[self._ft_T] = [self._ft_xA, self._ft_xB]
+        self.funcs[self._ft_C] = "FIRST"
+        self.parents[self._ft_C] = [self._ft_T]
+        self.funcs[self._ft_D] = "MEAN"
+        self.parents[self._ft_D] = [self._ft_C]
+        self._ft_shock_active: bool = False
+        for _ in range(5):
+            self._step_world()
+        self._ft_initialized: bool = True
+
     def _init_regime_switch(self, settle_cycles: int, regime_length: int = 1000) -> None:
         """One-time setup for the regime_switch schedule.
 
@@ -341,6 +393,19 @@ class CausalWorld:
         for _ in range(5):
             self._step_world()
         self._rs_initialized: bool = True
+
+    def prepare_schedule(self, schedule: str, settle_cycles: int = 25) -> None:
+        """Pre-install schedule-specific subgraph structure BEFORE the agent is
+        created. Call this after CausalWorld() but before ChainedAgent.initialize()
+        so the agent's first audits see the intended world (not the random base).
+
+        Safe to call multiple times — guards against double-init."""
+        if schedule == "false_trass":
+            if not getattr(self, "_ft_initialized", False):
+                self._init_false_trass(settle_cycles)
+        elif schedule == "regime_switch":
+            if not getattr(self, "_rs_initialized", False):
+                self._init_regime_switch(settle_cycles)
 
     def perturb_by_schedule(self, cycle: int, schedule: str,
                             settle_cycles: int = 25,
@@ -418,6 +483,44 @@ class CausalWorld:
                 self.hidden_log.append(m)
                 return m
             return self.perturb_value(cycle)
+        elif schedule == "false_trass":
+            if not getattr(self, "_ft_initialized", False):
+                self._init_false_trass(settle_cycles)
+            if cycle <= self._ft_settle or self.n_vars < 5:
+                # Use causal stepping even during settle so the subgraph stays
+                # consistent with its wired functions (xA/xB=TINY, T=PROD, ...).
+                # perturb_value would randomly corrupt the subgraph state.
+                self._step_world()
+                m = HiddenMutation(cycle, "VALUE", f"ft_settle c{cycle}", False, -1)
+                self.hidden_log.append(m)
+                return m
+            elapsed = cycle - self._ft_settle
+            # Restore on the cycle AFTER shock before checking for a new one.
+            if self._ft_shock_active:
+                self.funcs[self._ft_xA] = "TINY"
+                self.funcs[self._ft_xB] = "TINY"
+                self._ft_shock_active = False
+            # Fire new shock every shock_interval cycles (skip elapsed=0).
+            if elapsed > 0 and elapsed % self._ft_shock_interval == 0:
+                self.funcs[self._ft_xA] = "HIGH"
+                self.funcs[self._ft_xB] = "HIGH"
+                self._ft_shock_active = True
+                self._step_world()
+                m = HiddenMutation(
+                    cycle=cycle, kind="JOINT_SHOCK",
+                    description=(
+                        f"JOINT_SHOCK xA=x{self._ft_xA} xB=x{self._ft_xB} "
+                        f"→HIGH (T=x{self._ft_T} will spike)"
+                    ),
+                    rule_changed=True, affected_var=self._ft_T,
+                )
+                self.hidden_log.append(m)
+                return m
+            # Normal step: advance state from causal funcs so xA/xB track TINY.
+            self._step_world()
+            m = HiddenMutation(cycle, "VALUE", f"ft_step c{cycle}", False, -1)
+            self.hidden_log.append(m)
+            return m
         else:
             kind = "value"
         return {"edge": self.perturb_edge, "func": self.perturb_func,

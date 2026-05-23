@@ -117,7 +117,7 @@ def enumerate_var_hypotheses(var: int, n_vars: int, max_parents: int = 2
       - if max_parents >= 2: 5 functions × C(n_vars-1, 2) two-parent combinations
     Used when restricted enumeration falls back (too few settled parents)
     and by sentinel selection."""
-    out = [((), "LOW"), ((), "HIGH")]
+    out = [((), "LOW"), ((), "HIGH"), ((), "TINY")]
     for p in range(n_vars):
         if p == var: continue
         out.append(((p,), "FIRST"))
@@ -143,7 +143,7 @@ def enumerate_var_hypotheses_restricted(
     has already provisionally committed to.
     Caller falls back to full enumeration if available_parents has < 2
     candidates (insufficient to form 2-parent hypotheses)."""
-    out: List[Tuple[Tuple[int, ...], str]] = [((), "LOW"), ((), "HIGH")]
+    out: List[Tuple[Tuple[int, ...], str]] = [((), "LOW"), ((), "HIGH"), ((), "TINY")]
     candidate_parents = sorted(p for p in available_parents if p != var)
     for p in candidate_parents:
         out.append(((p,), "FIRST"))
@@ -168,6 +168,8 @@ def _func_apply_batch(func: str, parent_vals: np.ndarray) -> np.ndarray:
         return np.full(parent_vals.shape[0], 0.2)
     if func == "HIGH":
         return np.full(parent_vals.shape[0], 0.8)
+    if func == "TINY":
+        return np.full(parent_vals.shape[0], 0.1)
     if parent_vals.shape[1] == 0:
         return np.zeros(parent_vals.shape[0])
     if func == "FIRST":

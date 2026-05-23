@@ -105,6 +105,26 @@ from .records import CycleRecord, FitDiagnostic
 #   Tier 2 (3+ deps): 7 stable cycles
 _STRONG_TRASS_SENTINEL_PASSES = 1
 
+# Sentinel parking thresholds.
+# A leaf sentinel may be parked (skipped each cycle) when:
+#   - var is covered by a confirmed regime with active_sentinel
+#   - no unique failures in the last _PARK_W cycles
+#   - the covering regime's sentinel has passed _PARK_K times
+#     across at least 2 distinct recurrences (authority >= 2 already by
+#     confirmed-regime invariant; _PARK_K checks pass count specifically)
+# Wake on: covering regime sentinel fails, local sentinel fail (contradiction),
+#   or sparse revalidation every _PARK_REVALIDATE_INTERVAL cycles.
+_PARK_W = 200                    # unique-failure-free window required
+_PARK_K = 4                      # regime sentinel passes required before parking
+_PARK_REVALIDATE_INTERVAL = 500  # parked vars re-run full sentinel every N cycles
+
+# Proactive joint false-trass scan interval.
+# Every _JOINT_SCAN_INTERVAL cycles, scan all trass-var pairs for joint
+# interactions without waiting for a downstream var's sentinel to fail.
+# This catches PROD(TINY, TINY) patterns where neither var is individually
+# salient but their joint effect on a tareth sentinel var is large.
+_JOINT_SCAN_INTERVAL = 50
+
 # Repair-authority escalation: if a sentinel fires and re-audit returns the same
 # fit _REPAIR_FAILURE_ESCALATION_THRESHOLD times, the var's audit budget is
 # multiplied by _BUDGET_ESCALATION_FACTOR (capped at _BUDGET_ESCALATION_CAP).
@@ -332,6 +352,18 @@ class ChainedAgent:
         self._regime_sentinel_passes = 0
         self._regime_sentinel_fails = 0
         self._regime_no_sentinel = 0
+
+        # Sentinel parking counters.
+        self._parked_skip_count = 0   # cycles where parked var was skipped
+        self._woken_count = 0         # times a parked var was woken
+
+        # Passive residual monitoring counters.
+        # Passive: compute expected-next-state from certified func(parents) against
+        # actual world.state. If residual within envelope → skip active sentinel
+        # (saves IVs). If stressed → run active sentinel. Stressed co-occurrences
+        # feed the regime register as candidate evidence.
+        self._passive_saved_iv = 0    # IVs saved by passive-OK skips
+        self._passive_stress_count = 0  # vars where passive was stressed (active ran)
 
     def _adaptive_probe_budget(self, n_hypotheses: int) -> int:
         """Return the number of probes to use for a hypothesis space of size
@@ -957,6 +989,41 @@ class ChainedAgent:
                         if nb.status == "trass":
                             nb.status = "proposed"
 
+    def _proactive_joint_scan(self, cycle: int) -> None:
+        """Scan all trass-var pairs for joint false-trass without waiting for a
+        downstream sentinel to fail. Catches PROD(TINY, TINY)-style patterns where
+        neither var is individually salient enough to trigger _find_joint_trass_candidates.
+
+        Called every _JOINT_SCAN_INTERVAL cycles. Only considers pairs where neither
+        var already has a CompositeNethra together (no re-testing known composites).
+        """
+        n_vis = self.world.visible_count
+        trass_vars = [
+            v for v in range(n_vis)
+            if self.ledger.vars[v].role_for("skip") == "trass"
+            or v in self._inert_vars
+        ]
+        if len(trass_vars) < 2:
+            return
+        # Build set of already-composite pairs to skip re-testing.
+        existing_pairs: Set[FrozenSet[int]] = {
+            frozenset(cn.members) for cn in self.ledger.composites
+        }
+        for i in range(len(trass_vars)):
+            for j in range(i + 1, len(trass_vars)):
+                va, vb = trass_vars[i], trass_vars[j]
+                if frozenset((va, vb)) in existing_pairs:
+                    continue
+                result = self._test_joint_false_trass(va, vb, cycle)
+                if result == "tareth":
+                    na = self.ledger.vars[va]
+                    nb = self.ledger.vars[vb]
+                    if na.status == "trass":
+                        na.status = "proposed"
+                    if nb.status == "trass":
+                        nb.status = "proposed"
+                    existing_pairs.add(frozenset((va, vb)))
+
     def _retest_trass_vars(self, cycle: int) -> List[int]:
         """Re-run the operation_role test on all currently-trass variables.
         Trass classification is provisional: it depended on which vars were
@@ -1167,6 +1234,19 @@ class ChainedAgent:
         # Parent structure, not operator churn, determines DAG topo invalidation.
         if parents_changed:
             self._invalidate_topo_cache()
+            # Wake previously-inert parents now known to causally affect `var`.
+            # Inert vars are skipped by the cheap salience screen at initialize time
+            # because their individual effect is below DEFAULT_TOLERANCE. When a
+            # structural event (e.g., JOINT_SHOCK) causes the parent screen to
+            # discover them as real causes, they must be audited and certified.
+            for _p in new_parents:
+                if _p < self.world.visible_count and _p in self._inert_vars:
+                    self._inert_vars.discard(_p)
+                    if self._live_set is not None:
+                        self._live_set.add(_p)
+                    self.ledger.event_log.append(
+                        f"c{cycle}: x{_p} woken from inert (new parent of x{var})"
+                    )
 
         n = self.ledger.vars[var]
         if n.first_audited_cycle == 0:
@@ -1826,6 +1906,44 @@ class ChainedAgent:
                 and cycle - n.envelope.certified_at_cycle >= min_cert_age):
             self._live_set.discard(var)
 
+    def _maybe_park_var(self, var: int, cycle: int) -> None:
+        """Evaluate and apply parking eligibility for one authoritative var.
+
+        A var earns parking when:
+          - It is covered by a confirmed regime with an active_sentinel
+          - It has zero unique failures in the last _PARK_W cycles
+          - The covering regime's sentinel has passed at least _PARK_K times
+            (authority >= 2 already, but _PARK_K checks accumulated passes)
+
+        When parked, run_cycle skips the leaf sentinel each cycle unless a wake
+        condition fires (regime sentinel fails, revalidation interval, or cert
+        invalidation via parent_change/sentinel_failure resets parked=False).
+        """
+        n = self.ledger.vars[var]
+        if n.parked:
+            return  # already parked
+        if not n.authoritative:
+            return  # no leaf sentinel to park
+        if n.covered_by_regime_id is None:
+            return  # not under any confirmed regime
+        if n.unique_failures_caught > 0:
+            return  # has caught something no higher handle caught
+        if n.cycles_since_unique_failure < _PARK_W:
+            return  # not quiet long enough
+        # Check the covering regime's pass count
+        regime_id = n.covered_by_regime_id
+        sig = next((s for s in self.regime_register._confirmed if s.regime_id == regime_id), None)
+        if sig is None or sig.active_sentinel is None:
+            return  # no active sentinel on covering regime
+        if self._regime_sentinel_passes < _PARK_K:
+            return  # regime hasn't accumulated enough passes
+        n.parked = True
+        n.park_cycle = cycle
+        self.ledger.event_log.append(
+            f"c{cycle}: x{var} PARKED (regime R{regime_id} coverage, "
+            f"csuf={n.cycles_since_unique_failure}, rpass>={_PARK_K})"
+        )
+
     def _screen_candidate_parents(self, target: int, m: int) -> Set[int]:
         """Per-target sensitivity screen. For each candidate var x, force x to
         0.05 and 0.95 and measure how much `target` moves. Return the top-M
@@ -1994,6 +2112,7 @@ class ChainedAgent:
         deferred: List[int] = []
         novelty_fired = False
         _cert_events: List[RegimeCertEvent] = []
+        _passive_stressed_vars: Set[int] = set()
         _structural_change_this_cycle = False
 
         # First pass: cheap paths and queue full audits.
@@ -2044,12 +2163,26 @@ class ChainedAgent:
         # leaf checks this cycle — the cluster probe is the amortized signal.
         # Costs 2 world calls per regime with an active_sentinel.
         # Regimes without an active_sentinel annotate only; they do not gate here.
-        _regime_covered, _rpass, _rfail, _rno = self.regime_register.check_sentinels(self.world)
+        _regime_covered, _rpass, _rfail, _rno, _regime_failed_vars = self.regime_register.check_sentinels(self.world)
         self._regime_sentinel_passes += _rpass
         self._regime_sentinel_fails += _rfail
         self._regime_no_sentinel += _rno
         self.total_interventions += 2 * (_rpass + _rfail)
         regime_stable = _regime_covered
+
+        # Sentinel utility accounting: update per-var coverage fields and
+        # increment cycles_since_unique_failure for all visible vars each cycle.
+        _regime_membership = self.regime_register.regime_membership()
+        _composite_by_var: Dict[int, int] = {}
+        for _cni, _cn in enumerate(self.ledger.composites):
+            for _cm in _cn.members:
+                if _cm not in _composite_by_var:
+                    _composite_by_var[_cm] = _cni
+        for _v in range(self.world.visible_count):
+            _vn = self.ledger.vars[_v]
+            _vn.covered_by_regime_id = _regime_membership.get(_v)
+            _vn.covered_by_composite_id = _composite_by_var.get(_v)
+            _vn.cycles_since_unique_failure += 1
 
         for var in topo_order:
             n = self.ledger.vars[var]
@@ -2226,13 +2359,77 @@ class ChainedAgent:
                     skipped.append(var)
                     continue
 
-            # Regime-stable skip: var is covered by a quiescent confirmed regime.
-            # The regime's silence over the past quiescence_window cycles is the
-            # amortized signal — one regime-level probe replaces N leaf sentinels.
-            # Only fires when the var is authoritative (would otherwise run a sentinel).
+            # Regime-stable skip: var is covered by a confirmed regime whose
+            # active sentinel passed this cycle (check_sentinels result).
+            # The regime-level probe (2 world calls, done once above) is the
+            # authority — not quiescence. Only fires when the var is authoritative.
             if var in regime_stable and n.authoritative:
                 self.skip_count += 1
                 self._regime_skip_count += 1
+                n.skip_count += 1
+                skipped.append(var)
+                self._maybe_park_var(var, cycle)
+                continue
+
+            # Passive residual check: compute expected-next-state from certified
+            # func(parents) at current world state. No interventions — O(1).
+            # If residual ≤ tolerance: passive says OK → skip active sentinel
+            #   (save IVs; does NOT certify anything — only defers the probe).
+            # If residual > tolerance: passive stressed → run active sentinel
+            #   (stress record also feeds regime register as candidate evidence).
+            # This implements passive-first monitoring: ordinary observation is
+            # cheap, intervention is reserved for when authority must be earned
+            # or repaired (residual stress OR downstream contradiction).
+            _passive_ok = False
+            _passive_stressed = False
+            if n.authoritative:
+                _f = FUNC_LIBRARY.get(n.func)
+                if _f is not None:
+                    _parent_vals = [self.world.state[p] for p in n.parents]
+                    _passive_pred = _f(_parent_vals)
+                    _passive_residual = abs(self.world.state[var] - _passive_pred)
+                    if _passive_residual <= n.current_tolerance:
+                        _passive_ok = True
+                    else:
+                        _passive_stressed = True
+                        self._passive_stress_count += 1
+                        _passive_stressed_vars.add(var)
+
+            # Parked sentinel skip: leaf cert redundant — higher handle covered
+            # this var for _PARK_W+ cycles with no unique failures.
+            # Wake conditions (any one overrides skip):
+            #   - covering regime sentinel failed (var in _regime_failed_vars)
+            #   - sparse revalidation due (cycle % _PARK_REVALIDATE_INTERVAL == 0)
+            #   - passive residual stressed (cert may be stale — recheck)
+            #   - cert was invalidated externally (parked reset on parent_change/sentinel_failure)
+            if n.parked and n.authoritative:
+                _regime_failed = var in _regime_failed_vars
+                _revalidate = (cycle % _PARK_REVALIDATE_INTERVAL == 0)
+                if not _regime_failed and not _revalidate and not _passive_stressed:
+                    self.skip_count += 1
+                    self._parked_skip_count += 1
+                    n.skip_count += 1
+                    skipped.append(var)
+                    continue
+                # Wake: run leaf sentinel this cycle
+                self._woken_count += 1
+                n.parked = False
+                _wake_reason = (
+                    "regime_failed" if _regime_failed
+                    else "passive_stress" if _passive_stressed
+                    else "revalidation"
+                )
+                self.ledger.event_log.append(
+                    f"c{cycle}: x{var} WOKEN from parking ({_wake_reason})"
+                )
+
+            # Passive OK gate: residual inside envelope → skip active sentinel.
+            # Authority is NOT changed — this only defers the intervention probe
+            # for this cycle. The cert remains valid; the shortcut fires because
+            # passive evidence is sufficient THIS CYCLE, not because we certified.
+            if _passive_ok:
+                self._passive_saved_iv += len(n.sentinels)
+                self.skip_count += 1
                 n.skip_count += 1
                 skipped.append(var)
                 continue
@@ -2347,6 +2544,12 @@ class ChainedAgent:
                     self._live_set.add(var)
                 _sentinel_failed_vars[var] = (f"sentinel: {reason}", _sentinel_max_dev)
                 self.sentinel_miss_count += 1
+                # Utility accounting: was a higher handle also firing for this var?
+                if var in _regime_failed_vars:
+                    n.failures_also_caught_by_higher += 1
+                else:
+                    n.unique_failures_caught += 1
+                    n.cycles_since_unique_failure = 0
                 _cert_events.append(RegimeCertEvent(
                     var=var, cert_key="skip", event_type="failed",
                     delta=_sentinel_max_dev, cert_age=n.full_audits,
@@ -2585,6 +2788,9 @@ class ChainedAgent:
         if self._uncertain_this_cycle:
             self._find_joint_trass_candidates(cycle)
 
+        if cycle % _JOINT_SCAN_INTERVAL == 0:
+            self._proactive_joint_scan(cycle)
+
         if _cert_events:
             _n_failed = sum(1 for e in _cert_events if e.event_type == "failed")
             _mean_dev = (sum(e.delta for e in _cert_events) / len(_cert_events))
@@ -2595,6 +2801,25 @@ class ChainedAgent:
             )
             if _newly_confirmed and _regime_id is not None:
                 self._commission_regime_sentinel(_regime_id)
+
+        # Passive co-stress: if ≥ 2 vars were passive-stressed this cycle, feed
+        # them to the regime register as a seeded candidate. Passive evidence
+        # may not confirm a regime — only active failures do. seed_only=True
+        # adds a candidate without matching; subsequent active failure events
+        # can then match this candidate and promote it to confirmed.
+        if len(_passive_stressed_vars) >= 2:
+            _stressed_events = [
+                RegimeCertEvent(
+                    var=v, cert_key="skip", event_type="stressed",
+                    delta=0.0, cert_age=self.ledger.vars[v].full_audits,
+                )
+                for v in _passive_stressed_vars
+            ]
+            self.regime_register.observe(
+                _stressed_events, cycle,
+                {"passive_stress": float(len(_passive_stressed_vars))},
+                seed_only=True,
+            )
 
         self.records.append(CycleRecord(
             cycle=cycle, truth_kind=mutation.kind,
