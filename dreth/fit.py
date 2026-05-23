@@ -366,56 +366,21 @@ def fit_var(
         near_tie_context_key_out = hash(frozenset(range(n_vars)))
 
     if diag is not None:
-        true_parents = tuple(world.parents[var])
-        true_func = world.funcs[var]
-        true_hyp = (true_parents, true_func)
-        hyp_to_idx = {h: idx for idx, h in enumerate(hypotheses)}
-        true_idx = hyp_to_idx.get(true_hyp)
         best_score = int(scores[best_idx])
         second_score = int(scores[second_idx]) if second_idx != best_idx else 0
         margin = best_score - second_score
-        truth_preds_arr = None
         pick_preds_arr = all_preds[best_idx]
 
-        if true_func not in FUNC_LIBRARY:
-            # World is using a function the agent cannot represent (SIN).
-            failure_class = "hypothesis_absent"
-        elif true_idx is None:
-            # Truth's parents were excluded by restriction. Whether this matters
-            # depends on whether the agent's pick predicts within tolerance of
-            # the world output. If pick is operationally adequate, restriction
-            # was a successful pruning, not a failure.
-            pick_within = bool(np.all(np.abs(pick_preds_arr - actuals_arr) <= tolerance))
-            failure_class = "restriction_covered" if pick_within else "restriction_missing"
+        if margin >= 4:
+            failure_class = "fit_clean"
+        elif margin > 0:
+            failure_class = "fit_close"
         else:
-            true_score = int(scores[true_idx])
-            true_rank = int(1 + np.sum(scores > true_score))
-            truth_preds_arr = all_preds[true_idx]
-            if true_rank == 1 and margin >= 4:
-                failure_class = "fit_clean"
-            elif true_rank == 1:
-                failure_class = "fit_with_ties"
-            else:
-                # Truth not at rank 1. Distinguish operationally-equivalent picks
-                # (pick predicts within tolerance of truth on every probe) from
-                # picks that genuinely diverge from truth's predictions. The
-                # diagnostic was previously calling both "wrong_pick"; that
-                # treats a successful efficiency as a fault. Split it.
-                pick_vs_truth = np.abs(pick_preds_arr - truth_preds_arr)
-                if bool(np.all(pick_vs_truth <= tolerance)):
-                    failure_class = "pick_indistinguishable"
-                else:
-                    failure_class = "pick_divergent"
-            diag["true_score"] = true_score
-            diag["true_rank"] = true_rank
+            failure_class = "fit_tied"
+
         diag.update({
             "restricted": restricted_used,
             "hypothesis_count": len(hypotheses),
-            "true_parents": true_parents,
-            "true_func": true_func,
-            "true_present": true_idx is not None,
-            "true_score": int(diag.get("true_score", -1)),
-            "true_rank": int(diag.get("true_rank", -1)),
             "best_score": best_score,
             "second_score": second_score,
             "margin": margin,
@@ -425,8 +390,6 @@ def fit_var(
             "probes": tuple(interventions),
             "actuals": tuple(float(a) for a in actuals_arr),
             "pick_preds": tuple(float(p) for p in pick_preds_arr),
-            "truth_preds": (tuple(float(p) for p in truth_preds_arr)
-                            if truth_preds_arr is not None else None),
             "tie_set": tie_set,
             "near_tie_candidates": near_tie_candidates_out,
             "near_tie_context_key": near_tie_context_key_out,

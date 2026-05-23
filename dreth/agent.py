@@ -111,6 +111,10 @@ _STRONG_TRASS_SENTINEL_PASSES = 1
 _REPAIR_FAILURE_ESCALATION_THRESHOLD = 3
 _BUDGET_ESCALATION_FACTOR            = 4
 _BUDGET_ESCALATION_CAP               = 400
+# Inert re-screen: after this many repair failures on a var, probe the inert
+# set for influence on that var. Fires every multiple of this threshold so
+# re-screen recurs as failures accumulate (e.g. at 6, 12, 18...).
+_INERT_RESCREEN_THRESHOLD            = 6
 class AgentExtension(Protocol):
     derive_compressions: Callable[["ChainedAgent", int, int], List[Compression]]
     derive_equivalence_compressions: Callable[["ChainedAgent", int, int], List[Compression]]
@@ -324,6 +328,10 @@ class ChainedAgent:
         # Regime detection: collects per-cycle cert failure/repair events and
         # clusters them into recurring co-failure patterns (regimes).
         self.regime_register: RegimeRegister = RegimeRegister()
+        self._regime_skip_count = 0
+        self._regime_sentinel_passes = 0
+        self._regime_sentinel_fails = 0
+        self._regime_no_sentinel = 0
 
     def _adaptive_probe_budget(self, n_hypotheses: int) -> int:
         """Return the number of probes to use for a hypothesis space of size
@@ -427,11 +435,6 @@ class ChainedAgent:
             available_parents=tuple(diag_dict["available_parents"]),
             restricted=bool(diag_dict.get("restricted", False)),
             hypothesis_count=int(diag_dict.get("hypothesis_count", -1)),
-            true_parents=tuple(diag_dict.get("true_parents", ())),  
-            true_func=str(diag_dict.get("true_func", "?")),
-            true_present=bool(diag_dict.get("true_present", False)),
-            true_rank=int(diag_dict.get("true_rank", -1)),
-            true_score=int(diag_dict.get("true_score", -1)),
             best_score=int(diag_dict.get("best_score", -1)),
             second_score=int(diag_dict.get("second_score", -1)),
             margin=int(diag_dict.get("margin", -1)),
@@ -441,7 +444,6 @@ class ChainedAgent:
             probes=tuple(diag_dict.get("probes", ())),
             actuals=tuple(diag_dict.get("actuals", ())),
             pick_preds=tuple(diag_dict.get("pick_preds", ())),
-            truth_preds=diag_dict.get("truth_preds"),
             tie_set=diag_dict.get("tie_set", frozenset()),
             near_tie_candidates=tuple(diag_dict.get("near_tie_candidates", ())),
             near_tie_context_key=int(diag_dict.get("near_tie_context_key", 0)),
@@ -833,6 +835,97 @@ class ChainedAgent:
                 f" → x{cn.sentinel_var})"
             )
         return passing_members
+
+    def _commission_regime_sentinel(self, regime_id: int) -> bool:
+        """Try to build a cluster-level witness probe for a newly confirmed regime.
+
+        Phase 1: searches the union of member vars' sentinel pools for a probe
+        that elicits delta >= tol from >= 2 regime members. These probes are
+        free (already selected); covers co-occurring vars via shared ancestors.
+
+        Phase 2: if Phase 1 finds nothing, scans all visible vars with fixed
+        probe values [0.1, 0.9] — a broader but bounded search (2 * n_vis world
+        calls per value). Stops as soon as a qualifying probe is found.
+
+        If neither phase finds a cluster-level witness, the regime annotates only
+        and may not authorize rsk until a future commissioning succeeds (e.g. the
+        world settles into a state where a cluster probe becomes available).
+
+        Cost: up to 2 * (sentinel_pool + 2 * n_vis) world calls, amortized over
+        all subsequent cycles where the sentinel replaces N leaf checks.
+        """
+        sig = next((s for s in self.regime_register._confirmed if s.regime_id == regime_id), None)
+        if sig is None:
+            return False
+
+        member_set = {e.var for e in sig.events if e.var < self.world.visible_count}
+        if len(member_set) < 2:
+            return False
+
+        tol = max(
+            (self.ledger.vars[v].current_tolerance for v in member_set),
+            default=0.05,
+        )
+
+        best_slot: Optional[int] = None
+        best_val: float = 0.0
+        best_target_vars: frozenset = frozenset()
+        best_coverage = 0
+
+        def _evaluate(iv_slot: int, iv_val: float) -> None:
+            nonlocal best_slot, best_val, best_target_vars, best_coverage
+            if iv_slot >= self.world.visible_count:
+                return
+            baseline_val = self.world.state[iv_slot]
+            if abs(iv_val - baseline_val) < 1e-6:
+                return  # probe collapses to identity — would not discriminate
+            baseline = self.world.predict_under_intervention(iv_slot, baseline_val)
+            intervened = self.world.predict_under_intervention(iv_slot, iv_val)
+            self.total_interventions += 2
+            responsive = frozenset(
+                v for v in member_set
+                if abs(intervened[v] - baseline[v]) >= tol
+            )
+            if len(responsive) >= 2 and len(responsive) > best_coverage:
+                best_coverage = len(responsive)
+                best_slot, best_val = iv_slot, iv_val
+                best_target_vars = responsive
+
+        # Phase 1: union of member vars' existing sentinel pools.
+        seen_keys: set = set()
+        for v in member_set:
+            for iv_slot, iv_val in self.ledger.vars[v].sentinels:
+                key = (iv_slot, round(iv_val, 3))
+                if key not in seen_keys:
+                    seen_keys.add(key)
+                    _evaluate(iv_slot, iv_val)
+
+        # Phase 2: scan visible vars with fixed probe values if phase 1 failed.
+        if best_slot is None:
+            for iv_slot in range(self.world.visible_count):
+                for iv_val in (0.1, 0.9):
+                    key = (iv_slot, iv_val)
+                    if key not in seen_keys:
+                        seen_keys.add(key)
+                        _evaluate(iv_slot, iv_val)
+                    if best_slot is not None:
+                        break  # take first qualifying probe — stop scanning
+                if best_slot is not None:
+                    break
+
+        if best_slot is None:
+            self.ledger.event_log.append(
+                f"regime R{regime_id}: sentinel commissioning FAILED "
+                f"(no probe covers >=2 of {len(member_set)} members with delta>=tol)"
+            )
+            return False
+
+        self.regime_register.install_sentinel(regime_id, best_slot, best_val, best_target_vars, tol)
+        self.ledger.event_log.append(
+            f"regime R{regime_id}: sentinel commissioned "
+            f"iv=x{best_slot}→{best_val:.3f} covers {len(best_target_vars)} of {len(member_set)} members"
+        )
+        return True
 
     def _find_joint_trass_candidates(self, cycle: int) -> None:
         """Called once per cycle after all per-var processing. Checks vars that
@@ -1901,6 +1994,7 @@ class ChainedAgent:
         deferred: List[int] = []
         novelty_fired = False
         _cert_events: List[RegimeCertEvent] = []
+        _structural_change_this_cycle = False
 
         # First pass: cheap paths and queue full audits.
         needs_audit: List[int] = []
@@ -1944,6 +2038,18 @@ class ChainedAgent:
         _BACKOFF_INTERVAL  = 8
         _NOVELTY_INTERVAL  = 5
         _STABLE_THRESHOLD  = 3
+
+        # Regime sentinel check: replay each confirmed regime's active cluster
+        # probe. Vars covered by a passing regime sentinel may skip individual
+        # leaf checks this cycle — the cluster probe is the amortized signal.
+        # Costs 2 world calls per regime with an active_sentinel.
+        # Regimes without an active_sentinel annotate only; they do not gate here.
+        _regime_covered, _rpass, _rfail, _rno = self.regime_register.check_sentinels(self.world)
+        self._regime_sentinel_passes += _rpass
+        self._regime_sentinel_fails += _rfail
+        self._regime_no_sentinel += _rno
+        self.total_interventions += 2 * (_rpass + _rfail)
+        regime_stable = _regime_covered
 
         for var in topo_order:
             n = self.ledger.vars[var]
@@ -2119,6 +2225,17 @@ class ChainedAgent:
                     n.skip_count += 1
                     skipped.append(var)
                     continue
+
+            # Regime-stable skip: var is covered by a quiescent confirmed regime.
+            # The regime's silence over the past quiescence_window cycles is the
+            # amortized signal — one regime-level probe replaces N leaf sentinels.
+            # Only fires when the var is authoritative (would otherwise run a sentinel).
+            if var in regime_stable and n.authoritative:
+                self.skip_count += 1
+                self._regime_skip_count += 1
+                n.skip_count += 1
+                skipped.append(var)
+                continue
 
             # Sentinel path.
             # FILTER LEDGER: sentinels are sparse exclusion monitors — cheap probes
@@ -2320,6 +2437,7 @@ class ChainedAgent:
                     )
                     # Genuine change: reset repair-failure counter (the sentinel was right).
                     self._var_repair_failures.pop(var, None)
+                    _structural_change_this_cycle = True
                 # Oscillation: fit changed for a var that has changed before.
                 # Distinguishes repair oscillation (wrong→correct→wrong) from
                 # genuine world change (stable→changed once).
@@ -2349,6 +2467,22 @@ class ChainedAgent:
                                 f"c{cycle}: x{var} audit budget escalated "
                                 f"{_current_budget}→{_new_budget} "
                                 f"(repair_failures={_rf})"
+                            )
+                    if _rf % _INERT_RESCREEN_THRESHOLD == 0 and self._inert_vars:
+                        _woken: Set[int] = set()
+                        for _ix in self._inert_vars:
+                            _lo = self.world.predict_var_under_intervention(var, _ix, 0.05)
+                            _hi = self.world.predict_var_under_intervention(var, _ix, 0.95)
+                            self.total_interventions += 2
+                            if abs(_hi - _lo) > DEFAULT_TOLERANCE:
+                                _woken.add(_ix)
+                        if _woken:
+                            self._inert_vars -= _woken
+                            if self._live_set is not None:
+                                self._live_set.update(_woken)
+                            self.ledger.event_log.append(
+                                f"c{cycle}: x{var} inert rescreen woke "
+                                f"{sorted(_woken)} (repair_failures={_rf})"
                             )
                 self._maybe_demote(var, cycle)
                 # Envelope stability: did this audit move ε at all?
@@ -2399,6 +2533,28 @@ class ChainedAgent:
             else:
                 self.defer_streak[v] = 0
 
+        # Inert rescreen on confirmed structural change: when a sentinel failure
+        # led to a genuine fit change this cycle, re-probe every inert var.
+        # Cost: 2 probes per inert var, fired at most once per cycle only on
+        # confirmed shifts (not on noisy misses or value-only perturbations).
+        if _structural_change_this_cycle and self._inert_vars:
+            _newly_salient: Set[int] = set()
+            for _ix in self._inert_vars:
+                _s_lo = self.world.predict_under_intervention(_ix, 0.05)
+                _s_hi = self.world.predict_under_intervention(_ix, 0.95)
+                self.total_interventions += 2
+                for _j in range(self.world.visible_count):
+                    if _j != _ix and abs(_s_lo[_j] - _s_hi[_j]) > DEFAULT_TOLERANCE:
+                        _newly_salient.add(_ix)
+                        break
+            if _newly_salient:
+                self._inert_vars -= _newly_salient
+                if self._live_set is not None:
+                    self._live_set.update(_newly_salient)
+                self.ledger.event_log.append(
+                    f"c{cycle}: structural shift woke inert {sorted(_newly_salient)}"
+                )
+
         # Frontier admission: when no never-audited vars remain in the live set,
         # admit the next highest-priority unknowns (up to frontier_k at a time).
         # "Fresh" = in live_set but full_audits == 0 (not yet looked at once).
@@ -2432,11 +2588,13 @@ class ChainedAgent:
         if _cert_events:
             _n_failed = sum(1 for e in _cert_events if e.event_type == "failed")
             _mean_dev = (sum(e.delta for e in _cert_events) / len(_cert_events))
-            self.regime_register.observe(
+            _regime_id, _newly_confirmed = self.regime_register.observe(
                 _cert_events,
                 cycle,
                 {"n_failed": float(_n_failed), "mean_delta": _mean_dev},
             )
+            if _newly_confirmed and _regime_id is not None:
+                self._commission_regime_sentinel(_regime_id)
 
         self.records.append(CycleRecord(
             cycle=cycle, truth_kind=mutation.kind,
@@ -2616,12 +2774,8 @@ class ChainedAgent:
         from collections import Counter, defaultdict
         fit_class_counts = Counter(d.failure_class for d in self.fit_diagnostics)
         class_str = " ".join(f"{k}={v}" for k, v in fit_class_counts.most_common()) or "none"
-        true_missing = sum(1 for d in self.fit_diagnostics if not d.true_present)
-        true_present = sum(1 for d in self.fit_diagnostics if d.true_present)
-        true_rank1 = sum(1 for d in self.fit_diagnostics if d.true_rank == 1)
         restricted_fits = sum(1 for d in self.fit_diagnostics if d.restricted)
-        lines.append(f"  fit: aud={len(self.fit_diagnostics)} restr={restricted_fits} "
-                     f"present={true_present} missing={true_missing} r1={true_rank1}")
+        lines.append(f"  fit: aud={len(self.fit_diagnostics)} restr={restricted_fits}")
         lines.append(f"    classes: {class_str}")
 
         by_var = defaultdict(list)
@@ -2630,16 +2784,14 @@ class ChainedAgent:
         rows = []
         for v, ds in by_var.items():
             latest = ds[-1]
-            miss = sum(1 for d in ds if not d.true_present)
-            rank1 = sum(1 for d in ds if d.true_rank == 1)
             common_class = Counter(d.failure_class for d in ds).most_common(1)[0][0]
-            rows.append((len(ds), v, miss, rank1, common_class, latest.status_after, latest.role_after, latest.true_rank, latest.margin))
+            rows.append((len(ds), v, common_class, latest.status_after, latest.role_after, latest.margin))
         rows.sort(reverse=True)
         top_rows = rows[:6]
         if top_rows:
-            lines.append("    worst: " + " | ".join(
-                f"x{v}:a={aud} m={miss} r1={rank1} {klass[:10]} {status[:4]}/{role[:4]} lr={rank} lm={margin}"
-                for aud, v, miss, rank1, klass, status, role, rank, margin in top_rows
+            lines.append("    most audited: " + " | ".join(
+                f"x{v}:a={aud} {klass[:10]} {status[:4]}/{role[:4]} lm={margin}"
+                for aud, v, klass, status, role, margin in top_rows
             ))
 
         # Tie tracking summary: which vars have stable tie sets vs transient.

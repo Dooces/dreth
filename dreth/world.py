@@ -309,7 +309,7 @@ class CausalWorld:
           shaped: edges and func swaps at fixed early cycles (2,5,8,11,13);
                   pure value drift otherwise.
           periodic_shifts: shaped early changes plus a structural change
-                           every 50 cycles after cycle 15.
+                           every 1000 cycles after cycle 100.
           novelty: SIN injection at cycle 10; some early edges; value drift.
           incremental: reveal one variable per `settle_cycles` cycles; no
                        structural changes. Tests bootstrapping behavior.
@@ -325,8 +325,8 @@ class CausalWorld:
         elif schedule == "periodic_shifts":
             structural = {2:"edge", 5:"func", 8:"edge", 11:"func", 13:"edge"}
             kind = structural.get(cycle, "value")
-            if cycle > 15 and cycle % 50 == 0:
-                kind = "edge" if (cycle // 50) % 2 == 0 else "func"
+            if cycle > 100 and cycle % 1000 == 0:
+                kind = "edge" if (cycle // 1000) % 2 == 0 else "func"
         elif schedule == "novelty":
             kind = "novelty" if cycle == 10 else ("edge" if cycle in {2,5} else "value")
         elif schedule == "incremental":

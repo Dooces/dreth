@@ -28,7 +28,7 @@ from __future__ import annotations
 # ─────────────────────────────────────────────────────────────────────────────
 
 import dataclasses
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 
 @dataclasses.dataclass
@@ -69,6 +69,14 @@ class RegimeSignature:
     collision).
     observable_fingerprint stores world-state clues at confirmation time
     (mean delta, n_failed, etc.) as supporting evidence, not as the identity.
+
+    active_sentinel: commissioned cluster-level witness probe, or None.
+      When None the regime annotates only — it may NOT authorize rsk.
+      When set: (iv_slot, iv_val, target_vars: frozenset, tol: float).
+      target_vars are the regime members that responded to the commissioning
+      probe with delta >= tol. check_sentinels replays this probe each cycle;
+      if >= 2 target vars still respond, the sentinel passes and all member
+      vars may skip individual leaf checks.
     """
     regime_id: int
     first_seen_cycle: int
@@ -76,6 +84,7 @@ class RegimeSignature:
     authority: int
     events: List[CertEvent]
     observable_fingerprint: Dict[str, float]
+    active_sentinel: Optional[Tuple] = None
 
 
 class RegimeRegister:
@@ -106,9 +115,13 @@ class RegimeRegister:
         events: List[CertEvent],
         cycle: int,
         fingerprint: Dict[str, float],
-    ) -> Optional[int]:
-        """Record a set of co-occurring cert events and return the matching
-        regime_id if a known pattern was recognized, else None.
+    ) -> Tuple[Optional[int], bool]:
+        """Record a set of co-occurring cert events.
+
+        Returns (regime_id, newly_confirmed):
+          - regime_id: the matched/promoted regime id, or None
+          - newly_confirmed: True only when a candidate was just promoted to
+            confirmed this call — signals the caller to commission a sentinel
 
         Side effects:
           - Prunes stale candidates
@@ -117,7 +130,7 @@ class RegimeRegister:
           - Stores new unmatched events as a candidate
         """
         if not events:
-            return None
+            return None, False
 
         # Prune stale candidates
         self._candidates = [
@@ -133,28 +146,94 @@ class RegimeRegister:
                 sig.authority += 1
                 sig.last_seen_cycle = cycle
                 sig.events = _merge_events(sig.events, events)
-                return sig.regime_id
+                return sig.regime_id, False
 
         # Check against candidates
         if self._candidates:
             best_ki, best_ksim = self._best_match(events, [evts for _, evts in self._candidates])
             if best_ksim >= self._threshold:
                 cand_cycle, cand_events = self._candidates.pop(best_ki)
+                merged = _merge_events(cand_events, events)
+                # Require >= 2 distinct vars — single-var patterns are not cluster handles
+                if len({e.var for e in merged}) < 2:
+                    self._candidates.append((cycle, merged))
+                    return None, False
                 regime_id = len(self._confirmed)
                 sig = RegimeSignature(
                     regime_id=regime_id,
                     first_seen_cycle=cand_cycle,
                     last_seen_cycle=cycle,
                     authority=2,
-                    events=_merge_events(cand_events, events),
+                    events=merged,
                     observable_fingerprint=fingerprint,
                 )
                 self._confirmed.append(sig)
-                return regime_id
+                return regime_id, True
 
         # No match — store as new candidate
         self._candidates.append((cycle, list(events)))
-        return None
+        return None, False
+
+    def install_sentinel(
+        self,
+        regime_id: int,
+        iv_slot: int,
+        iv_val: float,
+        target_vars: frozenset,
+        tol: float,
+    ) -> None:
+        """Store a commissioned cluster-level witness probe on a confirmed regime.
+
+        Called by the agent after running commissioning world calls. The probe
+        (iv_slot, iv_val) is the intervention; target_vars are the regime members
+        that responded with delta >= tol at commissioning time. Once installed,
+        check_sentinels replays this probe each cycle and authorizes rsk only when
+        it passes.
+        """
+        for sig in self._confirmed:
+            if sig.regime_id == regime_id:
+                sig.active_sentinel = (iv_slot, iv_val, target_vars, tol)
+                return
+
+    def check_sentinels(self, world) -> Tuple[Set[int], int, int, int]:
+        """Replay each confirmed regime's active probe against the current world.
+
+        Returns (covered_vars, passes, fails, no_sentinel_count).
+
+        Pass condition: the stored probe still elicits a response (delta >= tol)
+        from >= 2 target vars. On pass, all member vars of the regime are added
+        to covered_vars — leaf sentinel checks for those vars may be skipped.
+        Cost: 2 world calls per regime with an active_sentinel.
+
+        Regimes without an active_sentinel contribute to no_sentinel_count.
+        They annotate only and may not authorize rsk.
+        """
+        covered: Set[int] = set()
+        passes = 0
+        fails = 0
+        no_sent = 0
+        for sig in self._confirmed:
+            member_vars = {e.var for e in sig.events}
+            if sig.active_sentinel is None:
+                no_sent += 1
+                continue
+            iv_slot, iv_val, target_vars, tol = sig.active_sentinel
+            if iv_slot >= world.visible_count:
+                no_sent += 1
+                continue
+            baseline_val = world.state[iv_slot]
+            baseline = world.predict_under_intervention(iv_slot, baseline_val)
+            intervened = world.predict_under_intervention(iv_slot, iv_val)
+            responsive = sum(
+                1 for v in target_vars
+                if v < world.visible_count and abs(intervened[v] - baseline[v]) >= tol
+            )
+            if responsive >= 2:
+                passes += 1
+                covered.update(member_vars)
+            else:
+                fails += 1
+        return covered, passes, fails, no_sent
 
     def summary(self) -> str:
         """One-line per confirmed regime for final_summary output."""

@@ -73,12 +73,6 @@ class FitDiagnostic:
       available_parents:      restricted parent set used (empty if full)
       restricted:             True if restricted enumeration was used
       hypothesis_count:       size of enumerated hypothesis space
-      true_parents, true_func: ground truth (what hidden world says)
-      true_present:           True if (true_parents, true_func) was in
-                              the enumerated set; False if outside library
-                              (e.g., SIN) or restricted out
-      true_rank:              rank of true hypothesis in scored list (1=best)
-      true_score:             score of the true hypothesis
       best_score, second_score, margin: top two scores and gap
       best_parents, best_func: what the agent actually picked
       failure_class:          fit_clean / fit_with_ties / pick_indistinguishable /
@@ -100,8 +94,6 @@ class FitDiagnostic:
         probes:                 list of (iv_var, iv_val) used in audit
         actuals:                world's actual outputs at each probe
         pick_preds:             agent's chosen hypothesis predictions at each probe
-        truth_preds:            ground-truth hypothesis predictions (None if not
-                                in agent's library)
         tie_set:                frozenset of (parents, func) hypotheses that
                                 tied for rank 1 (>=1 entry; size 1 = no tie)
     """
@@ -112,11 +104,6 @@ class FitDiagnostic:
     available_parents: Tuple[int, ...]
     restricted: bool
     hypothesis_count: int
-    true_parents: Tuple[int, ...]
-    true_func: str
-    true_present: bool
-    true_rank: int
-    true_score: int
     best_score: int
     second_score: int
     margin: int
@@ -128,7 +115,6 @@ class FitDiagnostic:
     probes: Tuple[Tuple[int, float], ...] = field(default_factory=tuple)
     actuals: Tuple[float, ...] = field(default_factory=tuple)
     pick_preds: Tuple[float, ...] = field(default_factory=tuple)
-    truth_preds: Optional[Tuple[float, ...]] = None
     tie_set: FrozenSet[Tuple[Tuple[int, ...], str]] = field(default_factory=frozenset)
     # Near-tie constellation: all hypotheses within near_tie_margin probes of
     # the best score. Each entry is (parents, func, score). Sorted score-desc.

@@ -38,9 +38,10 @@ import time
 from collections import Counter
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-sys.path.insert(0, __file__.replace("/scripts/batch_run.py", ""))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from dreth.world import CausalWorld
 from dreth.agent import ChainedAgent
@@ -105,39 +106,46 @@ class ArchMetrics:
     # noise_floor certified: vars that earned the noise_floor cert
     vars_noise_floor: int = 0
 
+    # I5: route cert misplaced in certificates dict instead of route_certs
+    bad_route_cert_location: int = 0
+
+    # Composite nethra (nethra-of-nethra) handle metrics
+    composite_skip_count: int = 0     # sentinel checks avoided by composite handle
+    vars_under_composite: int = 0     # distinct vars covered by >= 1 composite
+    active_composites: int = 0        # composites that passed their probe this run
+
+    # Regime-based sentinel amortization metrics
+    regime_skip_count: int = 0        # leaf checks skipped when regime sentinel passed
+    confirmed_regimes: int = 0        # confirmed regime signatures at end of run
+    vars_under_regime: int = 0        # distinct vars covered by confirmed regimes
+    # Regime sentinel pass/fail/no_sentinel (summed across all cycles in the run)
+    regime_sentinel_passes: int = 0   # cycles where regime sentinel passed → rsk credited
+    regime_sentinel_fails: int = 0    # cycles where regime sentinel failed → leaf checks ran
+    regime_no_sentinel: int = 0       # cycles where regime had no active sentinel (annotate only)
+
 
 @dataclass
 class BaselineMetrics:
     """Metrics from the sparse_cached_refit baseline agent."""
     elapsed: float = 0.0
-    skip_count: int = 0          # vars not refit this cycle (residual window below threshold)
-    full_audits: int = 0         # total refits
-    interventions: int = 0       # total probe calls (screening + refit interventions)
-    sentinel_fails: int = 0      # times residual window triggered a refit
-    candidate_refreshes: int = 0 # times candidate parent set was re-screened
-    wrong_fits: int = 0          # vars with wrong final parents at end of run
-    wrong_at_20: List[int] = field(default_factory=list)  # wrong-parent var IDs at 20% snap
-    wrong_at_end: List[int] = field(default_factory=list) # wrong-parent var IDs at end
+    skip_count: int = 0
+    full_audits: int = 0
+    interventions: int = 0
+    sentinel_fails: int = 0
+    candidate_refreshes: int = 0
     ok: bool = True
     error: str = ""
 
 
 @dataclass
 class TierMetrics:
-    """Per-consequence-tier breakdown: wrong fits, avg sentinel count, avg cycles-to-cert."""
-    # var counts per tier
+    """Per-consequence-tier breakdown: var counts, avg sentinel count, avg cycles-to-cert."""
     n_t0: int = 0
     n_t1: int = 0
     n_t2: int = 0
-    # wrong fits per tier
-    wf_t0: int = 0
-    wf_t1: int = 0
-    wf_t2: int = 0
-    # avg sentinel count per tier (len(n.sentinels) at end of run)
     sent_t0: float = 0.0
     sent_t1: float = 0.0
     sent_t2: float = 0.0
-    # avg cycles to first certification per tier (None vars excluded)
     promo_t0: float = 0.0
     promo_t1: float = 0.0
     promo_t2: float = 0.0
@@ -161,18 +169,12 @@ class RunResult:
     drift_total: int
     certified: int
     trass_status: int
-    true_missing: int      # cumulative: fit attempts where true hypothesis not in candidate set
-    wrong_fits_dreth: int  # final-state: vars with wrong parents at end of run
     # New architecture metrics
     arch: ArchMetrics
     # Invariant violations (list of short strings)
     violations: List[str] = field(default_factory=list)
     # Baseline comparison (populated only when --compare is active)
     baseline: Optional[BaselineMetrics] = None
-    # Per-variable overlap diagnostics (populated for all runs)
-    snap_cycle: int = 0
-    dreth_wrong_at_20: List[int] = field(default_factory=list)
-    dreth_wrong_at_end: List[int] = field(default_factory=list)
     # Consequence-weight tier breakdown (always populated)
     tier: TierMetrics = field(default_factory=TierMetrics)
     # Ablation: second run with CW disabled (populated only when cfg.ablate=True)
@@ -188,7 +190,7 @@ class SparseVarState:
     candidate_parents: List[int]
     parents: Tuple[int, ...]
     func: str
-    residuals: List[float]          # rolling window, capped at VALIDATION_WINDOW
+    residuals: List[float]
     last_refit_cycle: int
     refit_count: int
     candidate_refresh_count: int
@@ -219,7 +221,7 @@ class SparseCachedRefitAgent:
         world: CausalWorld,
         rng: random.Random,
         intervention_budget: int = 10,
-        sentinel_count: int = 5,    # noqa: unused, kept for call-site symmetry
+        sentinel_count: int = 5,
     ):
         self.world = world
         self.rng = rng
@@ -232,14 +234,10 @@ class SparseCachedRefitAgent:
         self.skip_count: int = 0
         self.full_audit_count: int = 0
         self.total_interventions: int = 0
-        self.sentinel_fail_count: int = 0   # refit-trigger count (API symmetry)
+        self.sentinel_fail_count: int = 0
         self.candidate_refresh_count: int = 0
 
-    # ── internal ──────────────────────────────────────────────────────────────
-
     def _screen_candidates(self, y: int) -> List[int]:
-        """Score each x != y by |predict_y(x=0.9) - predict_y(x=0.1)|,
-        return top min(K, n-1) by sensitivity. Costs 2*(n-1) interventions."""
         n = self.world.visible_count
         scores: List[Tuple[float, int]] = []
         for x in range(n):
@@ -299,14 +297,11 @@ class SparseCachedRefitAgent:
         )
         self._do_refit(y, candidates)
 
-    # ── public ────────────────────────────────────────────────────────────────
-
     def initialize(self) -> None:
         for y in range(self.world.visible_count):
             self._init_var(y)
 
     def on_variable_revealed(self, var: int) -> None:
-        """Init new var; rescreen all existing vars (new var is a parent candidate)."""
         self._init_var(var)
         for y in range(self.world.visible_count):
             if y == var or y not in self._state:
@@ -326,25 +321,19 @@ class SparseCachedRefitAgent:
             if y not in self._state:
                 self._init_var(y)
                 continue
-
             vs = self._state[y]
             residual = self._current_residual(y)
             vs.residuals.append(residual)
             if len(vs.residuals) > self.VALIDATION_WINDOW:
                 vs.residuals = vs.residuals[-self.VALIDATION_WINDOW:]
-
             if not self._is_poor(y):
                 self.skip_count += 1
                 continue
-
-            # Residual window has enough failures — refit with candidate set
             self.sentinel_fail_count += 1
             self._do_refit(y, vs.candidate_parents)
             new_residual = self._current_residual(y)
             vs.residuals = [new_residual]
-
             if new_residual > self.tolerance:
-                # Still poor — refresh candidates if not rate-limited
                 if self._cycle - vs.last_refresh_cycle >= self.CANDIDATE_REFRESH_INTERVAL:
                     new_candidates = self._screen_candidates(y)
                     vs.candidate_parents = new_candidates
@@ -354,34 +343,21 @@ class SparseCachedRefitAgent:
                     self._do_refit(y, new_candidates)
                     vs.residuals = [self._current_residual(y)]
 
-    def wrong_fits(self) -> int:
-        return sum(
-            1 for y in range(self.world.visible_count)
-            if y in self._state
-            and set(self._state[y].parents) != set(self.world.parents[y])
-        )
-
 
 # ── in-process run ─────────────────────────────────────────────────────────────
 
-def _compute_tier_metrics(
-    agent: ChainedAgent, world: CausalWorld, wrong_set: set
-) -> TierMetrics:
+def _compute_tier_metrics(agent: ChainedAgent, world: CausalWorld) -> TierMetrics:
     """Bucket visible vars by consequence tier and collect per-tier stats."""
     tm = TierMetrics()
-    n_buckets   = [0, 0, 0]
-    wf_buckets  = [0, 0, 0]
-    sent_sums   = [0.0, 0.0, 0.0]
-    promo_sums  = [0.0, 0.0, 0.0]
-    promo_cnts  = [0, 0, 0]
+    n_buckets  = [0, 0, 0]
+    sent_sums  = [0.0, 0.0, 0.0]
+    promo_sums = [0.0, 0.0, 0.0]
+    promo_cnts = [0, 0, 0]
 
     for v in range(world.visible_count):
-        t = agent._consequence_tier(v)
-        t = min(t, 2)
+        t = min(agent._consequence_tier(v), 2)
         n = agent.ledger.vars[v]
         n_buckets[t] += 1
-        if v in wrong_set:
-            wf_buckets[t] += 1
         sent_sums[t] += len(n.sentinels)
         fc = getattr(n, "first_certified_cycle", None)
         if fc is not None:
@@ -389,7 +365,6 @@ def _compute_tier_metrics(
             promo_cnts[t] += 1
 
     tm.n_t0, tm.n_t1, tm.n_t2 = n_buckets
-    tm.wf_t0, tm.wf_t1, tm.wf_t2 = wf_buckets
     tm.sent_t0 = sent_sums[0] / max(1, n_buckets[0])
     tm.sent_t1 = sent_sums[1] / max(1, n_buckets[1])
     tm.sent_t2 = sent_sums[2] / max(1, n_buckets[2])
@@ -405,18 +380,14 @@ def _build_and_run_dreth(
     log_interval: int = 0,
     log_tag: str = "",
     agent_seed_offset: int = 0,
-) -> Tuple[ChainedAgent, CausalWorld, int, List[int], List[int]]:
-    """Returns (agent, world, snap_cycle, wrong_at_20pct, wrong_at_end).
+) -> Tuple[ChainedAgent, CausalWorld]:
+    """Returns (agent, world).
 
-    When log_interval > 0, prints a one-line status every log_interval cycles
-    to stdout. log_tag prefixes each line (useful to distinguish CW ON vs OFF).
+    When log_interval > 0, prints a one-line status every log_interval cycles.
+    log_tag prefixes each line (useful to distinguish CW ON vs OFF).
 
     agent_seed_offset shifts rng_a independently of rng_w, so two runs on the
-    same world (same rng_w seed) can have independent agent randomness. Use a
-    non-zero offset for the ablation branch to decouple RNG trajectories —
-    otherwise CW ON (which places more sentinels via P1) consumes more RNG,
-    shifting all subsequent fit_var calls and making the comparison confounded
-    by trajectory divergence rather than policy difference.
+    same world (same rng_w seed) can have independent agent randomness.
     """
     rng_w = random.Random(cfg.seed)
     rng_a = random.Random(cfg.seed + 10_000 + agent_seed_offset)
@@ -431,24 +402,13 @@ def _build_and_run_dreth(
         priority_audit_budget=max(1, cfg.n_vars // 2),
         consequence_weight=consequence_weight,
     )
-    snap_cycle = max(1, cfg.cycles // 5)
-    dreth_wrong_at_20: List[int] = []
     agent.initialize()
 
-    # ── progress-logging state ────────────────────────────────────────────────
-    # fit_history[var] = list of (cycle, parents, correct) for each fit change
-    fit_history: Dict[int, List[Tuple[int, tuple, bool]]] = {}
     prev_iv = 0
     prev_sent_skip = 0
 
     def _snap_parents() -> Dict[int, tuple]:
         return {v: agent.ledger.vars[v].parents for v in range(world.visible_count)}
-
-    def _wrong_now() -> List[int]:
-        return sorted(
-            v for v in range(world.visible_count)
-            if set(agent.ledger.vars[v].parents) != set(world.parents[v])
-        )
 
     for cycle in range(1, cfg.cycles + 1):
         if log_interval > 0:
@@ -461,90 +421,48 @@ def _build_and_run_dreth(
         else:
             agent.run_cycle(m)
 
-        if cycle == snap_cycle:
-            dreth_wrong_at_20 = sorted(
-                var for var in range(world.visible_count)
-                if set(agent.ledger.vars[var].parents) != set(world.parents[var])
-            )
-
         if log_interval > 0:
-            # Track fit changes this cycle
-            changed = []
-            for v in range(world.visible_count):
-                cur = agent.ledger.vars[v].parents
-                if cur != pre_parents.get(v):
-                    correct = set(cur) == set(world.parents[v])
-                    if v not in fit_history:
-                        fit_history[v] = []
-                    fit_history[v].append((cycle, cur, correct))
-                    changed.append(v)
+            changed = [
+                v for v in range(world.visible_count)
+                if agent.ledger.vars[v].parents != pre_parents.get(v)
+            ]
 
             if cycle % log_interval == 0:
-                wrong = _wrong_now()
                 iv_delta = agent.total_interventions - prev_iv
                 sent_delta = agent.sentinel_skip_count - prev_sent_skip
                 vis = world.visible_count
                 tag = f"[{log_tag}] " if log_tag else ""
+                n_cert = sum(
+                    1 for v in range(vis)
+                    if agent.ledger.vars[v].status in ("certified", "trass")
+                )
                 changed_str = (
                     " fits=[" + ",".join(
-                        f"x{v}→{'ok' if set(agent.ledger.vars[v].parents)==set(world.parents[v]) else 'WRG'}"
+                        f"x{v}→{agent.ledger.vars[v].status}"
                         for v in changed
                     ) + "]"
                 ) if changed else ""
-                wrong_str = ("{" + ",".join(f"x{v}" for v in wrong) + "}"
-                             if wrong else "∅")
                 print(
-                    f"  {tag}c{cycle:4d}/{cfg.cycles} vis={vis:2d} "
-                    f"wrong={wrong_str} "
-                    f"Δiv={iv_delta:4d} Δsent={sent_delta:3d}"
+                    f"  {tag}c{cycle:4d}/{cfg.cycles} vis={vis:3d} cert={n_cert:3d} "
+                    f"Δiv={iv_delta:5d} Δsent={sent_delta:4d}"
                     f"{changed_str}",
                     flush=True,
                 )
                 prev_iv = agent.total_interventions
                 prev_sent_skip = agent.sentinel_skip_count
 
-    dreth_wrong_at_end = sorted(
-        var for var in range(world.visible_count)
-        if set(agent.ledger.vars[var].parents) != set(world.parents[var])
-    )
-
-    # ── end-of-run wrong-fit trace ────────────────────────────────────────────
-    if log_interval > 0 and dreth_wrong_at_end:
-        tag = f"[{log_tag}] " if log_tag else ""
-        print(f"  {tag}end wrong-fit trace:", flush=True)
-        for v in dreth_wrong_at_end:
-            n = agent.ledger.vars[v]
-            t = agent._consequence_tier(v)
-            hist = fit_history.get(v, [])
-            hist_str = " → ".join(
-                f"c{c}:{list(p)}({'ok' if ok else 'WRG'})" for c, p, ok in hist
-            )
-            print(
-                f"    x{v} T{t} {n.status}: parents={list(n.parents)} true={world.parents[v]} "
-                f"strong_obs={n.strong_observations} sent={len(n.sentinels)} "
-                f"history=[{hist_str}]",
-                flush=True,
-            )
-
-    return agent, world, snap_cycle, dreth_wrong_at_20, dreth_wrong_at_end
+    return agent, world
 
 
-def _build_and_run_baseline(
-    cfg: RunConfig,
-    snap_cycle: int,
-) -> Tuple[SparseCachedRefitAgent, CausalWorld, List[int], List[int]]:
-    """Returns (agent, world, wrong_at_20pct, wrong_at_end). Uses same snap_cycle as Dreth."""
+def _build_and_run_baseline(cfg: RunConfig) -> Tuple[SparseCachedRefitAgent, CausalWorld]:
+    """Returns (agent, world)."""
     rng_w = random.Random(cfg.seed)
-    rng_a = random.Random(cfg.seed + 20_000)   # distinct stream from Dreth
+    rng_a = random.Random(cfg.seed + 20_000)
 
     initial_visible = 1 if cfg.schedule == "incremental" else cfg.n_vars
     world = CausalWorld(cfg.n_vars, rng_w, noise_sigma=cfg.noise_sigma,
                         initial_visible=initial_visible)
-    agent = SparseCachedRefitAgent(
-        world=world, rng=rng_a,
-        intervention_budget=10,
-    )
-    base_wrong_at_20: List[int] = []
+    agent = SparseCachedRefitAgent(world=world, rng=rng_a, intervention_budget=10)
     agent.initialize()
     for cycle in range(1, cfg.cycles + 1):
         m = world.perturb_by_schedule(cycle, cfg.schedule,
@@ -553,18 +471,7 @@ def _build_and_run_baseline(
             agent.on_variable_revealed(m.affected_var)
         else:
             agent.run_cycle()
-        if cycle == snap_cycle:
-            base_wrong_at_20 = sorted(
-                y for y in range(world.visible_count)
-                if y in agent._state
-                and set(agent._state[y].parents) != set(world.parents[y])
-            )
-    base_wrong_at_end = sorted(
-        y for y in range(world.visible_count)
-        if y in agent._state
-        and set(agent._state[y].parents) != set(world.parents[y])
-    )
-    return agent, world, base_wrong_at_20, base_wrong_at_end
+    return agent, world
 
 
 def _extract_arch_metrics(agent: ChainedAgent, world: CausalWorld) -> ArchMetrics:
@@ -575,7 +482,6 @@ def _extract_arch_metrics(agent: ChainedAgent, world: CausalWorld) -> ArchMetric
     revoked_by_counts: Counter = Counter()
 
     for n in visible:
-        # ── skip / compress / audit certs ────────────────────────────────────
         for cert in n.certificates.values():
             eb = getattr(cert, "earned_by", None)
             if not eb:
@@ -590,7 +496,10 @@ def _extract_arch_metrics(agent: ChainedAgent, world: CausalWorld) -> ArchMetric
             if rb is not None:
                 revoked_by_counts[rb] += 1
 
-        # ── audit cert ───────────────────────────────────────────────────────
+            # I5: route certs belong in route_certs, not certificates
+            if getattr(cert, "operation", None) == "route":
+                m.bad_route_cert_location += 1
+
         if "audit" in n.certificates:
             m.vars_with_audit_cert += 1
             role = n.certificates["audit"].role
@@ -599,7 +508,6 @@ def _extract_arch_metrics(agent: ChainedAgent, world: CausalWorld) -> ArchMetric
             elif role not in ("reusable", "not_reusable"):
                 m.audit_bad_role += 1
 
-        # ── route certs ──────────────────────────────────────────────────────
         if n.route_certs:
             m.vars_with_route_certs += 1
             for rc in n.route_certs.values():
@@ -609,7 +517,6 @@ def _extract_arch_metrics(agent: ChainedAgent, world: CausalWorld) -> ArchMetric
                 elif rc.role == "tareth":
                     m.route_tareth += 1
 
-        # ── dormant alternatives ─────────────────────────────────────────────
         for alt in n.dormant_alternatives:
             if not isinstance(alt, DormantAlternative):
                 m.dormant_bad_type += 1
@@ -622,7 +529,6 @@ def _extract_arch_metrics(agent: ChainedAgent, world: CausalWorld) -> ArchMetric
     m.earned_by_dist = dict(earned_by_counts)
     m.revoked_by_dist = dict(revoked_by_counts)
 
-    # ── sentinel backoff ─────────────────────────────────────────────────────
     _BACKOFF_THRESHOLD = 4
     m.vars_in_backoff = sum(
         1 for n in visible
@@ -638,12 +544,24 @@ def _extract_arch_metrics(agent: ChainedAgent, world: CausalWorld) -> ArchMetric
         1 for n in visible if n.role_for("skip") == "noise_floor"
     )
 
-    # ── frontier collapse guard events ───────────────────────────────────────
     for e in agent.ledger.event_log:
         if "frontier collapsed" in e:
             m.frontier_collapses += 1
         elif "frontier cleared (threshold not met" in e:
             m.frontier_cleared += 1
+
+    # Composite nethra (nethra-of-nethra) handle metrics
+    m.composite_skip_count = agent.composite_skip_count
+    m.vars_under_composite = len({mem for cn in agent.ledger.composites for mem in cn.members})
+    m.active_composites = sum(1 for cn in agent.ledger.composites if cn.certified)
+
+    # Regime-based skip metrics
+    m.regime_skip_count = agent._regime_skip_count
+    m.confirmed_regimes = len(agent.regime_register._confirmed)
+    m.vars_under_regime = len({e.var for sig in agent.regime_register._confirmed for e in sig.events})
+    m.regime_sentinel_passes = agent._regime_sentinel_passes
+    m.regime_sentinel_fails = agent._regime_sentinel_fails
+    m.regime_no_sentinel = agent._regime_no_sentinel
 
     return m
 
@@ -658,17 +576,19 @@ def _check_invariants(arch: ArchMetrics) -> List[str]:
         violations.append(f"I3: {arch.dormant_bad_type} dormant_alternative(s) are not DormantAlternative objects")
     if arch.demoted_missing_revoked_by:
         violations.append(f"I4: {arch.demoted_missing_revoked_by} demoted cert(s) missing revoked_by")
+    if arch.bad_route_cert_location:
+        violations.append(f"I5: {arch.bad_route_cert_location} route cert(s) misplaced in certificates (must live in route_certs)")
     return violations
 
 
 def _run_one(cfg: RunConfig) -> RunResult:
     t0 = time.monotonic()
     try:
-        agent, world, snap_cycle, dreth_wrong_at_20, dreth_wrong_at_end = _build_and_run_dreth(
+        agent, world = _build_and_run_dreth(
             cfg, log_interval=cfg.log_interval, log_tag="CW" if cfg.ablate else ""
         )
         elapsed = time.monotonic() - t0
-        tier = _compute_tier_metrics(agent, world, set(dreth_wrong_at_end))
+        tier = _compute_tier_metrics(agent, world)
 
         records = agent.records
         structural = [m for m in world.hidden_log if m.rule_changed]
@@ -685,7 +605,6 @@ def _run_one(cfg: RunConfig) -> RunResult:
         certified = sum(1 for n in visible if n.status == "certified")
         trass_status = sum(1 for n in visible
                            if n.status == "trass" or n.role_for("skip") == "trass")
-        true_missing = sum(1 for d in agent.fit_diagnostics if not d.true_present)
 
         arch = _extract_arch_metrics(agent, world)
         violations = _check_invariants(arch)
@@ -704,13 +623,8 @@ def _run_one(cfg: RunConfig) -> RunResult:
             drift_total=len(structural),
             certified=certified,
             trass_status=trass_status,
-            true_missing=true_missing,
-            wrong_fits_dreth=len(dreth_wrong_at_end),
             arch=arch,
             violations=violations,
-            snap_cycle=snap_cycle,
-            dreth_wrong_at_20=dreth_wrong_at_20,
-            dreth_wrong_at_end=dreth_wrong_at_end,
             tier=tier,
             regime_summary=regime_summary,
         )
@@ -723,17 +637,14 @@ def _run_one(cfg: RunConfig) -> RunResult:
             trass_skips=0, sentinel_skips=0, compression_skips=0,
             full_audits=0, interventions=0,
             drift_localized=0, drift_total=0,
-            certified=0, trass_status=0, true_missing=0, wrong_fits_dreth=0,
+            certified=0, trass_status=0,
             arch=ArchMetrics(),
         )
 
-    # ── baseline comparison ───────────────────────────────────────────────────
     if cfg.compare:
         try:
             t1 = time.monotonic()
-            b_agent, _, base_wrong_at_20, base_wrong_at_end = _build_and_run_baseline(
-                cfg, snap_cycle
-            )
+            b_agent, _ = _build_and_run_baseline(cfg)
             b_elapsed = time.monotonic() - t1
             result.baseline = BaselineMetrics(
                 elapsed=b_elapsed,
@@ -742,9 +653,6 @@ def _run_one(cfg: RunConfig) -> RunResult:
                 interventions=b_agent.total_interventions,
                 sentinel_fails=b_agent.sentinel_fail_count,
                 candidate_refreshes=b_agent.candidate_refresh_count,
-                wrong_fits=len(base_wrong_at_end),
-                wrong_at_20=base_wrong_at_20,
-                wrong_at_end=base_wrong_at_end,
                 ok=True,
             )
         except Exception as exc:
@@ -753,17 +661,16 @@ def _run_one(cfg: RunConfig) -> RunResult:
                 error=f"{type(exc).__name__}: {exc}",
             )
 
-    # ── ablation: re-run with consequence_weight=False ────────────────────────
     if cfg.ablate:
         try:
-            a2, w2, _, _, end2 = _build_and_run_dreth(
+            a2, w2 = _build_and_run_dreth(
                 cfg, consequence_weight=False,
                 log_interval=cfg.log_interval, log_tag="CW-OFF",
                 agent_seed_offset=5_000,
             )
-            result.tier_no_cw = _compute_tier_metrics(a2, w2, set(end2))
+            result.tier_no_cw = _compute_tier_metrics(a2, w2)
         except Exception:
-            pass  # ablation failure is non-fatal; tier_no_cw stays None
+            pass
 
     return result
 
@@ -771,7 +678,6 @@ def _run_one(cfg: RunConfig) -> RunResult:
 # ── formatting ─────────────────────────────────────────────────────────────────
 
 def _pct_diff(dreth_val: float, base_val: float) -> str:
-    """Return signed percentage change dreth vs baseline (negative = dreth cheaper)."""
     if base_val == 0:
         return "n/a"
     d = (dreth_val - base_val) / base_val * 100
@@ -791,23 +697,24 @@ def _fmt_row(r: RunResult) -> str:
     fclr = r.arch.frontier_cleared
     bkf = r.arch.vars_in_backoff
     viols = f"*{len(r.violations)}" if r.violations else "ok"
+    csk = r.arch.composite_skip_count
+    rsk = r.arch.regime_skip_count
     dreth_line = (
         f"  n={cfg.n_vars:3d} cyc={cfg.cycles:4d} seed={cfg.seed:5d} "
         f"| {st:3s} {r.elapsed:5.1f}s "
         f"| skip={skip:6s} sent={r.sentinel_skips:5d} comp={r.compression_skips:4d} "
-        f"| iv={r.interventions:6d} auds={r.full_audits:5d} miss={r.true_missing:3d} "
+        f"csk={csk:4d} rsk={rsk:4d} "
+        f"| iv={r.interventions:6d} auds={r.full_audits:5d} "
         f"| rc={rca:4d} ac={aca:3d} dorm={dorm:3d} rev={revoked:3d} "
         f"fc={fc:3d}/{fc+fclr:<3d} bkf={bkf:2d} nov={r.arch.vars_open_novelty:2d} "
         f"stb={r.arch.vars_envelope_stable:2d} nf={r.arch.vars_noise_floor:2d} "
         f"| {viols}"
     )
-    # ── tier breakdown sub-line (always shown) ───────────────────────────────
     tm = r.tier
     def _tier_line(t: TierMetrics, label: str) -> str:
         return (
             f"  {'':>3s} {'':>4s} {'':>5s}   {label}"
             f"tier n=({t.n_t0}/{t.n_t1}/{t.n_t2})  "
-            f"wf=({t.wf_t0}/{t.wf_t1}/{t.wf_t2})  "
             f"sent=({t.sent_t0:.1f}/{t.sent_t1:.1f}/{t.sent_t2:.1f})  "
             f"promo=({t.promo_t0:.0f}/{t.promo_t1:.0f}/{t.promo_t2:.0f})"
         )
@@ -826,45 +733,22 @@ def _fmt_row(r: RunResult) -> str:
     b = r.baseline
     if not b.ok:
         base_line = f"  {'':>3s} {'':>4s} {'':>5s}   BASE ERR: {b.error}"
-    else:
-        b_total = b.skip_count + b.full_audits
-        b_skip_pct = b.skip_count / max(1, b_total) * 100
-        iv_diff   = _pct_diff(r.interventions, b.interventions)
-        aud_diff  = _pct_diff(r.full_audits,   b.full_audits)
-        t_diff    = _pct_diff(r.elapsed,        b.elapsed)
-        base_line = (
-            f"  {'':>3s} {'':>4s} {'':>5s}   "
-            f"BASE {b.elapsed:5.1f}s "
-            f"| skip={b_skip_pct:5.1f}%       "
-            f"| iv={b.interventions:6d} auds={b.full_audits:5d} wf={b.wrong_fits:3d} "
-            f"| rfail={b.sentinel_fails:4d} ref={b.candidate_refreshes:3d} "
-            f"| Δiv={iv_diff:>6s} Δaud={aud_diff:>6s} Δt={t_diff:>6s}"
-        )
-    if not b.ok:
-        return dreth_line + "\n" + base_line
+        return dreth_line + "\n" + tier_lines + "\n" + base_line
 
-    # ── per-variable overlap diagnostics ─────────────────────────────────────
-    d20  = set(r.dreth_wrong_at_20)
-    dend = set(r.dreth_wrong_at_end)
-    b20  = set(b.wrong_at_20)
-    bend = set(b.wrong_at_end)
-
-    def _fv(vs) -> str:
-        s = sorted(vs)
-        return "∅" if not s else "{" + ",".join(f"x{v}" for v in s) + "}"
-
-    pfx = f"  {'':>3s} {'':>4s} {'':>5s}   "
-    snap_line = (
-        f"{pfx}c{r.snap_cycle}(20%): "
-        f"D={_fv(d20)}  B={_fv(b20)}  ∩={_fv(d20 & b20)}"
+    b_total = b.skip_count + b.full_audits
+    b_skip_pct = b.skip_count / max(1, b_total) * 100
+    iv_diff  = _pct_diff(r.interventions, b.interventions)
+    aud_diff = _pct_diff(r.full_audits,   b.full_audits)
+    t_diff   = _pct_diff(r.elapsed,       b.elapsed)
+    base_line = (
+        f"  {'':>3s} {'':>4s} {'':>5s}   "
+        f"BASE {b.elapsed:5.1f}s "
+        f"| skip={b_skip_pct:5.1f}%       "
+        f"| iv={b.interventions:6d} auds={b.full_audits:5d} "
+        f"| rfail={b.sentinel_fails:4d} ref={b.candidate_refreshes:3d} "
+        f"| Δiv={iv_diff:>6s} Δaud={aud_diff:>6s} Δt={t_diff:>6s}"
     )
-    end_line = (
-        f"{pfx}end(100%): "
-        f"D={_fv(dend)}  B={_fv(bend)}  ∩={_fv(dend & bend)}"
-        f"  │  D:res={_fv(d20 - dend)} new={_fv(dend - d20)}"
-        f"  B:res={_fv(b20 - bend)} new={_fv(bend - b20)}"
-    )
-    return dreth_line + "\n" + tier_lines + "\n" + base_line + "\n" + snap_line + "\n" + end_line
+    return dreth_line + "\n" + tier_lines + "\n" + base_line
 
 
 def _fmt_header() -> str:
@@ -872,7 +756,7 @@ def _fmt_header() -> str:
         f"  {'n':>3}  {'cyc':>4}  {'seed':>5}  "
         f"  {'st':3s} {'t':>5}  "
         f"  {'skip%':>6} {'sent':>5} {'comp':>4}  "
-        f"  {'iv':>6} {'auds':>5} {'mis':>3}  "
+        f"  {'iv':>6} {'auds':>5}  "
         f"  {'rc':>4} {'ac':>3} {'dorm':>4} {'rev':>3} "
         f"{'fc/tot':>7}  "
         f"  inv"
@@ -892,8 +776,7 @@ def _print_tier_aggregate(ok_runs: List[RunResult]) -> None:
             sum(getattr(r.tier, attr + "_t2") for r in ok_runs),
         )
 
-    wf0, wf1, wf2 = _tier_sum("wf")
-    n0,  n1,  n2  = _tier_sum("n")
+    n0, n1, n2 = _tier_sum("n")
     avg_sent0 = sum(r.tier.sent_t0 for r in ok_runs) / len(ok_runs)
     avg_sent1 = sum(r.tier.sent_t1 for r in ok_runs) / len(ok_runs)
     avg_sent2 = sum(r.tier.sent_t2 for r in ok_runs) / len(ok_runs)
@@ -905,25 +788,19 @@ def _print_tier_aggregate(ok_runs: List[RunResult]) -> None:
     print("── consequence-weight tier breakdown ───────────────────────────────")
     print(f"  tier        T0(leaf)   T1(1-2dep)  T2(3+dep)")
     print(f"  var count   {n0:8d}   {n1:9d}  {n2:8d}")
-    print(f"  wrong fits  {wf0:8d}   {wf1:9d}  {wf2:8d}")
     print(f"  avg sent    {avg_sent0:8.2f}   {avg_sent1:9.2f}  {avg_sent2:8.2f}")
     print(f"  avg promo   {avg_pr0:8.1f}   {avg_pr1:9.1f}  {avg_pr2:8.1f}  (cycles to first cert)")
 
     ablate_runs = [r for r in ok_runs if r.tier_no_cw is not None]
     if ablate_runs:
-        wf0_off   = sum(r.tier_no_cw.wf_t0   for r in ablate_runs)
-        wf1_off   = sum(r.tier_no_cw.wf_t1   for r in ablate_runs)
-        wf2_off   = sum(r.tier_no_cw.wf_t2   for r in ablate_runs)
-        sent0_off = sum(r.tier_no_cw.sent_t0  for r in ablate_runs) / len(ablate_runs)
-        sent1_off = sum(r.tier_no_cw.sent_t1  for r in ablate_runs) / len(ablate_runs)
-        sent2_off = sum(r.tier_no_cw.sent_t2  for r in ablate_runs) / len(ablate_runs)
+        sent0_off = sum(r.tier_no_cw.sent_t0 for r in ablate_runs) / len(ablate_runs)
+        sent1_off = sum(r.tier_no_cw.sent_t1 for r in ablate_runs) / len(ablate_runs)
+        sent2_off = sum(r.tier_no_cw.sent_t2 for r in ablate_runs) / len(ablate_runs)
         pr0_off   = sum(r.tier_no_cw.promo_t0 for r in ablate_runs) / len(ablate_runs)
         pr1_off   = sum(r.tier_no_cw.promo_t1 for r in ablate_runs) / len(ablate_runs)
         pr2_off   = sum(r.tier_no_cw.promo_t2 for r in ablate_runs) / len(ablate_runs)
         print()
         print(f"  ablation ({len(ablate_runs)} runs with CW disabled):")
-        print(f"  CW OFF wrong fits  {wf0_off:5d}   {wf1_off:9d}  {wf2_off:8d}")
-        print(f"  CW ON  wrong fits  {wf0:5d}   {wf1:9d}  {wf2:8d}  ← should be ≤ CW OFF for T1/T2")
         print(f"  CW OFF avg sent    {sent0_off:5.2f}   {sent1_off:9.2f}  {sent2_off:8.2f}")
         print(f"  CW ON  avg sent    {avg_sent0:5.2f}   {avg_sent1:9.2f}  {avg_sent2:8.2f}  ← should be > CW OFF for T1/T2")
         print(f"  CW OFF avg promo   {pr0_off:5.1f}   {pr1_off:9.1f}  {pr2_off:8.1f}")
@@ -937,13 +814,12 @@ def _print_aggregate(results: List[RunResult]) -> None:
         return
 
     n = len(ok_runs)
-    avg_skip  = sum(r.skip_pct for r in ok_runs) / n
-    avg_iv    = sum(r.interventions for r in ok_runs) / n
-    avg_miss  = sum(r.true_missing for r in ok_runs) / n
-    avg_rc    = sum(r.arch.route_certs_total for r in ok_runs) / n
-    avg_ac    = sum(r.arch.vars_with_audit_cert for r in ok_runs) / n
-    avg_dorm  = sum(r.arch.dormant_total for r in ok_runs) / n
-    avg_rev   = sum(sum(r.arch.revoked_by_dist.values()) for r in ok_runs) / n
+    avg_skip = sum(r.skip_pct for r in ok_runs) / n
+    avg_iv   = sum(r.interventions for r in ok_runs) / n
+    avg_rc   = sum(r.arch.route_certs_total for r in ok_runs) / n
+    avg_ac   = sum(r.arch.vars_with_audit_cert for r in ok_runs) / n
+    avg_dorm = sum(r.arch.dormant_total for r in ok_runs) / n
+    avg_rev  = sum(sum(r.arch.revoked_by_dist.values()) for r in ok_runs) / n
     total_fc   = sum(r.arch.frontier_collapses for r in ok_runs)
     total_fclr = sum(r.arch.frontier_cleared for r in ok_runs)
 
@@ -957,8 +833,24 @@ def _print_aggregate(results: List[RunResult]) -> None:
     for r in ok_runs:
         revoked_agg.update(r.arch.revoked_by_dist)
 
+    avg_trass_sk = sum(r.trass_skips for r in ok_runs) / n
+    avg_sent_sk  = sum(r.sentinel_skips for r in ok_runs) / n
+    avg_comp_sk  = sum(r.arch.composite_skip_count for r in ok_runs) / n
+    avg_compr_sk = sum(r.compression_skips for r in ok_runs) / n
+    avg_rsk      = sum(r.arch.regime_skip_count for r in ok_runs) / n
+    total_sk_avg = avg_trass_sk + avg_sent_sk + avg_comp_sk + avg_compr_sk + avg_rsk
+    handle_avg   = avg_comp_sk + avg_rsk
+    amort_pct    = 100.0 * handle_avg / total_sk_avg if total_sk_avg > 0 else 0.0
+
     print(f"  runs ok={n}/{len(results)}")
-    print(f"  avg: skip%={avg_skip:.1f}  iv={avg_iv:.0f}  miss={avg_miss:.1f}")
+    print(f"  avg: skip%={avg_skip:.1f}  iv={avg_iv:.0f}")
+    print(f"  handle amortization: {amort_pct:.1f}%  "
+          f"(composite={avg_comp_sk:.0f} regime={avg_rsk:.0f} of {total_sk_avg:.0f} avg total skips)")
+    total_rpass = sum(r.arch.regime_sentinel_passes for r in ok_runs)
+    total_rfail = sum(r.arch.regime_sentinel_fails for r in ok_runs)
+    total_rno   = sum(r.arch.regime_no_sentinel for r in ok_runs)
+    if total_rpass + total_rfail + total_rno > 0:
+        print(f"  regime sentinel: pass={total_rpass}  fail={total_rfail}  no_sentinel={total_rno}")
     print(f"  arch avg: route_certs={avg_rc:.1f}  audit_certs={avg_ac:.1f}  "
           f"dormant={avg_dorm:.1f}  revocations={avg_rev:.1f}")
     print(f"  frontier: collapses={total_fc}  cleared(guard)={total_fclr}  "
@@ -980,10 +872,8 @@ def _print_aggregate(results: List[RunResult]) -> None:
         for msg, cnt in vc.most_common():
             print(f"    [{cnt}x] {msg}")
 
-    # ── baseline comparison aggregate ────────────────────────────────────────
     base_runs = [r for r in ok_runs if r.baseline is not None and r.baseline.ok]
     if not base_runs:
-        # still print tier aggregate even without baseline comparison
         _print_tier_aggregate(ok_runs)
         return
 
@@ -1008,53 +898,11 @@ def _print_aggregate(results: List[RunResult]) -> None:
     print(f"  full_audits:    {d_aud:8d}      {b_aud:8d}      {_pct_diff(d_aud, b_aud):>8s}")
     print(f"  elapsed(total): {d_t:8.2f}s     {b_t:8.2f}s     {_pct_diff(d_t, b_t):>8s}")
     print(f"  avg skip%:      {d_skip_avg:7.1f}%      {b_total_avg:7.1f}%")
-
-    # Final-state wrong parents (same metric for both)
-    d_wf = sum(r.wrong_fits_dreth for r in base_runs)
-    b_wf = sum(r.baseline.wrong_fits for r in base_runs)
     b_ref = sum(r.baseline.candidate_refreshes for r in base_runs)
-    print(f"  wrong_fits(end-state): dreth={d_wf}  baseline={b_wf}  "
-          f"({'same' if d_wf == b_wf else 'DIFFERS'})")
-    print(f"  baseline candidate_refreshes: {b_ref}  "
-          f"(candidate re-screens triggered by persistent failure)")
-
-    # ── per-variable overlap aggregate ───────────────────────────────────────
-    # Counts summed across runs (not union — different seeds have different vars)
-    tot_d20  = sum(len(r.dreth_wrong_at_20)        for r in base_runs)
-    tot_dend = sum(len(r.dreth_wrong_at_end)        for r in base_runs)
-    tot_b20  = sum(len(r.baseline.wrong_at_20)      for r in base_runs)
-    tot_bend = sum(len(r.baseline.wrong_at_end)      for r in base_runs)
-    tot_inter20  = sum(len(set(r.dreth_wrong_at_20) & set(r.baseline.wrong_at_20))
-                       for r in base_runs)
-    tot_interend = sum(len(set(r.dreth_wrong_at_end) & set(r.baseline.wrong_at_end))
-                       for r in base_runs)
-    tot_d_res = sum(len(set(r.dreth_wrong_at_20) - set(r.dreth_wrong_at_end))
-                    for r in base_runs)
-    tot_d_new = sum(len(set(r.dreth_wrong_at_end) - set(r.dreth_wrong_at_20))
-                    for r in base_runs)
-    tot_b_res = sum(len(set(r.baseline.wrong_at_20) - set(r.baseline.wrong_at_end))
-                    for r in base_runs)
-    tot_b_new = sum(len(set(r.baseline.wrong_at_end) - set(r.baseline.wrong_at_20))
-                    for r in base_runs)
-    snap_pct = base_runs[0].snap_cycle / base_runs[0].config.cycles * 100 if base_runs else 0
-
-    print()
-    print(f"  overlap (summed var-counts across {b_n} runs):")
-    print(f"  {'':20s}  @snap(~{snap_pct:.0f}%)   @end(100%)")
-    print(f"  {'D_miss':20s}  {tot_d20:8d}       {tot_dend:8d}")
-    print(f"  {'B_miss':20s}  {tot_b20:8d}       {tot_bend:8d}")
-    print(f"  {'D∩B (both wrong)':20s}  {tot_inter20:8d}       {tot_interend:8d}")
-    print(f"  {'D: resolved':20s}  {'→':>8s}       {tot_d_res:8d}  (wrong at snap, right at end)")
-    print(f"  {'D: newly_missed':20s}  {'→':>8s}       {tot_d_new:8d}  (right at snap, wrong at end)")
-    print(f"  {'B: resolved':20s}  {'→':>8s}       {tot_b_res:8d}")
-    print(f"  {'B: newly_missed':20s}  {'→':>8s}       {tot_b_new:8d}")
-
+    print(f"  baseline candidate_refreshes: {b_ref}")
     print()
     print("  Δiv/Δaud negative = Dreth uses fewer probes/refits than baseline.")
     print("  Δt  negative = Dreth is faster.")
-    print("  wrong_fits: lower is better; both should converge to the same answer.")
-    print("  Advantage comes from: route-trass cascade pruning + failure-localized")
-    print("  invalidation vs. sparse_cached_refit's window-gated candidate-set refit.")
     _print_tier_aggregate(ok_runs)
 
 
@@ -1095,7 +943,6 @@ def main():
     cycle_list = [int(x) for x in args.cycles.split(",")]
     seed_list  = [int(x) for x in args.seeds.split(",")]
 
-    # --progress forces single-worker to avoid interleaved output
     n_workers = args.workers
     if args.progress > 0:
         n_workers = 1
@@ -1127,7 +974,7 @@ def main():
     if args.compare:
         print(f"  baseline: sparse_cached_refit (K=10 window=8 threshold=3 refresh_interval=100)", flush=True)
     if args.progress:
-        print(f"  progress: every {args.progress} cycles — wrong-fit vars, Δiv, Δsent, fit changes", flush=True)
+        print(f"  progress: every {args.progress} cycles — cert count, Δiv, Δsent, fit changes", flush=True)
     print(f"  checking: I1(earned_by) I2(audit-role) I3(dormant-type) "
           f"I4(revoked_by) I5(route-target-owned)", flush=True)
     print()
@@ -1163,7 +1010,6 @@ def main():
                     "skip_pct": round(r.skip_pct, 2),
                     "interventions": r.interventions,
                     "full_audits": r.full_audits,
-                    "true_missing": r.true_missing,
                     "route_certs_total": r.arch.route_certs_total,
                     "route_trass": r.arch.route_trass,
                     "audit_certs": r.arch.vars_with_audit_cert,
@@ -1174,9 +1020,6 @@ def main():
                     "earned_by_dist": r.arch.earned_by_dist,
                     "revoked_by_dist": r.arch.revoked_by_dist,
                     "violations": r.violations,
-                    "snap_cycle": r.snap_cycle,
-                    "dreth_wrong_at_20": r.dreth_wrong_at_20,
-                    "dreth_wrong_at_end": r.dreth_wrong_at_end,
                 }
                 if r.baseline and r.baseline.ok:
                     rec["baseline"] = {
@@ -1186,9 +1029,6 @@ def main():
                         "interventions": r.baseline.interventions,
                         "sentinel_fails": r.baseline.sentinel_fails,
                         "candidate_refreshes": r.baseline.candidate_refreshes,
-                        "wrong_fits": r.baseline.wrong_fits,
-                        "wrong_at_20": r.baseline.wrong_at_20,
-                        "wrong_at_end": r.baseline.wrong_at_end,
                     }
                 out_fh.write(json.dumps(rec) + "\n")
                 out_fh.flush()
@@ -1212,7 +1052,7 @@ def main():
     print("  I1 earned_by  I2 audit-role  I3 dormant-type  I4 revoked_by  I5 route-owned")
     if args.compare:
         print()
-        print("  BASE row: wf=wrong_fits sfail=sentinel_fails")
+        print("  BASE row: rfail=sentinel_fails ref=candidate_refreshes")
         print("  Δiv=intervention diff  Δaud=audit diff  Δt=time diff (dreth vs baseline)")
         print("  negative Δ = Dreth is cheaper/faster")
 
