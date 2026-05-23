@@ -297,6 +297,51 @@ class CausalWorld:
         m = HiddenMutation(cycle, "FUNC", f"FUNC x{var}: {old}→{new}", True, var)
         self.hidden_log.append(m); return m
 
+    def _init_regime_switch(self, settle_cycles: int, regime_length: int = 1000) -> None:
+        """One-time setup for the regime_switch schedule.
+
+        Wires a cluster of target vars to share a single causal carrier.
+        Two carriers (LOW≈0.2, HIGH≈0.8) alternate every regime_length cycles.
+        A collector var is wired downstream of the target cluster so all targets
+        have at least one dependent — this gives them role="tareth" and a proper
+        sentinel cert instead of a leaf-trass cert (which would hard-suppress
+        them before any phase switch is observed).
+
+        Layout (var indices):
+          0 = carrier_a (LOW, ~0.2)
+          1 = carrier_b (HIGH, ~0.8)
+          2..2+k-1 = target cluster (MEAN([active_carrier]))
+          2+k      = collector (MEAN([target[0], target[1]]))
+          remaining vars: left in their original random structure
+
+        cluster_size = max(2, min(3, n_vars - 3)), leaving room for collector.
+        """
+        self._rs_carrier_a: int = 0
+        self._rs_carrier_b: int = 1
+        cluster_size = max(2, min(3, self.n_vars - 3))
+        self._rs_targets: List[int] = list(range(2, 2 + cluster_size))
+        self._rs_collector: Optional[int] = (2 + cluster_size) if (2 + cluster_size) < self.n_vars else None
+        self._rs_phase: int = 0      # 0 = A (carrier_a active), 1 = B (carrier_b active)
+        self._rs_settle: int = settle_cycles
+        self._rs_length: int = regime_length
+        # Force both carriers to root constants with distinct steady-state values
+        self.funcs[self._rs_carrier_a] = "LOW"
+        self.parents[self._rs_carrier_a] = []
+        self.funcs[self._rs_carrier_b] = "HIGH"
+        self.parents[self._rs_carrier_b] = []
+        # Wire all targets to carrier_a; collector depends on first two targets
+        for t in self._rs_targets:
+            self.parents[t] = [self._rs_carrier_a]
+            self.funcs[t] = "MEAN"
+        if self._rs_collector is not None:
+            self.parents[self._rs_collector] = [self._rs_targets[0], self._rs_targets[1]]
+            self.funcs[self._rs_collector] = "MEAN"
+        self._rs_parents_a: Dict[int, List[int]] = {t: [self._rs_carrier_a] for t in self._rs_targets}
+        self._rs_parents_b: Dict[int, List[int]] = {t: [self._rs_carrier_b] for t in self._rs_targets}
+        for _ in range(5):
+            self._step_world()
+        self._rs_initialized: bool = True
+
     def perturb_by_schedule(self, cycle: int, schedule: str,
                             settle_cycles: int = 25,
                             rare_var: int = 0,
@@ -318,6 +363,13 @@ class CausalWorld:
                             specific variable). Mutations are permanent — no
                             reversion. settle_cycles suppresses rare mutations
                             for the first N cycles so certs can establish.
+          regime_switch: a cluster of vars share a causal carrier that alternates
+                         every 1000 cycles between two root constants (LOW/HIGH).
+                         settle_cycles controls the initial stable window before
+                         the first phase switch. Phase boundaries simultaneously
+                         rewire all cluster members, producing multi-var co-failure
+                         bursts that the regime register can confirm and commission
+                         a cluster-level sentinel for.
         """
         if schedule == "shaped":
             structural = {2:"edge", 5:"func", 8:"edge", 11:"func", 13:"edge"}
@@ -342,6 +394,30 @@ class CausalWorld:
                 return self.perturb_func_var(cycle, rare_var)
             else:
                 kind = "value"
+        elif schedule == "regime_switch":
+            if not getattr(self, "_rs_initialized", False):
+                self._init_regime_switch(settle_cycles)
+            if cycle < self._rs_settle:
+                return self.perturb_value(cycle)
+            elapsed = cycle - self._rs_settle
+            if elapsed % self._rs_length == 0:
+                self._rs_phase = 1 - self._rs_phase
+                new_parents = self._rs_parents_b if self._rs_phase == 1 else self._rs_parents_a
+                carrier = self._rs_carrier_b if self._rs_phase == 1 else self._rs_carrier_a
+                for t, par in new_parents.items():
+                    self.parents[t] = par
+                phase_name = "B" if self._rs_phase == 1 else "A"
+                m = HiddenMutation(
+                    cycle=cycle, kind="REGIME_SWITCH",
+                    description=(
+                        f"REGIME_SWITCH phase→{phase_name} carrier=x{carrier} "
+                        f"targets={self._rs_targets}"
+                    ),
+                    rule_changed=True, affected_var=carrier,
+                )
+                self.hidden_log.append(m)
+                return m
+            return self.perturb_value(cycle)
         else:
             kind = "value"
         return {"edge": self.perturb_edge, "func": self.perturb_func,

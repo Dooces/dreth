@@ -919,10 +919,11 @@ def main():
     p.add_argument("--seeds",   default="42,7,99",
                    help="comma-separated seeds (default: 42,7,99)")
     p.add_argument("--schedule", default="incremental",
-                   choices=["incremental", "periodic_shifts", "novelty", "shaped"],
+                   choices=["incremental", "periodic_shifts", "novelty", "shaped",
+                            "rare_catastrophe", "regime_switch"],
                    help="mutation schedule (default: incremental)")
     p.add_argument("--settle-cycles", type=int, default=8,
-                   help="settle cycles between reveals for incremental (default: 8)")
+                   help="settle cycles for incremental reveals or regime_switch initial window (default: 8)")
     p.add_argument("--noise-sigma", type=float, default=0.02,
                    help="noise sigma (default: 0.02)")
     p.add_argument("--workers", type=int, default=20,
