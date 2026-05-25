@@ -8,7 +8,11 @@ import json
 import sys
 from collections import Counter
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Iterable, TextIO
+
+# Allow importing dreth package when run directly from scripts/
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
 CLASSIFICATIONS = (
@@ -26,6 +30,8 @@ class AuthorityEvidenceSummary:
     by_classification: Counter[str] = field(default_factory=Counter)
     best_available_surrogates: list[dict[str, Any]] = field(default_factory=list)
     serious_mismatch_candidates: list[dict[str, Any]] = field(default_factory=list)
+    # Original per_var items for mismatch cases, used by section F throttle analysis.
+    external_mismatch_items: list[dict[str, Any]] = field(default_factory=list)
 
 
 def _as_int(value: Any) -> int:
@@ -177,6 +183,7 @@ def summarize(rows: Iterable[dict[str, Any]]) -> AuthorityEvidenceSummary:
             classification = classify_evidence_support(item)
             case = _case_record(row, item, classification)
             summary.external_mismatch_cases.append(case)
+            summary.external_mismatch_items.append(item)
             summary.by_classification[classification] += 1
             if classification == "evidence_supported_surrogate":
                 summary.best_available_surrogates.append(case)
@@ -211,7 +218,65 @@ def _print_cases(title: str, cases: list[dict[str, Any]], out: TextIO, limit: in
         print(f"  ... +{len(cases) - limit} more", file=out)
 
 
-def print_report(rows: list[dict[str, Any]], out: TextIO | None = None) -> None:
+def _throttle_counts(
+    items: list[dict[str, Any]], mode: str
+) -> dict[str, int]:
+    from dreth.shadow_authority_throttle import would_throttle_authority
+
+    total = len(items)
+    would_throttle = 0
+    throttled_contradicted = 0
+    throttled_insufficient = 0
+    unthrottled_supported = 0
+    unthrottled_weak = 0
+
+    for item in items:
+        decision = would_throttle_authority(item, mode=mode)
+        if decision.would_throttle:
+            would_throttle += 1
+            if decision.evidence_class == "contradicted_authority":
+                throttled_contradicted += 1
+            elif decision.evidence_class == "insufficient_evidence":
+                throttled_insufficient += 1
+        else:
+            if decision.evidence_class == "evidence_supported_surrogate":
+                unthrottled_supported += 1
+            elif decision.evidence_class == "weakly_supported_surrogate":
+                unthrottled_weak += 1
+
+    return {
+        "external_mismatch_cases": total,
+        "would_throttle": would_throttle,
+        "would_not_throttle": total - would_throttle,
+        "throttled_contradicted_authority": throttled_contradicted,
+        "throttled_insufficient_evidence": throttled_insufficient,
+        "unthrottled_supported_surrogate": unthrottled_supported,
+        "unthrottled_weak_surrogate": unthrottled_weak,
+        "estimated_mismatch_cases_avoided": would_throttle,
+        "estimated_supported_surrogates_preserved": unthrottled_supported,
+    }
+
+
+def _print_throttle_section(
+    summary: "AuthorityEvidenceSummary", mode: str, out: TextIO
+) -> None:
+    counts = _throttle_counts(summary.external_mismatch_items, mode)
+    print(f"\nF. Shadow authority throttle (mode: {mode}):", file=out)
+    print(
+        "  Offline estimate only. No effect on runtime behavior, skip logic,\n"
+        "  cert issuance, revocation, fit, sentinels, or route certs.",
+        file=out,
+    )
+    w = 46
+    for key, val in counts.items():
+        print(f"  {key + ':':<{w}} {val:>6}", file=out)
+
+
+def print_report(
+    rows: list[dict[str, Any]],
+    out: TextIO | None = None,
+    throttle_mode: str = "conservative",
+) -> None:
     if out is None:
         out = sys.stdout
     summary = summarize(rows)
@@ -247,14 +312,22 @@ def print_report(rows: list[dict[str, Any]], out: TextIO | None = None) -> None:
         file=out,
     )
 
+    _print_throttle_section(summary, throttle_mode, out)
+
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Summarize blind_challenge authority/evidence support offline."
     )
     parser.add_argument("--jsonl", required=True, help="Path to a blind_challenge JSONL report")
+    parser.add_argument(
+        "--throttle-mode",
+        default="conservative",
+        choices=["conservative", "strict"],
+        help="Shadow throttle mode for section F (default: conservative)",
+    )
     args = parser.parse_args(argv)
-    print_report(load_jsonl(args.jsonl))
+    print_report(load_jsonl(args.jsonl), throttle_mode=args.throttle_mode)
     return 0
 
 

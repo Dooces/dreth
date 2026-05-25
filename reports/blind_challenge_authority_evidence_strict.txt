@@ -66,15 +66,15 @@ D. Serious authority/evidence mismatch candidates:
 E. Warning:
   Hidden truth is used only for offline interpretation. Dreth must be judged by what was available to it.
 
-F. Shadow authority throttle (mode: conservative):
+F. Shadow authority throttle (mode: strict):
   Offline estimate only. No effect on runtime behavior, skip logic,
   cert issuance, revocation, fit, sentinels, or route certs.
   external_mismatch_cases:                          191
-  would_throttle:                                   185
-  would_not_throttle:                                 6
+  would_throttle:                                   187
+  would_not_throttle:                                 4
   throttled_contradicted_authority:                 150
   throttled_insufficient_evidence:                   35
   unthrottled_supported_surrogate:                    1
-  unthrottled_weak_surrogate:                         5
-  estimated_mismatch_cases_avoided:                 185
+  unthrottled_weak_surrogate:                         3
+  estimated_mismatch_cases_avoided:                 187
   estimated_supported_surrogates_preserved:           1
