@@ -28,6 +28,7 @@ from dreth.learned_residual import (
     _RollingStats,
     OnlineResidualCalibrator,
     ResidualFeatureVector,
+    ShadowResidualKeyAuthority,
     ShadowLearnedResidualPredictor,
 )
 
@@ -621,26 +622,175 @@ def test_sweep_ranking_prefers_zero_false_ok():
     stats = [
         {
             "false_ok_vs_active": 1, "false_ok_vs_symbolic": 0,
-            "would_save_iv": 100, "false_stress_vs_symbolic": 0,
+            "key_safe_would_save_iv": 100, "key_revoked_active": 1,
         },
         {
             "false_ok_vs_active": 0, "false_ok_vs_symbolic": 5,
-            "would_save_iv": 10, "false_stress_vs_symbolic": 20,
+            "key_safe_would_save_iv": 10, "key_revoked_active": 0,
         },
     ]
     ranked = sorted(
         stats,
         key=lambda s: (
             s["false_ok_vs_active"],
+            -s["key_safe_would_save_iv"],
+            s["key_revoked_active"],
             s["false_ok_vs_symbolic"],
-            -s["would_save_iv"],
-            s["false_stress_vs_symbolic"],
         ),
     )
     assert ranked[0]["false_ok_vs_active"] == 0, (
         "zero false_ok_vs_active must rank first regardless of higher coverage"
     )
     assert ranked[1]["false_ok_vs_active"] == 1
+
+
+# ── shadow residual key authority ────────────────────────────────────────────
+
+def test_key_authority_revokes_on_active_false_ok():
+    auth = ShadowResidualKeyAuthority()
+    key = (FeatureConditionedResidualCalibrator.KEY_FUNC_VAR, "SUM", 3)
+
+    auth.record_prediction(
+        key=key,
+        key_type=None,
+        shadow_ok=True,
+        shadow_stressed=False,
+        symbolic_ok=True,
+        symbolic_stressed=False,
+        would_save_iv=5,
+        would_miss_symbolic_stress=0,
+        cycle=1,
+    )
+    rec = auth.record_active_failure(
+        key=key,
+        key_type=None,
+        would_miss_active_failure=5,
+        cycle=1,
+    )
+
+    assert rec.revoked
+    assert rec.revoked_by == "false_ok_active"
+    assert rec.false_ok_vs_active == 1
+
+
+def test_key_authority_revokes_on_symbolic_false_ok():
+    auth = ShadowResidualKeyAuthority()
+    key = (FeatureConditionedResidualCalibrator.KEY_FUNC_TIER, "SUM", 1)
+
+    rec = auth.record_prediction(
+        key=key,
+        key_type=None,
+        shadow_ok=True,
+        shadow_stressed=False,
+        symbolic_ok=False,
+        symbolic_stressed=True,
+        would_save_iv=4,
+        would_miss_symbolic_stress=4,
+        cycle=1,
+    )
+
+    assert rec.revoked
+    assert rec.revoked_by == "false_ok_symbolic"
+    assert rec.false_ok_vs_symbolic == 1
+
+
+def test_key_authority_candidate_safe_requires_clean_streak_and_zero_false_ok():
+    auth = ShadowResidualKeyAuthority(min_key_ok=100, min_clean_streak=100)
+    key = (FeatureConditionedResidualCalibrator.KEY_FUNC, "MEAN")
+
+    for cycle in range(1, 101):
+        rec = auth.record_prediction(
+            key=key,
+            key_type=None,
+            shadow_ok=True,
+            shadow_stressed=False,
+            symbolic_ok=True,
+            symbolic_stressed=False,
+            would_save_iv=2,
+            would_miss_symbolic_stress=0,
+            cycle=cycle,
+        )
+
+    assert auth.candidate_safe(rec)
+    assert rec.clean_ok_streak == 100
+    assert rec.false_ok_vs_active == 0
+    assert rec.false_ok_vs_symbolic == 0
+
+
+def test_key_authority_shadow_only_behavior_unchanged():
+    """Revoked key diagnostics remain reportable but do not alter operation."""
+    from scripts.batch_run import RunConfig, _build_and_run_dreth, _extract_arch_metrics
+
+    base = RunConfig(
+        n_vars=8, cycles=60, seed=42,
+        schedule="incremental",
+        settle_cycles=8,
+        noise_sigma=0.02,
+        shadow_residual="online",
+        shadow_calibrator="feature",
+        shadow_conservative_factor=1.0,
+        shadow_min_samples=2,
+        shadow_window=20,
+        shadow_key_authority="off",
+    )
+    keyed = RunConfig(
+        n_vars=8, cycles=60, seed=42,
+        schedule="incremental",
+        settle_cycles=8,
+        noise_sigma=0.02,
+        shadow_residual="online",
+        shadow_calibrator="feature",
+        shadow_conservative_factor=1.0,
+        shadow_min_samples=2,
+        shadow_window=20,
+        shadow_key_authority="on",
+        shadow_key_min_ok=2,
+        shadow_key_min_clean_streak=2,
+    )
+
+    agent_off, _ = _build_and_run_dreth(base)
+    agent_on, world_on = _build_and_run_dreth(keyed)
+    arch_on = _extract_arch_metrics(agent_on, world_on)
+
+    assert agent_on.skip_count == agent_off.skip_count
+    assert agent_on.full_audit_count == agent_off.full_audit_count
+    assert agent_on.total_interventions == agent_off.total_interventions
+    assert arch_on.shadow_key_total > 0
+    assert agent_on._shadow_key_authority is not None
+    assert not hasattr(agent_on._shadow_key_authority, "ledger")
+    assert not hasattr(agent_on._shadow_key_authority, "_ledger")
+
+
+def test_key_authority_top_list_caps():
+    auth = ShadowResidualKeyAuthority()
+    for i in range(12):
+        key = (FeatureConditionedResidualCalibrator.KEY_FUNC_VAR, "SUM", i)
+        auth.record_prediction(
+            key=key,
+            key_type=None,
+            shadow_ok=True,
+            shadow_stressed=False,
+            symbolic_ok=True,
+            symbolic_stressed=False,
+            would_save_iv=1,
+            would_miss_symbolic_stress=0,
+            cycle=i + 1,
+        )
+        auth.record_active_failure(
+            key=key,
+            key_type=None,
+            would_miss_active_failure=i + 1,
+            cycle=i + 1,
+        )
+
+    summary = auth.summary(top_n=10)
+    assert summary["shadow_key_revoked"] == 12
+    assert len(summary["top_revoked_active"]) == 10
+
+    lines = auth.report_lines(top_n=10)
+    start = lines.index("top revoked keys by false_ok_active:") + 1
+    end = lines.index("top candidate safe keys by would_save_iv:")
+    assert len(lines[start:end]) == 10
 
 
 # ── feature-conditioned calibrator ───────────────────────────────────────────

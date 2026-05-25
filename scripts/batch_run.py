@@ -57,6 +57,7 @@ from dreth.hybrid import (
 )
 from dreth.learned_residual import (
     ShadowLearnedResidualPredictor,
+    ShadowResidualKeyAuthority,
     OnlineResidualCalibrator,
     FeatureConditionedResidualCalibrator,
 )
@@ -91,6 +92,10 @@ class RunConfig:
     shadow_conservative_factor: float = 0.4
     shadow_min_samples: int = 50
     shadow_window: int = 200
+    shadow_key_authority: str = "off"  # "off" | "on"
+    shadow_key_min_ok: int = 100
+    shadow_key_min_clean_streak: int = 100
+    shadow_key_symbolic_false_ok_tolerance: int = 0
 
 
 # ── per-run result ─────────────────────────────────────────────────────────────
@@ -199,6 +204,18 @@ class ArchMetrics:
     shadow_feature_fok_func_tier: int = 0
     shadow_feature_fok_func: int = 0
     shadow_feature_fok_global: int = 0
+    # Shadow predictor-key authority metrics (diagnostic only)
+    shadow_key_total: int = 0
+    shadow_key_candidate_safe: int = 0
+    shadow_key_revoked: int = 0
+    shadow_key_revoked_active: int = 0
+    shadow_key_revoked_symbolic: int = 0
+    shadow_key_ok_total: int = 0
+    shadow_key_false_ok_active_total: int = 0
+    shadow_key_false_ok_symbolic_total: int = 0
+    shadow_key_safe_would_save_iv: int = 0
+    shadow_key_revoked_would_miss_active_failure: int = 0
+    shadow_key_records: List[Dict[str, Any]] = field(default_factory=list)
 
     # Hybrid control metrics (nonzero only when hybrid-control=interfaces)
     hybrid_residual_predictor_calls: int = 0
@@ -508,6 +525,7 @@ def _build_and_run_dreth(
 
     _shadow_predictor = None
     _shadow_enabled = False
+    _shadow_key_authority = None
     if cfg.shadow_residual == "online":
         if cfg.shadow_calibrator == "feature":
             _cal: Any = FeatureConditionedResidualCalibrator(
@@ -523,6 +541,12 @@ def _build_and_run_dreth(
             )
         _shadow_predictor = ShadowLearnedResidualPredictor(_cal)
         _shadow_enabled = True
+        if cfg.shadow_key_authority == "on" and cfg.shadow_calibrator == "feature":
+            _shadow_key_authority = ShadowResidualKeyAuthority(
+                min_key_ok=cfg.shadow_key_min_ok,
+                min_clean_streak=cfg.shadow_key_min_clean_streak,
+                symbolic_false_ok_tolerance=cfg.shadow_key_symbolic_false_ok_tolerance,
+            )
 
     agent = ChainedAgent(
         world=world, rng=rng_a,
@@ -537,6 +561,7 @@ def _build_and_run_dreth(
         repair_agenda_enabled=cfg.repair_agenda_enabled,
         shadow_residual_predictor=_shadow_predictor,
         shadow_residual_enabled=_shadow_enabled,
+        shadow_key_authority=_shadow_key_authority,
     )
     agent.initialize()
 
@@ -778,6 +803,22 @@ def _extract_arch_metrics(agent: ChainedAgent, world: CausalWorld) -> ArchMetric
     m.shadow_feature_fok_func_tier            = getattr(agent, "_shadow_feature_fok_func_tier", 0)
     m.shadow_feature_fok_func                 = getattr(agent, "_shadow_feature_fok_func", 0)
     m.shadow_feature_fok_global               = getattr(agent, "_shadow_feature_fok_global", 0)
+    _ska = getattr(agent, "_shadow_key_authority", None)
+    if _ska is not None:
+        _ks = _ska.summary(top_n=10)
+        m.shadow_key_total = _ks["shadow_key_total"]
+        m.shadow_key_candidate_safe = _ks["shadow_key_candidate_safe"]
+        m.shadow_key_revoked = _ks["shadow_key_revoked"]
+        m.shadow_key_revoked_active = _ks["shadow_key_revoked_active"]
+        m.shadow_key_revoked_symbolic = _ks["shadow_key_revoked_symbolic"]
+        m.shadow_key_ok_total = _ks["shadow_key_ok_total"]
+        m.shadow_key_false_ok_active_total = _ks["shadow_key_false_ok_active_total"]
+        m.shadow_key_false_ok_symbolic_total = _ks["shadow_key_false_ok_symbolic_total"]
+        m.shadow_key_safe_would_save_iv = _ks["shadow_key_safe_would_save_iv"]
+        m.shadow_key_revoked_would_miss_active_failure = _ks[
+            "shadow_key_revoked_would_miss_active_failure"
+        ]
+        m.shadow_key_records = _ks["records"]
 
     # Hybrid control metrics (zero when hybrid-control=off)
     m.hybrid_residual_predictor_calls = getattr(agent, "_hybrid_residual_predictor_calls", 0)
@@ -1044,6 +1085,47 @@ def _print_tier_aggregate(ok_runs: List[RunResult]) -> None:
         print(f"  CW ON  avg promo   {avg_pr0:5.1f}   {avg_pr1:9.1f}  {avg_pr2:8.1f}  ← should be > CW OFF for T1/T2")
 
 
+def _merged_shadow_key_records(runs: List[RunResult]) -> List[Dict[str, Any]]:
+    merged: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    int_fields = [
+        "seen",
+        "ok_count",
+        "stressed_count",
+        "false_ok_vs_symbolic",
+        "false_ok_vs_active",
+        "would_save_iv",
+        "would_miss_symbolic_stress",
+        "would_miss_active_failure",
+        "clean_ok_streak",
+    ]
+    for r in runs:
+        for rec in r.arch.shadow_key_records:
+            key = (rec.get("key_type", ""), rec.get("key", ""))
+            dst = merged.get(key)
+            if dst is None:
+                dst = {
+                    "key_type": rec.get("key_type", ""),
+                    "key": rec.get("key", ""),
+                    "revoked": False,
+                    "revoked_by": None,
+                    "candidate_safe": False,
+                }
+                for field_name in int_fields:
+                    dst[field_name] = 0
+                merged[key] = dst
+            for field_name in int_fields:
+                dst[field_name] += int(rec.get(field_name, 0) or 0)
+            if rec.get("revoked"):
+                dst["revoked"] = True
+                if rec.get("revoked_by") == "false_ok_active":
+                    dst["revoked_by"] = "false_ok_active"
+                elif dst["revoked_by"] is None:
+                    dst["revoked_by"] = rec.get("revoked_by")
+            if rec.get("candidate_safe"):
+                dst["candidate_safe"] = True
+    return list(merged.values())
+
+
 def _print_shadow_calibration_summary(results: List[RunResult]) -> None:
     """Print per-parameter-combo shadow metrics and a diagnostic ranking.
 
@@ -1085,6 +1167,14 @@ def _print_shadow_calibration_summary(results: List[RunResult]) -> None:
         miss_sym = sum(r.arch.shadow_would_miss_symbolic_stress for r in runs)
         fok_act  = sum(r.arch.shadow_false_ok_vs_active_sentinel for r in runs)
         miss_act = sum(r.arch.shadow_would_miss_active_failure for r in runs)
+        key_candidate_safe = sum(r.arch.shadow_key_candidate_safe for r in runs)
+        key_revoked = sum(r.arch.shadow_key_revoked for r in runs)
+        key_revoked_active = sum(r.arch.shadow_key_revoked_active for r in runs)
+        key_revoked_symbolic = sum(r.arch.shadow_key_revoked_symbolic for r in runs)
+        key_safe_would_save_iv = sum(r.arch.shadow_key_safe_would_save_iv for r in runs)
+        key_revoked_would_miss_active_failure = sum(
+            r.arch.shadow_key_revoked_would_miss_active_failure for r in runs
+        )
 
         coverage_rate     = ok / max(1, calls)
         false_ok_rate_sym = fok_sym / max(1, ok)
@@ -1112,6 +1202,12 @@ def _print_shadow_calibration_summary(results: List[RunResult]) -> None:
             "false_ok_vs_symbolic": fok_sym, "false_stress_vs_symbolic": fst_sym,
             "would_save_iv": save_iv, "would_miss_symbolic_stress": miss_sym,
             "false_ok_vs_active": fok_act, "would_miss_active_failure": miss_act,
+            "key_candidate_safe": key_candidate_safe,
+            "key_revoked": key_revoked,
+            "key_revoked_active": key_revoked_active,
+            "key_revoked_symbolic": key_revoked_symbolic,
+            "key_safe_would_save_iv": key_safe_would_save_iv,
+            "key_revoked_would_miss_active_failure": key_revoked_would_miss_active_failure,
             "coverage_rate": coverage_rate,
             "false_ok_rate_symbolic": false_ok_rate_sym,
             "false_ok_rate_active": false_ok_rate_act,
@@ -1125,6 +1221,14 @@ def _print_shadow_calibration_summary(results: List[RunResult]) -> None:
         print(f"    false_ok_vs_symbolic={fok_sym}  false_stress_vs_symbolic={fst_sym}")
         print(f"    would_save_iv={save_iv}  would_miss_symbolic_stress={miss_sym}")
         print(f"    false_ok_vs_active={fok_act}  would_miss_active_failure={miss_act}")
+        if key_candidate_safe or key_revoked:
+            print(f"    key_authority: candidate_safe={key_candidate_safe}"
+                  f"  revoked={key_revoked}"
+                  f"  revoked_active={key_revoked_active}"
+                  f"  revoked_symbolic={key_revoked_symbolic}")
+            print(f"    key_safe_would_save_iv={key_safe_would_save_iv}"
+                  f"  key_revoked_would_miss_active_failure="
+                  f"{key_revoked_would_miss_active_failure}")
         print(f"    coverage_rate={coverage_rate:.3f}")
         print(f"    false_ok_rate_symbolic={false_ok_rate_sym:.3f}"
               f"  false_ok_rate_active={false_ok_rate_act:.3f}")
@@ -1147,17 +1251,17 @@ def _print_shadow_calibration_summary(results: List[RunResult]) -> None:
 
     print()
     print("── shadow calibration ranking ──────────────────────────────────────")
-    print("  (zero false_ok_vs_active first, then zero false_ok_vs_symbolic,")
-    print("   then highest would_save_iv, then lowest false_stress_vs_symbolic)")
+    print("  (zero false_ok_vs_active first, then highest key_safe_would_save_iv,")
+    print("   then lowest revoked_active, then lowest false_ok_vs_symbolic)")
     print("  diagnostic only — no winner selected or activated")
     print()
     ranked = sorted(
         combo_stats,
         key=lambda s: (
             s["false_ok_vs_active"],
+            -s["key_safe_would_save_iv"],
+            s["key_revoked_active"],
             s["false_ok_vs_symbolic"],
-            -s["would_save_iv"],
-            s["false_stress_vs_symbolic"],
         ),
     )
     for i, s in enumerate(ranked, 1):
@@ -1165,7 +1269,8 @@ def _print_shadow_calibration_summary(results: List[RunResult]) -> None:
             f"  #{i:2d}  factor={s['factor']}  min_samples={s['min_samples']}"
             f"  window={s['window']}"
             f"  fok_act={s['false_ok_vs_active']}  fok_sym={s['false_ok_vs_symbolic']}"
-            f"  save_iv={s['would_save_iv']}  fst_sym={s['false_stress_vs_symbolic']}"
+            f"  key_safe_save_iv={s['key_safe_would_save_iv']}"
+            f"  revoked_active={s['key_revoked_active']}"
         )
 
 
@@ -1300,6 +1405,58 @@ def _print_aggregate(results: List[RunResult]) -> None:
                   f"  func_tier={_fok_ft}"
                   f"  func={_fok_f}"
                   f"  global={_fok_g}")
+        _shadow_key_total = sum(r.arch.shadow_key_total for r in ok_runs)
+        if _shadow_key_total > 0:
+            _shadow_key_candidate = sum(r.arch.shadow_key_candidate_safe for r in ok_runs)
+            _shadow_key_revoked = sum(r.arch.shadow_key_revoked for r in ok_runs)
+            _shadow_key_revoked_active = sum(r.arch.shadow_key_revoked_active for r in ok_runs)
+            _shadow_key_revoked_symbolic = sum(r.arch.shadow_key_revoked_symbolic for r in ok_runs)
+            _shadow_key_ok_total = sum(r.arch.shadow_key_ok_total for r in ok_runs)
+            _shadow_key_fok_active = sum(r.arch.shadow_key_false_ok_active_total for r in ok_runs)
+            _shadow_key_fok_symbolic = sum(r.arch.shadow_key_false_ok_symbolic_total for r in ok_runs)
+            print()
+            print("── shadow residual key authority ──")
+            print(f"keys={_shadow_key_total}")
+            print(f"candidate_safe={_shadow_key_candidate}")
+            print(f"revoked={_shadow_key_revoked}")
+            print(f"revoked_active={_shadow_key_revoked_active}")
+            print(f"revoked_symbolic={_shadow_key_revoked_symbolic}")
+            print(f"ok_total={_shadow_key_ok_total}")
+            print(f"false_ok_active_total={_shadow_key_fok_active}")
+            print(f"false_ok_symbolic_total={_shadow_key_fok_symbolic}")
+            _merged_keys = _merged_shadow_key_records(ok_runs)
+            _top_revoked = sorted(
+                [
+                    rec for rec in _merged_keys
+                    if rec.get("revoked") and int(rec.get("false_ok_vs_active", 0) or 0) > 0
+                ],
+                key=lambda rec: (
+                    -int(rec.get("false_ok_vs_active", 0) or 0),
+                    -int(rec.get("would_miss_active_failure", 0) or 0),
+                    rec.get("key", ""),
+                ),
+            )[:10]
+            print("top revoked keys by false_ok_active:")
+            for rec in _top_revoked:
+                print(
+                    f"  key_type={rec['key_type']} key={rec['key']} "
+                    f"false_ok_active={rec['false_ok_vs_active']} "
+                    f"would_miss_active_failure={rec['would_miss_active_failure']}"
+                )
+            _top_candidate = sorted(
+                [rec for rec in _merged_keys if rec.get("candidate_safe")],
+                key=lambda rec: (
+                    -int(rec.get("would_save_iv", 0) or 0),
+                    -int(rec.get("ok_count", 0) or 0),
+                    rec.get("key", ""),
+                ),
+            )[:10]
+            print("top candidate safe keys by would_save_iv:")
+            for rec in _top_candidate:
+                print(
+                    f"  key_type={rec['key_type']} key={rec['key']} "
+                    f"ok_count={rec['ok_count']} would_save_iv={rec['would_save_iv']}"
+                )
 
     # Print hybrid metrics whenever any provider was active, even if some counts
     # are zero — zero counts expose wiring gaps immediately.
@@ -1436,6 +1593,17 @@ def main():
     p.add_argument("--shadow-calibrator", default="rolling",
                    choices=["rolling", "feature"],
                    help="shadow calibrator type: rolling=per-func rolling stats; feature=feature-conditioned multi-key backoff (default: rolling)")
+    p.add_argument("--shadow-key-authority", default="off",
+                   choices=["off", "on"],
+                   help=("shadow-only predictor-key authority diagnostics. Useful with "
+                         "--shadow-residual online --shadow-calibrator feature; with "
+                         "rolling calibrator this is a no-op (default: off)"))
+    p.add_argument("--shadow-key-min-ok", type=int, default=100,
+                   help="minimum per-key OK count required for candidate_safe (default: 100)")
+    p.add_argument("--shadow-key-min-clean-streak", type=int, default=100,
+                   help="minimum clean OK streak required for candidate_safe (default: 100)")
+    p.add_argument("--shadow-key-symbolic-false-ok-tolerance", type=int, default=0,
+                   help="symbolic false-OK tolerance before diagnostic key revocation (default: 0)")
     args = p.parse_args()
 
     var_list   = [int(x) for x in args.vars.split(",")]
@@ -1476,7 +1644,11 @@ def main():
                   shadow_calibrator=args.shadow_calibrator,
                   shadow_conservative_factor=f,
                   shadow_min_samples=ms,
-                  shadow_window=w)
+                  shadow_window=w,
+                  shadow_key_authority=args.shadow_key_authority,
+                  shadow_key_min_ok=args.shadow_key_min_ok,
+                  shadow_key_min_clean_streak=args.shadow_key_min_clean_streak,
+                  shadow_key_symbolic_false_ok_tolerance=args.shadow_key_symbolic_false_ok_tolerance)
         for v in var_list
         for c in cycle_list
         for s in seed_list
@@ -1497,6 +1669,8 @@ def main():
         mode += (f" +shadow-sweep(f={factor_list} ms={ms_list} w={window_list})")
     elif args.shadow_residual != "off":
         mode += f" +shadow-residual({args.shadow_residual})"
+    if args.shadow_key_authority == "on":
+        mode += " +shadow-key-authority"
     print(f"dreth arch-test{mode}: {total} runs | "
           f"vars={var_list} cycles={cycle_list} seeds={seed_list} "
           f"schedule={args.schedule}", flush=True)
@@ -1548,6 +1722,18 @@ def main():
                     "revival_total": r.arch.revival_total,
                     "frontier_collapses": r.arch.frontier_collapses,
                     "frontier_cleared": r.arch.frontier_cleared,
+                    "shadow_key_total": r.arch.shadow_key_total,
+                    "shadow_key_candidate_safe": r.arch.shadow_key_candidate_safe,
+                    "shadow_key_revoked": r.arch.shadow_key_revoked,
+                    "shadow_key_revoked_active": r.arch.shadow_key_revoked_active,
+                    "shadow_key_revoked_symbolic": r.arch.shadow_key_revoked_symbolic,
+                    "shadow_key_ok_total": r.arch.shadow_key_ok_total,
+                    "shadow_key_false_ok_active_total": r.arch.shadow_key_false_ok_active_total,
+                    "shadow_key_false_ok_symbolic_total": r.arch.shadow_key_false_ok_symbolic_total,
+                    "shadow_key_safe_would_save_iv": r.arch.shadow_key_safe_would_save_iv,
+                    "shadow_key_revoked_would_miss_active_failure": (
+                        r.arch.shadow_key_revoked_would_miss_active_failure
+                    ),
                     "earned_by_dist": r.arch.earned_by_dist,
                     "revoked_by_dist": r.arch.revoked_by_dist,
                     "violations": r.violations,

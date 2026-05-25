@@ -92,7 +92,11 @@ from .hybrid import (
     SymbolicResidualPredictor, SensitivityParentRanker,
 )
 from .repair_agenda import RepairAgenda, RepairAgendaItem
-from .learned_residual import ResidualFeatureVector, ShadowLearnedResidualPredictor
+from .learned_residual import (
+    ResidualFeatureVector,
+    ShadowLearnedResidualPredictor,
+    ShadowResidualKeyAuthority,
+)
 
 # ── Trass authority thresholds ────────────────────────────────────────────────
 # A trass cert suppresses future sentinel monitoring — the strongest authority
@@ -219,6 +223,7 @@ class ChainedAgent:
         repair_agenda_ordering: str = "observe",
         shadow_residual_predictor: Optional[ShadowLearnedResidualPredictor] = None,
         shadow_residual_enabled: bool = False,
+        shadow_key_authority: Optional[ShadowResidualKeyAuthority] = None,
     ):
         """Construct agent. Initializes empty ledger, zero counters, and
         applies any provided per-var cost weight overrides."""
@@ -430,6 +435,9 @@ class ChainedAgent:
         self._shadow_residual_predictor: Optional[ShadowLearnedResidualPredictor] = shadow_residual_predictor
         self._shadow_residual_enabled: bool = (
             shadow_residual_enabled and shadow_residual_predictor is not None
+        )
+        self._shadow_key_authority: Optional[ShadowResidualKeyAuthority] = (
+            shadow_key_authority if self._shadow_residual_enabled else None
         )
         # Shadow diagnostic counters — increment each cycle for vars where
         # shadow prediction runs. Never influence cert or skip decisions.
@@ -2429,6 +2437,7 @@ class ChainedAgent:
         _cert_events: List[RegimeCertEvent] = []
         _passive_stressed_vars: Set[int] = set()
         _shadow_ok_vars: Set[int] = set()  # vars where shadow said ok this cycle
+        _shadow_ok_var_keys: Dict[int, Tuple[object, Optional[str]]] = {}
         _structural_change_this_cycle = False
 
         # First pass: cheap paths and queue full audits.
@@ -2806,6 +2815,38 @@ class ChainedAgent:
                         if _symbolic_passive_stressed:
                             self._shadow_would_miss_symbolic_stress += len(n.sentinels)
 
+                    if self._shadow_key_authority is not None:
+                        _meta = self._shadow_residual_predictor.last_prediction_metadata  # type: ignore[union-attr]
+                        _key_used = _meta.get("key_used")
+                        _key_type = _meta.get("key_type")
+                        if self._shadow_residual_predictor._is_feature_mode:  # type: ignore[union-attr]
+                            _authority_key = (
+                                _key_used
+                                if _key_used is not None
+                                else ShadowResidualKeyAuthority.KEY_INSUFFICIENT
+                            )
+                            _authority_key_type = _key_type
+                            self._shadow_key_authority.record_prediction(
+                                key=_authority_key,
+                                key_type=_authority_key_type,
+                                shadow_ok=_sp.ok,
+                                shadow_stressed=_sp.stressed,
+                                symbolic_ok=_symbolic_passive_ok,
+                                symbolic_stressed=_symbolic_passive_stressed,
+                                would_save_iv=len(n.sentinels) if _sp.ok else 0,
+                                would_miss_symbolic_stress=(
+                                    len(n.sentinels)
+                                    if _sp.ok and _symbolic_passive_stressed
+                                    else 0
+                                ),
+                                cycle=cycle,
+                            )
+                            if _sp.ok:
+                                _shadow_ok_var_keys[var] = (
+                                    _authority_key,
+                                    _authority_key_type,
+                                )
+
                     # Feature-calibrator key-usage and false-ok-per-key counters.
                     if self._shadow_residual_predictor._is_feature_mode:  # type: ignore[union-attr]
                         _lku = self._shadow_residual_predictor._last_key_used  # type: ignore[union-attr]
@@ -2986,6 +3027,17 @@ class ChainedAgent:
                 if var in _shadow_ok_vars:
                     self._shadow_false_ok_vs_active_sentinel += 1
                     self._shadow_would_miss_active_failure += len(n.sentinels)
+                    if (
+                        self._shadow_key_authority is not None
+                        and var in _shadow_ok_var_keys
+                    ):
+                        _authority_key, _authority_key_type = _shadow_ok_var_keys[var]
+                        self._shadow_key_authority.record_active_failure(
+                            key=_authority_key,
+                            key_type=_authority_key_type,
+                            would_miss_active_failure=len(n.sentinels),
+                            cycle=cycle,
+                        )
                 # Utility accounting: was a higher handle also firing for this var?
                 if var in _regime_failed_vars:
                     n.failures_also_caught_by_higher += 1
