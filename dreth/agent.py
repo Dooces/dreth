@@ -92,6 +92,7 @@ from .hybrid import (
     SymbolicResidualPredictor, SensitivityParentRanker,
 )
 from .repair_agenda import RepairAgenda, RepairAgendaItem
+from .learned_residual import ShadowLearnedResidualPredictor
 
 # ── Trass authority thresholds ────────────────────────────────────────────────
 # A trass cert suppresses future sentinel monitoring — the strongest authority
@@ -216,6 +217,8 @@ class ChainedAgent:
         expert_router: Optional[ExpertRouter] = None,
         repair_agenda_enabled: bool = False,
         repair_agenda_ordering: str = "observe",
+        shadow_residual_predictor: Optional[ShadowLearnedResidualPredictor] = None,
+        shadow_residual_enabled: bool = False,
     ):
         """Construct agent. Initializes empty ledger, zero counters, and
         applies any provided per-var cost weight overrides."""
@@ -420,6 +423,27 @@ class ChainedAgent:
         # Priority ordering is consequence-tier only (#SHORTCUT); A* reserved for later.
         self._repair_agenda_ordering: str = repair_agenda_ordering
         self._repair_agenda: RepairAgenda = RepairAgenda()
+
+        # ── Shadow residual predictor (Stage 3A — shadow mode only) ──────────
+        # Never used for gating, certs, skips, or any operative decision.
+        # shadow_residual_enabled=True only when shadow_residual_predictor is set.
+        self._shadow_residual_predictor: Optional[ShadowLearnedResidualPredictor] = shadow_residual_predictor
+        self._shadow_residual_enabled: bool = (
+            shadow_residual_enabled and shadow_residual_predictor is not None
+        )
+        # Shadow diagnostic counters — increment each cycle for vars where
+        # shadow prediction runs. Never influence cert or skip decisions.
+        self._shadow_residual_calls: int = 0
+        self._shadow_residual_ok: int = 0
+        self._shadow_residual_stressed: int = 0
+        self._shadow_residual_insufficient: int = 0
+        self._shadow_false_ok_vs_symbolic: int = 0
+        self._shadow_false_stress_vs_symbolic: int = 0
+        self._shadow_agree_symbolic: int = 0
+        self._shadow_would_save_iv: int = 0
+        self._shadow_would_miss_symbolic_stress: int = 0
+        self._shadow_false_ok_vs_active_sentinel: int = 0
+        self._shadow_would_miss_active_failure: int = 0
 
     def _adaptive_probe_budget(self, n_hypotheses: int) -> int:
         """Return the number of probes to use for a hypothesis space of size
@@ -2391,6 +2415,7 @@ class ChainedAgent:
         novelty_fired = False
         _cert_events: List[RegimeCertEvent] = []
         _passive_stressed_vars: Set[int] = set()
+        _shadow_ok_vars: Set[int] = set()  # vars where shadow said ok this cycle
         _structural_change_this_cycle = False
 
         # First pass: cheap paths and queue full audits.
@@ -2698,6 +2723,47 @@ class ChainedAgent:
                             self._passive_stress_count += 1
                             _passive_stressed_vars.add(var)
 
+            # Shadow residual (Stage 3A): observe actual symbolic residual and
+            # predict — NEVER used for gating, certs, skips, or any operative
+            # decision. Only increments diagnostic counters.
+            if n.authoritative and self._shadow_residual_enabled:
+                _sf = FUNC_LIBRARY.get(n.func)
+                if _sf is not None:
+                    _shadow_pv = [self.world.state[p] for p in n.parents]
+                    _shadow_residual_val = abs(self.world.state[var] - _sf(_shadow_pv))
+
+                    # Predict before observing (honest cold evaluation)
+                    _sp = self._shadow_residual_predictor.predict_shadow(  # type: ignore[union-attr]
+                        var, n.func, n.current_tolerance
+                    )
+                    _sp_insufficient = self._shadow_residual_predictor._last_call_insufficient  # type: ignore[union-attr]
+
+                    # Update calibrator with actual symbolic residual
+                    self._shadow_residual_predictor.observe(n.func, _shadow_residual_val)  # type: ignore[union-attr]
+
+                    # Track per-call counters
+                    self._shadow_residual_calls += 1
+                    if _sp_insufficient:
+                        self._shadow_residual_insufficient += 1
+                        self._shadow_residual_stressed += 1
+                    elif _sp.ok:
+                        self._shadow_residual_ok += 1
+                        _shadow_ok_vars.add(var)
+                    else:
+                        self._shadow_residual_stressed += 1
+
+                    # Compare shadow prediction with actual symbolic decision
+                    if _sp.ok == _passive_ok:
+                        self._shadow_agree_symbolic += 1
+                    if _sp.ok and _passive_stressed:
+                        self._shadow_false_ok_vs_symbolic += 1
+                    if _sp.stressed and _passive_ok:
+                        self._shadow_false_stress_vs_symbolic += 1
+                    if _sp.ok:
+                        self._shadow_would_save_iv += len(n.sentinels)
+                        if _passive_stressed:
+                            self._shadow_would_miss_symbolic_stress += len(n.sentinels)
+
             # Parked sentinel skip: leaf cert redundant — higher handle covered
             # this var for _PARK_W+ cycles with no unique failures.
             # Wake conditions (any one overrides skip):
@@ -2847,6 +2913,11 @@ class ChainedAgent:
                     self._live_set.add(var)
                 _sentinel_failed_vars[var] = (f"sentinel: {reason}", _sentinel_max_dev)
                 self.sentinel_miss_count += 1
+                # Shadow false-OK vs active sentinel: shadow said ok but sentinel
+                # failed this cycle. Increments without changing any decision.
+                if var in _shadow_ok_vars:
+                    self._shadow_false_ok_vs_active_sentinel += 1
+                    self._shadow_would_miss_active_failure += len(n.sentinels)
                 # Utility accounting: was a higher handle also firing for this var?
                 if var in _regime_failed_vars:
                     n.failures_also_caught_by_higher += 1

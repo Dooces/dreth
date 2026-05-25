@@ -54,6 +54,7 @@ from dreth.hybrid import (
     DiscriminationProbeProposer,
     FuncLibraryRouter,
 )
+from dreth.learned_residual import ShadowLearnedResidualPredictor, OnlineResidualCalibrator
 
 
 # ── configuration ─────────────────────────────────────────────────────────────
@@ -71,6 +72,7 @@ class RunConfig:
     log_interval: int = 0       # 0 = disabled; N = print progress every N cycles
     hybrid_control: str = "off" # "off" | "interfaces"
     repair_agenda_enabled: bool = False
+    shadow_residual: str = "off"  # "off" | "online"
 
 
 # ── per-run result ─────────────────────────────────────────────────────────────
@@ -154,6 +156,19 @@ class ArchMetrics:
     # Passive residual monitoring metrics
     passive_saved_iv: int = 0            # IV calls saved by passive-OK skips
     passive_stress_count: int = 0        # var-cycles where passive was stressed
+
+    # Shadow residual metrics (nonzero only when --shadow-residual online)
+    shadow_residual_calls: int = 0
+    shadow_residual_ok: int = 0
+    shadow_residual_stressed: int = 0
+    shadow_residual_insufficient: int = 0
+    shadow_false_ok_vs_symbolic: int = 0
+    shadow_false_stress_vs_symbolic: int = 0
+    shadow_agree_symbolic: int = 0
+    shadow_would_save_iv: int = 0
+    shadow_would_miss_symbolic_stress: int = 0
+    shadow_false_ok_vs_active_sentinel: int = 0
+    shadow_would_miss_active_failure: int = 0
 
     # Hybrid control metrics (nonzero only when hybrid-control=interfaces)
     hybrid_residual_predictor_calls: int = 0
@@ -461,6 +476,12 @@ def _build_and_run_dreth(
         _probe_proposer = DiscriminationProbeProposer()
         _expert_router = FuncLibraryRouter()
 
+    _shadow_predictor = None
+    _shadow_enabled = False
+    if cfg.shadow_residual == "online":
+        _shadow_predictor = ShadowLearnedResidualPredictor(OnlineResidualCalibrator())
+        _shadow_enabled = True
+
     agent = ChainedAgent(
         world=world, rng=rng_a,
         sentinel_count=5, sentinel_pool=60,
@@ -472,6 +493,8 @@ def _build_and_run_dreth(
         probe_proposer=_probe_proposer,
         expert_router=_expert_router,
         repair_agenda_enabled=cfg.repair_agenda_enabled,
+        shadow_residual_predictor=_shadow_predictor,
+        shadow_residual_enabled=_shadow_enabled,
     )
     agent.initialize()
 
@@ -689,6 +712,19 @@ def _extract_arch_metrics(agent: ChainedAgent, world: CausalWorld) -> ArchMetric
     # Passive residual monitoring metrics
     m.passive_saved_iv = agent._passive_saved_iv
     m.passive_stress_count = agent._passive_stress_count
+
+    # Shadow residual metrics (zero when --shadow-residual off)
+    m.shadow_residual_calls = getattr(agent, "_shadow_residual_calls", 0)
+    m.shadow_residual_ok = getattr(agent, "_shadow_residual_ok", 0)
+    m.shadow_residual_stressed = getattr(agent, "_shadow_residual_stressed", 0)
+    m.shadow_residual_insufficient = getattr(agent, "_shadow_residual_insufficient", 0)
+    m.shadow_false_ok_vs_symbolic = getattr(agent, "_shadow_false_ok_vs_symbolic", 0)
+    m.shadow_false_stress_vs_symbolic = getattr(agent, "_shadow_false_stress_vs_symbolic", 0)
+    m.shadow_agree_symbolic = getattr(agent, "_shadow_agree_symbolic", 0)
+    m.shadow_would_save_iv = getattr(agent, "_shadow_would_save_iv", 0)
+    m.shadow_would_miss_symbolic_stress = getattr(agent, "_shadow_would_miss_symbolic_stress", 0)
+    m.shadow_false_ok_vs_active_sentinel = getattr(agent, "_shadow_false_ok_vs_active_sentinel", 0)
+    m.shadow_would_miss_active_failure = getattr(agent, "_shadow_would_miss_active_failure", 0)
 
     # Hybrid control metrics (zero when hybrid-control=off)
     m.hybrid_residual_predictor_calls = getattr(agent, "_hybrid_residual_predictor_calls", 0)
@@ -1035,6 +1071,27 @@ def _print_aggregate(results: List[RunResult]) -> None:
     avg_passive_stress = sum(r.arch.passive_stress_count for r in ok_runs) / n
     print(f"  passive monitor: saved_iv={avg_passive_iv:.0f}  stressed={avg_passive_stress:.0f}")
 
+    _total_shadow_calls = sum(r.arch.shadow_residual_calls for r in ok_runs)
+    if _total_shadow_calls > 0:
+        _shadow_ok_t    = sum(r.arch.shadow_residual_ok for r in ok_runs)
+        _shadow_str_t   = sum(r.arch.shadow_residual_stressed for r in ok_runs)
+        _shadow_ins_t   = sum(r.arch.shadow_residual_insufficient for r in ok_runs)
+        _shadow_agr_t   = sum(r.arch.shadow_agree_symbolic for r in ok_runs)
+        _shadow_fok_t   = sum(r.arch.shadow_false_ok_vs_symbolic for r in ok_runs)
+        _shadow_fst_t   = sum(r.arch.shadow_false_stress_vs_symbolic for r in ok_runs)
+        _shadow_wsv_t   = sum(r.arch.shadow_would_save_iv for r in ok_runs)
+        _shadow_wms_t   = sum(r.arch.shadow_would_miss_symbolic_stress for r in ok_runs)
+        _shadow_fas_t   = sum(r.arch.shadow_false_ok_vs_active_sentinel for r in ok_runs)
+        _shadow_wma_t   = sum(r.arch.shadow_would_miss_active_failure for r in ok_runs)
+        print()
+        print("── shadow residual ─────────────────────────────────────────────────")
+        print(f"  calls={_total_shadow_calls}")
+        print(f"  ok={_shadow_ok_t}  stressed={_shadow_str_t}  insufficient={_shadow_ins_t}")
+        print(f"  agree_symbolic={_shadow_agr_t}")
+        print(f"  false_ok_vs_symbolic={_shadow_fok_t}  false_stress_vs_symbolic={_shadow_fst_t}")
+        print(f"  would_save_iv={_shadow_wsv_t}  would_miss_symbolic_stress={_shadow_wms_t}")
+        print(f"  false_ok_vs_active={_shadow_fas_t}  would_miss_active_failure={_shadow_wma_t}")
+
     # Print hybrid metrics whenever any provider was active, even if some counts
     # are zero — zero counts expose wiring gaps immediately.
     _hybrid_res_calls = sum(r.arch.hybrid_residual_predictor_calls for r in ok_runs)
@@ -1158,6 +1215,9 @@ def main():
                    help="hybrid control mode: off=current behavior; interfaces=symbolic provider wrappers (default: off)")
     p.add_argument("--repair-agenda", action="store_true",
                    help="enable RepairAgenda: annotate needs_audit entries with scope/authority metadata")
+    p.add_argument("--shadow-residual", default="off",
+                   choices=["off", "online"],
+                   help="shadow residual mode: off=disabled; online=shadow learned predictor (default: off)")
     args = p.parse_args()
 
     var_list   = [int(x) for x in args.vars.split(",")]
@@ -1177,7 +1237,8 @@ def main():
                   ablate=args.ablate_consequence,
                   log_interval=args.progress,
                   hybrid_control=args.hybrid_control,
-                  repair_agenda_enabled=args.repair_agenda)
+                  repair_agenda_enabled=args.repair_agenda,
+                  shadow_residual=args.shadow_residual)
         for v in var_list
         for c in cycle_list
         for s in seed_list
@@ -1193,6 +1254,8 @@ def main():
         mode += f" +hybrid({args.hybrid_control})"
     if args.repair_agenda:
         mode += " +repair-agenda"
+    if args.shadow_residual != "off":
+        mode += f" +shadow-residual({args.shadow_residual})"
     print(f"dreth arch-test{mode}: {total} runs | "
           f"vars={var_list} cycles={cycle_list} seeds={seed_list} "
           f"schedule={args.schedule}", flush=True)
