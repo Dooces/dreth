@@ -12,12 +12,13 @@ from __future__ import annotations
 #     - Mark a var tareth / trass
 #     - Authorize a skip
 #     - Bypass sentinels
-#   Cert authority remains exclusively on the Dreth ledger/cert/sentinel path.
-#   Provider confidence values are NEVER treated as cert authority.
+#   Cert authority remains an earned, defeasible ledger record on the Dreth
+#   ledger/cert/sentinel path. Provider confidence values are NEVER treated as
+#   cert authority.
 #
 # Stage 1: interface separation + default symbolic wrappers.
 # Future stages plug in neural/MoE components by implementing the Protocols
-# without touching the certification path.
+# without touching the authority-record path.
 # ─────────────────────────────────────────────────────────────────────────────
 
 import dataclasses
@@ -55,7 +56,7 @@ class ParentRanking:
 @dataclasses.dataclass
 class ProbeProposal:
     """Output from a ProbeProposer for one variable.
-    Proposals only — does NOT certify hypotheses or update cert state.
+    Proposals only — does NOT create earned authority records or update cert state.
     """
     var: int
     probes: Tuple[Tuple[int, float], ...]   # (iv_var, iv_val) pairs
@@ -191,7 +192,7 @@ class ProbeProposalDiagnostics:
 @runtime_checkable
 class ResidualPredictor(Protocol):
     """Predicts whether a variable's current state is consistent with its
-    certified hypothesis.
+    currently authoritative hypothesis.
 
     CONTRACT: Must NOT issue certs or mutate ledger state.
     Called once per authoritative variable per cycle (passive monitoring path).
@@ -283,7 +284,7 @@ class ExpertRouter(Protocol):
 
 class SymbolicResidualPredictor:
     """Default ResidualPredictor: reproduces the passive residual logic using
-    certified parents + FUNC_LIBRARY.
+    currently authoritative parents + FUNC_LIBRARY.
 
     Extracts the current agent behavior as a provider. May NOT issue certs —
     it only computes and returns the residual signal for the agent to act on.

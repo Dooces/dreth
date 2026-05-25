@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 # ── THIS FILE ────────────────────────────────────────────────────────────────
-# The certification control loop. ChainedAgent owns the full lifecycle.
+# The authority-record control loop. ChainedAgent owns the full lifecycle.
 #
 # Per cycle, per variable, the agent dispatches to one of:
 #   trass-skip        — operation_role==trass: do nothing
@@ -13,7 +13,7 @@ from __future__ import annotations
 #   _full_audit_var       — calls fit_var, records FitDiagnostic
 #   _install_var          — applies audit result: updates VarNethra status,
 #                           tests operation role, attaches sentinels, promotes
-#                           to certified, manages TiedFrontier
+#                           to certified status, manages TiedFrontier
 #   _certify_operation_role — runs the substitution test: perturb this var,
 #                           observe whether other vars change beyond tolerance.
 #                           Returns tareth/trass/untested. This verdict gates
@@ -24,9 +24,9 @@ from __future__ import annotations
 #                           audit. Should require regime-survival evidence
 #                           (stable_count + distinct context_keys). Fix in P4.
 #
-# What makes certified nethras operative here:
-#   available_parents in _full_audit_var is built only from tareth-certified
-#   vars. A variable's certification directly controls what hypotheses are
+# What makes authoritative nethras operative here:
+#   available_parents in _full_audit_var is built only from vars with tareth
+#   authority records. A variable's current authority directly controls what hypotheses are
 #   enumerated for every variable that might depend on it.
 #
 # Active:
@@ -38,8 +38,8 @@ from __future__ import annotations
 # ════════════════════════════════════════════════════════════════════════════════
 # CORE INVARIANT — READ BEFORE MODIFYING THIS FILE
 #
-# NETHRA: Not a label. A factoring that earned certification by surviving
-#   intervention tests in a specific scope. Certified nethras are operative:
+# NETHRA: Not a label. A factoring that earned authority by surviving
+#   intervention tests in a specific scope. Authoritative nethras are operative:
 #   they become active filters deciding what later evidence counts as tareth
 #   or trass. They do not passively describe — they gate future reasoning.
 #
@@ -47,13 +47,13 @@ from __future__ import annotations
 #   trass  — substituting the distinction leaves monitored targets unchanged
 #   tareth — substitution changes monitored targets; a concrete witness exists
 #   Certs fire by default; only observed failure or an active dependency event
-#   earns revocation. Sentinel failure and downstream contradiction revoke cert
-#   authority. Structural or scope changes revoke only when they are themselves
+#   earns revocation. Sentinel failure and downstream contradiction defeat cert
+#   authority in the relevant scope. Structural or scope changes revoke only when they are themselves
 #   dependency events (parent set changed, contradicting evidence in expanded
 #   context). The verdict belongs to the scope, not the hypothesis.
 #
 # FALSE-TRASS: Two locally-trass nethras can jointly be tareth. Composition
-#   requires a joint re-test. Local certification does not propagate upward.
+#   requires a joint re-test. Local authority does not propagate upward.
 #
 # MORPHOLOGY ≠ CAUSE:
 #   Morphology (same parents, same operator, close scores) is structural —
@@ -66,7 +66,7 @@ from __future__ import annotations
 #   Collapse requires regime-survival proof. Score proximity does not justify
 #   collapsing; it justifies recording the ambiguity and generating probes.
 #
-# This file: certification decisions live here. _install_var must not collapse
+# This file: authority-record decisions live here. _install_var must not collapse
 #   based on score proximity alone. _certify_operation_role must not promote
 #   trass without regime-survival evidence. _collapse_tied_frontier as currently
 #   implemented triggers on score-landscape narrowing — that is PREMATURE COLLAPSE
@@ -100,8 +100,8 @@ from .learned_residual import (
 )
 
 # ── Trass authority thresholds ────────────────────────────────────────────────
-# A trass cert suppresses future sentinel monitoring — the strongest authority
-# the framework grants. It must require more evidence than any cert that merely
+# A trass cert suppresses future sentinel monitoring — the strongest operational
+# authority the framework grants. It must require more evidence than any cert that merely
 # prioritizes or routes attention (tareth, compression, dormancy).
 #
 # Newly issued trass certs are *provisional*: each hot-pass cycle that reaches

@@ -72,7 +72,8 @@ optimal across both regimes.
 
 **Sensitivity remains the conservative default.** It wins decisively under
 `regime_switch` and never incurs the extra audit / revocation overhead that
-history-aware policies carry. It is safe under all tested conditions.
+history-aware policies carry. This is operational guidance for the tested
+scopes, not proof that a policy is universally correct.
 
 **history\_rescue is useful for false\_trass-like worlds.** Its advantage comes
 from lower intervention volume, at the cost of modestly more

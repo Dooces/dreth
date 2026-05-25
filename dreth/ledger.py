@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 # ── THIS FILE ────────────────────────────────────────────────────────────────
-# All certified state lives here. The data structures, not the logic.
+# All earned authority records live here. The data structures, not the logic.
 #
 # Active objects:
-#   NoiseEnvelope   — certifies ε for one variable. The envelope IS the
+#   NoiseEnvelope   — records the trusted ε for one variable. The envelope IS the
 #                     variable's current judgment of what counts as a real
 #                     deviation vs. noise. All match/fail comparisons use it.
-#   VarNethra       — per-variable certification handle. operation_role gates
+#   VarNethra       — per-variable authority handle. operation_role gates
 #                     whether this variable enters downstream hypothesis spaces.
 #                     status + sentinels gate whether the cheap path is open.
 #                     It is operative: it changes what the agent considers next.
@@ -31,8 +31,8 @@ from __future__ import annotations
 # ════════════════════════════════════════════════════════════════════════════════
 # CORE INVARIANT — READ BEFORE MODIFYING THIS FILE
 #
-# NETHRA: Not a label. A factoring that earned certification by surviving
-#   intervention tests in a specific scope. Certified nethras are operative:
+# NETHRA: Not a label. A factoring that earned authority by surviving
+#   intervention tests in a specific scope. Authoritative nethras are operative:
 #   they become active filters deciding what later evidence counts as tareth
 #   or trass. They do not passively describe — they gate future reasoning.
 #
@@ -40,13 +40,13 @@ from __future__ import annotations
 #   trass  — substituting the distinction leaves monitored targets unchanged
 #   tareth — substitution changes monitored targets; a concrete witness exists
 #   Certs fire by default; only observed failure or an active dependency event
-#   earns revocation. Sentinel failure and downstream contradiction revoke cert
-#   authority. Structural or scope changes revoke only when they are themselves
+#   earns revocation. Sentinel failure and downstream contradiction defeat cert
+#   authority in the relevant scope. Structural or scope changes revoke only when they are themselves
 #   dependency events (parent set changed, contradicting evidence in expanded
 #   context). The verdict belongs to the scope, not the hypothesis.
 #
 # FALSE-TRASS: Two locally-trass nethras can jointly be tareth. Composition
-#   requires a joint re-test. Local certification does not propagate upward.
+#   requires a joint re-test. Local authority does not propagate upward.
 #
 # MORPHOLOGY ≠ CAUSE:
 #   Morphology (same parents, same operator, close scores) is structural —
@@ -59,7 +59,7 @@ from __future__ import annotations
 #   Collapse requires regime-survival proof. Score proximity does not justify
 #   collapsing; it justifies recording the ambiguity and generating probes.
 #
-# This file: VarNethra stores PROVISIONAL certification state. tied_frontier
+# This file: VarNethra stores PROVISIONAL authority-record state. tied_frontier
 #   is the ambiguity object — it must persist until evidence justifies collapse,
 #   not until score-landscape narrowing happens to produce a single candidate.
 # ════════════════════════════════════════════════════════════════════════════════
@@ -112,13 +112,15 @@ Authority = Literal["none", "prefer", "guarded_reuse", "skip", "propagate"]
 
 @dataclass
 class NethraCertificate:
-    """A certified claim scoped to a named operation. Carries the context under
+    """An earned authority record scoped to a named operation. Carries the context under
     which it was tested, the scope of what was checked, and the evidence counts.
-    Role and authority are provisional — the cert fires by default; invalidation
+    Role and authority are defeasible — the cert fires by default; invalidation
     requires observed failure or an active dependency event (parent set changed,
     sentinel contradiction, composite revoked). Structural context alone (e.g.
     new variable visible) does not revoke unless it is itself a dependency event.
-    See DRETH_TAXONOMY.md for full semantics.
+    This is not proof of truth; it is current authority relative to a tested
+    scope and local alternatives. See docs/relative_authority.md for the
+    corrected semantic frame.
 
     earned_by: what event produced this cert. Required — every cert must carry
       its provenance. Allowed values: substitution_test, joint_interaction,

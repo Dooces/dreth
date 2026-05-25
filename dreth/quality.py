@@ -46,7 +46,8 @@ def compute_quality_cost(
 ) -> int:
     """Diagnostic-only provider policy score.
 
-    This helper is pure arithmetic. It must not be read by agent policy.
+    This helper is pure arithmetic. It is not an authority score and must not
+    be read by agent policy.
     """
     return int(
         iv
