@@ -188,6 +188,8 @@ class RunConfig:
     probe_proposer: str = "none"        # "none" | "history" | "history_rescue"
     relative_authority_report: bool = False
     relative_authority_frontier_report: bool = False
+    relative_authority_frontier_temporal_report: bool = False
+    relative_authority_frontier_warmup_cycles: Optional[int] = None
 
 
 # ── per-run result ─────────────────────────────────────────────────────────────
@@ -350,12 +352,40 @@ class ArchMetrics:
     graph_frontier_chosen_parent_recall: float = 0.0
     graph_frontier_revoked_recall: float = 0.0
     graph_frontier_dormant_recall: float = 0.0
+    direct_frontier_chosen_parent_recall: float = 0.0
+    direct_frontier_revoked_recall: float = 0.0
+    direct_frontier_dormant_recall: float = 0.0
+    loo_frontier_chosen_parent_recall: float = 0.0
+    loo_frontier_revoked_recall: float = 0.0
+    loo_frontier_dormant_recall: float = 0.0
     graph_frontier_chosen_parent_hits: int = 0
     graph_frontier_chosen_parent_total: int = 0
     graph_frontier_revoked_hits: int = 0
     graph_frontier_revoked_total: int = 0
     graph_frontier_dormant_hits: int = 0
     graph_frontier_dormant_total: int = 0
+    direct_frontier_chosen_parent_hits: int = 0
+    direct_frontier_chosen_parent_total: int = 0
+    direct_frontier_revoked_hits: int = 0
+    direct_frontier_revoked_total: int = 0
+    direct_frontier_dormant_hits: int = 0
+    direct_frontier_dormant_total: int = 0
+    loo_frontier_chosen_parent_hits: int = 0
+    loo_frontier_chosen_parent_total: int = 0
+    loo_frontier_revoked_hits: int = 0
+    loo_frontier_revoked_total: int = 0
+    loo_frontier_dormant_hits: int = 0
+    loo_frontier_dormant_total: int = 0
+    temporal_frontier_evals: int = 0
+    temporal_frontier_avg_size: float = 0.0
+    temporal_frontier_chosen_parent_hits: int = 0
+    temporal_frontier_chosen_parent_total: int = 0
+    temporal_frontier_chosen_parent_recall: float = 0.0
+    temporal_frontier_revoked_hits: int = 0
+    temporal_frontier_revoked_total: int = 0
+    temporal_frontier_revoked_recall: float = 0.0
+    temporal_frontier_candidate_reduction_vs_visible: float = 0.0
+    temporal_frontier_misses: int = 0
 
 
 @dataclass
@@ -706,6 +736,17 @@ def _build_and_run_dreth(
         shadow_residual_enabled=_shadow_enabled,
         shadow_key_authority=_shadow_key_authority,
     )
+    if cfg.relative_authority_frontier_temporal_report:
+        from dreth.relative_authority_frontier import TemporalGraphFrontierEvaluator
+
+        warmup_cycles = (
+            cfg.relative_authority_frontier_warmup_cycles
+            if cfg.relative_authority_frontier_warmup_cycles is not None
+            else max(100, cfg.cycles // 3)
+        )
+        agent._diagnostic_audit_observer = TemporalGraphFrontierEvaluator(
+            warmup_cycles=warmup_cycles,
+        )
     agent.initialize()
 
     prev_iv = 0
@@ -998,6 +1039,29 @@ def _extract_arch_metrics(agent: ChainedAgent, world: CausalWorld) -> ArchMetric
         m.hybrid_repair_agenda_items = _as["total_pushed"]
         m.hybrid_repair_agenda_scope_mean = _as.get("scope_mean", 0.0)
         m.hybrid_repair_agenda_scope_max = _as.get("scope_max", 0)
+    _temporal_frontier = getattr(agent, "_diagnostic_audit_observer", None)
+    if _temporal_frontier is not None and hasattr(_temporal_frontier, "summary"):
+        _tfs = _temporal_frontier.summary()
+        m.temporal_frontier_evals = int(_tfs["temporal_frontier_evals"])
+        m.temporal_frontier_avg_size = float(_tfs["temporal_frontier_avg_size"])
+        m.temporal_frontier_chosen_parent_hits = int(
+            _tfs["temporal_frontier_chosen_parent_hits"]
+        )
+        m.temporal_frontier_chosen_parent_total = int(
+            _tfs["temporal_frontier_chosen_parent_total"]
+        )
+        m.temporal_frontier_chosen_parent_recall = float(
+            _tfs["temporal_frontier_chosen_parent_recall"]
+        )
+        m.temporal_frontier_revoked_hits = int(_tfs["temporal_frontier_revoked_hits"])
+        m.temporal_frontier_revoked_total = int(_tfs["temporal_frontier_revoked_total"])
+        m.temporal_frontier_revoked_recall = float(
+            _tfs["temporal_frontier_revoked_recall"]
+        )
+        m.temporal_frontier_candidate_reduction_vs_visible = float(
+            _tfs["temporal_frontier_candidate_reduction_vs_visible"]
+        )
+        m.temporal_frontier_misses = int(_tfs["temporal_frontier_misses"])
 
     return m
 
@@ -1041,26 +1105,55 @@ def _attach_relative_authority_metrics(
         for record in snapshot.top_authority(limit=5)
     ]
     if frontier_report:
-        from dreth.relative_authority_frontier import evaluate_frontier_against_agent
+        from dreth.relative_authority_frontier import (
+            evaluate_frontier_against_agent,
+            evaluate_frontier_leave_one_out,
+        )
 
-        evaluations = evaluate_frontier_against_agent(snapshot, agent)
-        arch.graph_frontier_evals = len(evaluations)
-        if evaluations:
-            arch.graph_frontier_avg_size = (
-                sum(ev.frontier_size for ev in evaluations) / len(evaluations)
-            )
+        def _frontier_counts(evaluations):
             chosen_hits = sum(ev.chosen_parent_hits for ev in evaluations)
             chosen_total = sum(ev.chosen_parent_total for ev in evaluations)
             revoked_hits = sum(ev.revoked_neighbor_hits for ev in evaluations)
             revoked_total = sum(ev.revoked_total for ev in evaluations)
             dormant_hits = sum(ev.dormant_neighbor_hits for ev in evaluations)
             dormant_total = sum(ev.dormant_total for ev in evaluations)
+            return (
+                chosen_hits,
+                chosen_total,
+                revoked_hits,
+                revoked_total,
+                dormant_hits,
+                dormant_total,
+            )
+
+        direct_evaluations = evaluate_frontier_against_agent(snapshot, agent)
+        loo_evaluations = evaluate_frontier_leave_one_out(snapshot, agent)
+        arch.graph_frontier_evals = len(direct_evaluations)
+        evaluations = direct_evaluations
+        if evaluations:
+            arch.graph_frontier_avg_size = (
+                sum(ev.frontier_size for ev in evaluations) / len(evaluations)
+            )
+            (
+                chosen_hits,
+                chosen_total,
+                revoked_hits,
+                revoked_total,
+                dormant_hits,
+                dormant_total,
+            ) = _frontier_counts(evaluations)
             arch.graph_frontier_chosen_parent_hits = chosen_hits
             arch.graph_frontier_chosen_parent_total = chosen_total
             arch.graph_frontier_revoked_hits = revoked_hits
             arch.graph_frontier_revoked_total = revoked_total
             arch.graph_frontier_dormant_hits = dormant_hits
             arch.graph_frontier_dormant_total = dormant_total
+            arch.direct_frontier_chosen_parent_hits = chosen_hits
+            arch.direct_frontier_chosen_parent_total = chosen_total
+            arch.direct_frontier_revoked_hits = revoked_hits
+            arch.direct_frontier_revoked_total = revoked_total
+            arch.direct_frontier_dormant_hits = dormant_hits
+            arch.direct_frontier_dormant_total = dormant_total
             arch.graph_frontier_chosen_parent_recall = (
                 chosen_hits / chosen_total if chosen_total else 0.0
             )
@@ -1068,6 +1161,35 @@ def _attach_relative_authority_metrics(
                 revoked_hits / revoked_total if revoked_total else 0.0
             )
             arch.graph_frontier_dormant_recall = (
+                dormant_hits / dormant_total if dormant_total else 0.0
+            )
+            arch.direct_frontier_chosen_parent_recall = (
+                arch.graph_frontier_chosen_parent_recall
+            )
+            arch.direct_frontier_revoked_recall = arch.graph_frontier_revoked_recall
+            arch.direct_frontier_dormant_recall = arch.graph_frontier_dormant_recall
+        if loo_evaluations:
+            (
+                chosen_hits,
+                chosen_total,
+                revoked_hits,
+                revoked_total,
+                dormant_hits,
+                dormant_total,
+            ) = _frontier_counts(loo_evaluations)
+            arch.loo_frontier_chosen_parent_hits = chosen_hits
+            arch.loo_frontier_chosen_parent_total = chosen_total
+            arch.loo_frontier_revoked_hits = revoked_hits
+            arch.loo_frontier_revoked_total = revoked_total
+            arch.loo_frontier_dormant_hits = dormant_hits
+            arch.loo_frontier_dormant_total = dormant_total
+            arch.loo_frontier_chosen_parent_recall = (
+                chosen_hits / chosen_total if chosen_total else 0.0
+            )
+            arch.loo_frontier_revoked_recall = (
+                revoked_hits / revoked_total if revoked_total else 0.0
+            )
+            arch.loo_frontier_dormant_recall = (
                 dormant_hits / dormant_total if dormant_total else 0.0
             )
 
@@ -2171,25 +2293,80 @@ def _print_aggregate(results: List[RunResult], weights: QualityWeights = Quality
             return hits / total if total else 0.0
 
         chosen_parent_recall = _label_recall(
-            "graph_frontier_chosen_parent_hits",
-            "graph_frontier_chosen_parent_total",
+            "direct_frontier_chosen_parent_hits",
+            "direct_frontier_chosen_parent_total",
         )
         revoked_neighbor_recall = _label_recall(
-            "graph_frontier_revoked_hits",
-            "graph_frontier_revoked_total",
+            "direct_frontier_revoked_hits",
+            "direct_frontier_revoked_total",
         )
         dormant_neighbor_recall = _label_recall(
-            "graph_frontier_dormant_hits",
-            "graph_frontier_dormant_total",
+            "direct_frontier_dormant_hits",
+            "direct_frontier_dormant_total",
+        )
+        loo_chosen_parent_recall = _label_recall(
+            "loo_frontier_chosen_parent_hits",
+            "loo_frontier_chosen_parent_total",
+        )
+        loo_revoked_neighbor_recall = _label_recall(
+            "loo_frontier_revoked_hits",
+            "loo_frontier_revoked_total",
+        )
+        loo_dormant_neighbor_recall = _label_recall(
+            "loo_frontier_dormant_hits",
+            "loo_frontier_dormant_total",
         )
 
         print()
         print("relative_authority_frontier:")
         print(f"  evals={total_evals}")
         print(f"  avg_frontier_size={avg_frontier_size:.1f}")
-        print(f"  chosen_parent_recall={chosen_parent_recall:.3f}")
-        print(f"  revoked_neighbor_recall={revoked_neighbor_recall:.3f}")
-        print(f"  dormant_neighbor_recall={dormant_neighbor_recall:.3f}")
+        print(f"  direct_frontier_chosen_parent_recall={chosen_parent_recall:.3f}")
+        print(f"  loo_frontier_chosen_parent_recall={loo_chosen_parent_recall:.3f}")
+        print(f"  direct_frontier_revoked_recall={revoked_neighbor_recall:.3f}")
+        print(f"  loo_frontier_revoked_recall={loo_revoked_neighbor_recall:.3f}")
+        print(f"  direct_frontier_dormant_recall={dormant_neighbor_recall:.3f}")
+        print(f"  loo_frontier_dormant_recall={loo_dormant_neighbor_recall:.3f}")
+
+    if any(r.config.relative_authority_frontier_temporal_report for r in ok_runs):
+        total_evals = sum(r.arch.temporal_frontier_evals for r in ok_runs)
+        avg_size = (
+            sum(
+                r.arch.temporal_frontier_avg_size * r.arch.temporal_frontier_evals
+                for r in ok_runs
+            )
+            / total_evals
+            if total_evals
+            else 0.0
+        )
+        reduction = (
+            sum(
+                r.arch.temporal_frontier_candidate_reduction_vs_visible
+                * r.arch.temporal_frontier_evals
+                for r in ok_runs
+            )
+            / total_evals
+            if total_evals
+            else 0.0
+        )
+        chosen_hits = sum(r.arch.temporal_frontier_chosen_parent_hits for r in ok_runs)
+        chosen_total = sum(r.arch.temporal_frontier_chosen_parent_total for r in ok_runs)
+        revoked_hits = sum(r.arch.temporal_frontier_revoked_hits for r in ok_runs)
+        revoked_total = sum(r.arch.temporal_frontier_revoked_total for r in ok_runs)
+        print()
+        print("relative_authority_frontier_temporal:")
+        print(f"  evals={total_evals}")
+        print(f"  avg_frontier_size={avg_size:.1f}")
+        print(
+            "  chosen_parent_recall="
+            f"{(chosen_hits / chosen_total if chosen_total else 0.0):.3f}"
+        )
+        print(
+            "  revoked_recall="
+            f"{(revoked_hits / revoked_total if revoked_total else 0.0):.3f}"
+        )
+        print(f"  candidate_reduction_vs_visible={reduction:.3f}")
+        print(f"  misses={sum(r.arch.temporal_frontier_misses for r in ok_runs)}")
 
     if total_viols == 0:
         print(f"  invariants: ALL PASS ({n} runs)")
@@ -2323,6 +2500,10 @@ def main():
                    help="print diagnostic-only post-run relative authority graph summary")
     p.add_argument("--relative-authority-frontier-report", action="store_true",
                    help="print shadow-only NethraGraph frontier utility summary; requires --relative-authority-report")
+    p.add_argument("--relative-authority-frontier-temporal-report", action="store_true",
+                   help="print shadow-only warmup temporal NethraGraph frontier summary; requires --relative-authority-report")
+    p.add_argument("--relative-authority-frontier-warmup-cycles", type=int, default=None,
+                   help="warmup cycles before temporal frontier proposals; default max(100, cycles//3)")
     args = p.parse_args()
     quality_weights = QualityWeights(
         audit_weight=args.quality_audit_weight,
@@ -2338,6 +2519,8 @@ def main():
         raise SystemExit("--policy-report requires --hybrid-control interfaces")
     if args.relative_authority_frontier_report and not args.relative_authority_report:
         raise SystemExit("--relative-authority-frontier-report requires --relative-authority-report")
+    if args.relative_authority_frontier_temporal_report and not args.relative_authority_report:
+        raise SystemExit("--relative-authority-frontier-temporal-report requires --relative-authority-report")
 
     parent_ranker_arg = args.parent_ranker
     probe_proposer_arg = args.probe_proposer
@@ -2404,7 +2587,9 @@ def main():
                   parent_ranker=parent_ranker,
                   probe_proposer=probe_proposer,
                   relative_authority_report=args.relative_authority_report,
-                  relative_authority_frontier_report=args.relative_authority_frontier_report)
+                  relative_authority_frontier_report=args.relative_authority_frontier_report,
+                  relative_authority_frontier_temporal_report=args.relative_authority_frontier_temporal_report,
+                  relative_authority_frontier_warmup_cycles=args.relative_authority_frontier_warmup_cycles)
         for schedule in schedule_list
         for v in var_list
         for c in cycle_list
@@ -2438,6 +2623,13 @@ def main():
         mode += " +relative-authority-report"
     if args.relative_authority_frontier_report:
         mode += " +relative-authority-frontier-report"
+    if args.relative_authority_frontier_temporal_report:
+        _warmup_label = (
+            args.relative_authority_frontier_warmup_cycles
+            if args.relative_authority_frontier_warmup_cycles is not None
+            else "default"
+        )
+        mode += f" +relative-authority-frontier-temporal(warmup={_warmup_label})"
     print(f"dreth arch-test{mode}: {total} runs | "
           f"vars={var_list} cycles={cycle_list} seeds={seed_list} "
           f"schedule={schedule_list}", flush=True)
@@ -2557,6 +2749,53 @@ def main():
                         "graph_frontier_dormant_recall": round(
                             r.arch.graph_frontier_dormant_recall, 6
                         ),
+                        "direct_frontier_chosen_parent_recall": round(
+                            r.arch.direct_frontier_chosen_parent_recall, 6
+                        ),
+                        "loo_frontier_chosen_parent_recall": round(
+                            r.arch.loo_frontier_chosen_parent_recall, 6
+                        ),
+                        "direct_frontier_revoked_recall": round(
+                            r.arch.direct_frontier_revoked_recall, 6
+                        ),
+                        "loo_frontier_revoked_recall": round(
+                            r.arch.loo_frontier_revoked_recall, 6
+                        ),
+                        "direct_frontier_dormant_recall": round(
+                            r.arch.direct_frontier_dormant_recall, 6
+                        ),
+                        "loo_frontier_dormant_recall": round(
+                            r.arch.loo_frontier_dormant_recall, 6
+                        ),
+                    })
+                if args.relative_authority_frontier_temporal_report:
+                    rec.update({
+                        "temporal_frontier_evals": r.arch.temporal_frontier_evals,
+                        "temporal_frontier_avg_size": round(
+                            r.arch.temporal_frontier_avg_size, 6
+                        ),
+                        "temporal_frontier_chosen_parent_hits": (
+                            r.arch.temporal_frontier_chosen_parent_hits
+                        ),
+                        "temporal_frontier_chosen_parent_total": (
+                            r.arch.temporal_frontier_chosen_parent_total
+                        ),
+                        "temporal_frontier_chosen_parent_recall": round(
+                            r.arch.temporal_frontier_chosen_parent_recall, 6
+                        ),
+                        "temporal_frontier_revoked_hits": (
+                            r.arch.temporal_frontier_revoked_hits
+                        ),
+                        "temporal_frontier_revoked_total": (
+                            r.arch.temporal_frontier_revoked_total
+                        ),
+                        "temporal_frontier_revoked_recall": round(
+                            r.arch.temporal_frontier_revoked_recall, 6
+                        ),
+                        "temporal_frontier_candidate_reduction_vs_visible": round(
+                            r.arch.temporal_frontier_candidate_reduction_vs_visible, 6
+                        ),
+                        "temporal_frontier_misses": r.arch.temporal_frontier_misses,
                     })
                 if r.baseline and r.baseline.ok:
                     rec["baseline"] = {

@@ -76,7 +76,7 @@ from __future__ import annotations
 import dataclasses
 import math
 import random
-from typing import Callable, Dict, FrozenSet, List, Optional, Protocol, Set, Tuple
+from typing import Any, Callable, Dict, FrozenSet, List, Optional, Protocol, Set, Tuple
 
 from .functions import FUNC_LIBRARY
 from .world import CausalWorld
@@ -423,6 +423,9 @@ class ChainedAgent:
         self._probe_proposal_diagnostics = ProbeProposalDiagnostics()
         self._pending_parent_rankings: Dict[int, Tuple[int, ...]] = {}
         self._pending_parent_sources: Dict[int, Dict[int, str]] = {}
+        # Optional diagnostic observer. It may inspect audit inputs/results, but
+        # no authority path reads it and no decision is allowed to depend on it.
+        self._diagnostic_audit_observer: Optional[Any] = None
 
         # Repair agenda: structural planning surface for pending repairs.
         # When disabled (default), needs_audit drives repair as before.
@@ -3198,8 +3201,25 @@ class ChainedAgent:
                 continue
             _pre_parents = tuple(self.ledger.vars[var].parents)
             _pre_func = self.ledger.vars[var].func
+            _diag_token = None
+            if self._diagnostic_audit_observer is not None:
+                _diag_token = self._diagnostic_audit_observer.before_audit(
+                    self,
+                    var,
+                    cycle,
+                )
             parents, func, score, second, fd = self._full_audit_var(var, cycle)
             sig_changed = self._install_var(var, parents, func, score, second, cycle, fd)
+            if self._diagnostic_audit_observer is not None:
+                self._diagnostic_audit_observer.after_audit(
+                    self,
+                    _diag_token,
+                    var,
+                    cycle,
+                    parents,
+                    func,
+                    sig_changed,
+                )
             audited.append(var)
             if var in _sentinel_failed_vars:
                 self.local_reaudit_count += 1
