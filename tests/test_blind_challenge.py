@@ -124,6 +124,10 @@ def test_summarize_blind_challenge_reads_synthetic_jsonl(tmp_path: Path, capsys)
                         "status": "certified",
                         "skip_role": "tareth",
                         "authoritative": True,
+                        "strong_observations": 3,
+                        "sentinel_count": 2,
+                        "fit_history_count": 2,
+                        "last_fit_margin": 2,
                     },
                 ]
             },
@@ -137,5 +141,7 @@ def test_summarize_blind_challenge_reads_synthetic_jsonl(tmp_path: Path, capsys)
 
     assert "Basic outcome" in output
     assert "Post-hoc manifest comparison" in output
-    assert "structures Dreth over-certified" in output
+    assert "external-truth mismatches under authority" in output
+    assert "authority/evidence mismatch candidates" in output
+    assert "falsely trusted" not in output
     assert "blind procedural stress test for scope discovery" in output

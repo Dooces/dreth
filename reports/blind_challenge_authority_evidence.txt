@@ -1,0 +1,67 @@
+A. External mismatch under authority:
+  cases=191
+  cases:
+    seed  var relation             class                          strong sent  rev drift margin
+      42    1 smooth_nonlinear     contradicted_authority              4    9    0     0      1
+      42    2 latent_additive      contradicted_authority              4    7    0     0      0
+      42    3 proxy_confounded     contradicted_authority              4    7    0     0      0
+      42    4 dense_mixed          contradicted_authority              4    7    0     0      0
+      42    5 dense_mixed          contradicted_authority              4    7    0     0      0
+      42    6 smooth_nonlinear     contradicted_authority              2    7    0     0      0
+      42    7 weak_noisy           contradicted_authority              2    5    0     0      0
+      42    8 weak_noisy           contradicted_authority              4    9    0     0      0
+      42    9 dense_mixed          contradicted_authority              4    7    0     0      0
+      42   11 symbolic             insufficient_evidence               4    7    0     0      0
+      42   12 dense_mixed          contradicted_authority              4    7    0     0      0
+      42   14 delayed              contradicted_authority              2    5    0     0      0
+      42   17 smooth_nonlinear     contradicted_authority              2    5    0     0      0
+      42   18 proxy_confounded     contradicted_authority              2    5    0     0      0
+      42   19 weak_noisy           contradicted_authority              2    5    0     0      0
+      42   20 delayed              contradicted_authority              4    7    0     0      0
+      42   22 delayed              contradicted_authority              2    5    0     0      0
+      42   23 delayed              contradicted_authority              2    7    0     0      0
+      42   24 symbolic             contradicted_authority              2    5    0     0      0
+      42   25 weak_noisy           contradicted_authority              2    5    0     0      0
+  ... +171 more
+
+B. Evidence support level:
+  evidence_supported_surrogate          1
+  weakly_supported_surrogate            5
+  contradicted_authority              150
+  insufficient_evidence                35
+  unknown                               0
+
+C. Best-available surrogate candidates:
+  Hidden mismatch with stable residual/probe evidence and no visible better alternative is reported as a surrogate, not a failure.
+  candidates:
+    seed  var relation             class                          strong sent  rev drift margin
+       3   17 proxy_confounded     evidence_supported_surrogate        9    7    0     0    312
+
+D. Serious authority/evidence mismatch candidates:
+  These are evidence-relative candidates: repeated stress/revocation/novelty or low observations while strong authority persisted.
+  candidates:
+    seed  var relation             class                          strong sent  rev drift margin
+      42    1 smooth_nonlinear     contradicted_authority              4    9    0     0      1
+      42    2 latent_additive      contradicted_authority              4    7    0     0      0
+      42    3 proxy_confounded     contradicted_authority              4    7    0     0      0
+      42    4 dense_mixed          contradicted_authority              4    7    0     0      0
+      42    5 dense_mixed          contradicted_authority              4    7    0     0      0
+      42    6 smooth_nonlinear     contradicted_authority              2    7    0     0      0
+      42    7 weak_noisy           contradicted_authority              2    5    0     0      0
+      42    8 weak_noisy           contradicted_authority              4    9    0     0      0
+      42    9 dense_mixed          contradicted_authority              4    7    0     0      0
+      42   11 symbolic             insufficient_evidence               4    7    0     0      0
+      42   12 dense_mixed          contradicted_authority              4    7    0     0      0
+      42   14 delayed              contradicted_authority              2    5    0     0      0
+      42   17 smooth_nonlinear     contradicted_authority              2    5    0     0      0
+      42   18 proxy_confounded     contradicted_authority              2    5    0     0      0
+      42   19 weak_noisy           contradicted_authority              2    5    0     0      0
+      42   20 delayed              contradicted_authority              4    7    0     0      0
+      42   22 delayed              contradicted_authority              2    5    0     0      0
+      42   23 delayed              contradicted_authority              2    7    0     0      0
+      42   24 symbolic             contradicted_authority              2    5    0     0      0
+      42   25 weak_noisy           contradicted_authority              2    5    0     0      0
+  ... +165 more
+
+E. Warning:
+  Hidden truth is used only for offline interpretation. Dreth must be judged by what was available to it.

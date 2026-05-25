@@ -1125,9 +1125,30 @@ def _blind_challenge_evaluation(agent: ChainedAgent, world: CausalWorld) -> Dict
         for rel in relations or []
         if isinstance(rel, dict) and rel.get("var") is not None
     }
+    fit_history_by_var: Dict[int, List[Any]] = {}
+    for fd in agent.fit_diagnostics:
+        fit_history_by_var.setdefault(fd.var, []).append(fd)
+    open_novelty_by_var: Dict[int, List[Any]] = {}
+    for novelty in agent.ledger.novelty:
+        if novelty.status == "open":
+            open_novelty_by_var.setdefault(novelty.affected_var, []).append(novelty)
+    cycles_observed = agent.records[-1].cycle if agent.records else 0
+    recent_window_start = max(0, cycles_observed - 250)
+    recent_audits_by_var: Counter = Counter()
+    recent_drift_by_var: Counter = Counter()
+    recent_deferred_by_var: Counter = Counter()
+    for record in agent.records:
+        if record.cycle < recent_window_start:
+            continue
+        for var in record.fully_audited_vars:
+            recent_audits_by_var[var] += 1
+        for var in record.detected_drift_vars:
+            recent_drift_by_var[var] += 1
+        for var in record.deferred_vars:
+            recent_deferred_by_var[var] += 1
     per_var: List[Dict[str, Any]] = []
     learned_overlap = 0
-    over_certified = 0
+    external_mismatch_under_authority = 0
     withheld = 0
     uncertain = 0
     for var in range(world.visible_count):
@@ -1148,14 +1169,47 @@ def _blind_challenge_evaluation(agent: ChainedAgent, world: CausalWorld) -> Dict
         certified_like = n.status == "certified" or bool(n.authoritative)
         non_root = bool(truth_scope or rel.get("latents") or rel.get("relation_type") != "symbolic")
         if certified_like and non_root and not overlap and learned_parents:
-            over_certified += 1
+            external_mismatch_under_authority += 1
         if role == "untested" or n.status in {"uncertain", "proposed"}:
             uncertain += 1
         if role in {"untested", "noise_floor"} or not n.authoritative:
             withheld += 1
+        var_fits = fit_history_by_var.get(var, [])
+        last_fit = var_fits[-1] if var_fits else None
+        recent_fit_history = [
+            {
+                "cycle": fd.cycle,
+                "best_score": fd.best_score,
+                "second_score": fd.second_score,
+                "margin": fd.margin,
+                "failure_class": fd.failure_class,
+                "best_parents": list(fd.best_parents),
+                "best_func": fd.best_func,
+                "hypothesis_count": fd.hypothesis_count,
+                "available_parent_count": len(fd.available_parents),
+                "tie_count": len(fd.tie_set),
+                "near_tie_count": len(fd.near_tie_candidates),
+            }
+            for fd in var_fits[-5:]
+        ]
+        repeated_stable_fit = False
+        if len(var_fits) >= 2:
+            latest_sig = (tuple(var_fits[-1].best_parents), var_fits[-1].best_func)
+            repeated_stable_fit = all(
+                (tuple(fd.best_parents), fd.best_func) == latest_sig and fd.margin > 0
+                for fd in var_fits[-min(3, len(var_fits)):]
+            )
+        revoked_by = [
+            cert.revoked_by
+            for cert in list(n.certificates.values()) + list(n.route_certs.values())
+            if getattr(cert, "revoked_by", None)
+        ]
+        frontier = n.tied_frontier
+        novelty_items = open_novelty_by_var.get(var, [])
         per_var.append({
             "var": var,
             "relation_type": rel.get("relation_type"),
+            "truth_func": rel.get("func"),
             "truth_parents": sorted(truth_parents),
             "truth_delayed_parents": sorted(delayed_parents),
             "truth_latents": list(rel.get("latents", []) or []),
@@ -1166,23 +1220,53 @@ def _blind_challenge_evaluation(agent: ChainedAgent, world: CausalWorld) -> Dict
             "status": n.status,
             "skip_role": role,
             "authoritative": bool(n.authoritative),
+            "strong_observations": n.strong_observations,
             "sentinel_count": len(n.sentinels),
+            "recent_revocations": len(revoked_by),
+            "revoked_by": revoked_by,
+            "consecutive_sentinel_failures": n.consecutive_sentinel_failures,
+            "recent_audits": recent_audits_by_var[var],
+            "recent_detected_drift": recent_drift_by_var[var],
+            "recent_deferred": recent_deferred_by_var[var],
+            "passive_stress_available": False,
+            "passive_stress_recent": None,
+            "open_novelty": bool(novelty_items),
+            "open_novelty_observations": sum(nv.observations for nv in novelty_items),
+            "frontier_active": frontier is not None,
+            "frontier_candidate_count": len(frontier.candidates) if frontier else 0,
+            "frontier_stable_count": frontier.stable_count if frontier else 0,
+            "frontier_distinct_contexts": frontier.distinct_contexts_seen if frontier else 0,
             "full_audits": n.full_audits,
             "skip_count": n.skip_count,
             "route_certs": len(n.route_certs),
             "dormant_alternatives": len(n.dormant_alternatives),
-            "revoked_certs": sum(1 for cert in n.certificates.values() if cert.revoked_by),
+            "alternatives_existed": bool(n.dormant_alternatives or (frontier and len(frontier.candidates) > 1)),
+            "fit_history_count": len(var_fits),
+            "recent_fit_history": recent_fit_history,
+            "last_fit_margin": last_fit.margin if last_fit else None,
+            "last_fit_failure_class": last_fit.failure_class if last_fit else None,
+            "last_fit_tie_count": len(last_fit.tie_set) if last_fit else None,
+            "last_fit_near_tie_count": len(last_fit.near_tie_candidates) if last_fit else None,
+            "last_fit_hypothesis_count": last_fit.hypothesis_count if last_fit else None,
+            "last_fit_available_parent_count": len(last_fit.available_parents) if last_fit else None,
+            "parent_proposal_rank": None,
+            "parent_proposal_rank_available": False,
+            "repeatedly_stable_under_probes": repeated_stable_fit,
+            "audit_stable_count": n.audit_stable_count,
+            "revoked_certs": len(revoked_by),
         })
     return {
         "blind_challenge_manifest": manifest,
         "blind_challenge_behavior": {
             "per_var": per_var,
             "learned_overlap_vars": learned_overlap,
-            "over_certified_suspect_vars": over_certified,
+            "external_mismatch_under_authority_vars": external_mismatch_under_authority,
             "withheld_or_non_authoritative_vars": withheld,
             "uncertain_or_proposed_vars": uncertain,
             "side_effect_rule_count": len(manifest.get("intervention_side_effects", []) or []),
             "latent_count": len(manifest.get("latents", []) or []),
+            "evidence_fields_version": 1,
+            "cycles_observed": cycles_observed,
         },
     }
 
@@ -2538,9 +2622,9 @@ def main():
                    help="comma-separated cycle counts (default: 100,300)")
     p.add_argument("--seeds",   default="42,7,99",
                    help="comma-separated seeds (default: 42,7,99)")
-    p.add_argument("--schedule", default="incremental",
+    p.add_argument("--schedule", default="blind_challenge",
                    help=("mutation schedule(s), comma-separated. allowed: "
-                         f"{','.join(_ALLOWED_SCHEDULES)} (default: incremental)"))
+                         f"{','.join(_ALLOWED_SCHEDULES)} (default: blind_challenge)"))
     p.add_argument("--settle-cycles", type=int, default=8,
                    help="settle cycles for incremental reveals or regime_switch initial window (default: 8)")
     p.add_argument("--noise-sigma", type=float, default=0.02,

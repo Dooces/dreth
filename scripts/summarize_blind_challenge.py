@@ -41,7 +41,8 @@ class DiscoverySummary:
     relation_types: Counter[str] = field(default_factory=Counter)
     appeared_learned: Counter[str] = field(default_factory=Counter)
     failed_to_learn: Counter[str] = field(default_factory=Counter)
-    over_certified: Counter[str] = field(default_factory=Counter)
+    external_mismatch_under_authority: Counter[str] = field(default_factory=Counter)
+    authority_evidence_mismatch_candidates: Counter[str] = field(default_factory=Counter)
     uncertain_or_stressed: Counter[str] = field(default_factory=Counter)
     withheld: Counter[str] = field(default_factory=Counter)
     side_effect_rules: int = 0
@@ -158,8 +159,26 @@ def compute_discovery_summary(rows: Iterable[dict[str, Any]]) -> DiscoverySummar
                 summary.appeared_learned[rel_type] += 1
             elif truth_parents and not overlap:
                 summary.failed_to_learn[rel_type] += 1
-            if certified and truth_parents and learned_parents and not overlap:
-                summary.over_certified[rel_type] += 1
+            hidden_mismatch_under_authority = certified and truth_parents and learned_parents and not overlap
+            if hidden_mismatch_under_authority:
+                summary.external_mismatch_under_authority[rel_type] += 1
+                stressed = (
+                    _as_int(item.get("recent_revocations")) > 0
+                    or _as_int(item.get("recent_detected_drift")) > 0
+                    or bool(item.get("open_novelty"))
+                    or _as_int(item.get("consecutive_sentinel_failures")) > 0
+                    or (
+                        item.get("passive_stress_recent") is not None
+                        and _as_int(item.get("passive_stress_recent")) > 0
+                    )
+                )
+                low_evidence = (
+                    ("strong_observations" in item and _as_int(item.get("strong_observations")) <= 0)
+                    or ("sentinel_count" in item and _as_int(item.get("sentinel_count")) <= 0)
+                    or ("fit_history_count" in item and _as_int(item.get("fit_history_count")) <= 0)
+                )
+                if stressed or low_evidence:
+                    summary.authority_evidence_mismatch_candidates[rel_type] += 1
             if uncertain:
                 summary.uncertain_or_stressed[rel_type] += 1
             if withheld:
@@ -226,7 +245,16 @@ def print_report(rows: list[dict[str, Any]], out: TextIO | None = None) -> None:
     print("\nC. Discovery report:", file=out)
     _print_counter("  structures Dreth appeared to learn:", discovery.appeared_learned, out)
     _print_counter("  structures Dreth failed to learn:", discovery.failed_to_learn, out)
-    _print_counter("  structures Dreth over-certified:", discovery.over_certified, out)
+    _print_counter(
+        "  external-truth mismatches under authority:",
+        discovery.external_mismatch_under_authority,
+        out,
+    )
+    _print_counter(
+        "  authority/evidence mismatch candidates:",
+        discovery.authority_evidence_mismatch_candidates,
+        out,
+    )
     _print_counter("  structures Dreth left uncertain/stressed:", discovery.uncertain_or_stressed, out)
     if basic.graph_frontier_evals or basic.temporal_frontier_evals:
         print("  structures where graph locality helped:", file=out)
@@ -241,7 +269,11 @@ def print_report(rows: list[dict[str, Any]], out: TextIO | None = None) -> None:
     print("\nD. Scope report:", file=out)
     _print_counter("  where Dreth had grip:", discovery.appeared_learned, out)
     _print_counter("  where Dreth lost grip:", discovery.failed_to_learn, out)
-    _print_counter("  where Dreth falsely trusted:", discovery.over_certified, out)
+    _print_counter(
+        "  authority/evidence mismatch candidates:",
+        discovery.authority_evidence_mismatch_candidates,
+        out,
+    )
     _print_counter("  where Dreth properly withheld authority:", discovery.withheld, out)
 
     print("\nE. Warning:", file=out)

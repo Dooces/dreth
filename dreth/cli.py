@@ -38,7 +38,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--schedule",
                    choices=["shaped", "periodic_shifts", "novelty", "incremental",
                             "rare_catastrophe", "blind_challenge"],
-                   default="shaped",
+                   default="blind_challenge",
                    help="incremental: introduce one variable at a time, "
                         "with `settle_cycles` of value drift between reveals; "
                         "rare_catastrophe: value drift each cycle with rare_prob "
@@ -176,24 +176,32 @@ def _format_operational_view(world: CausalWorld, agent: ChainedAgent, limit: int
 
 def _role_salience_audit_lines(agent: ChainedAgent) -> List[str]:
     drift_fn = drift_fp = op_fn = op_fp = 0
+    structural_by_cycle = {
+        m.cycle: m
+        for m in agent.world.hidden_log
+        if m.rule_changed
+    }
     for r in agent.records:
+        truth_event = structural_by_cycle.get(r.cycle)
+        truth_rule_changed = truth_event is not None
+        truth_affected_var = truth_event.affected_var if truth_event is not None else -1
         detected = bool(r.detected_drift_vars)
         localized = (
-            r.truth_rule_changed
-            and r.truth_affected_var >= 0
-            and r.truth_affected_var in r.detected_drift_vars
+            truth_rule_changed
+            and truth_affected_var >= 0
+            and truth_affected_var in r.detected_drift_vars
         )
-        if r.truth_rule_changed and not detected:
+        if truth_rule_changed and not detected:
             drift_fn += 1
-        elif not r.truth_rule_changed and detected:
+        elif not truth_rule_changed and detected:
             drift_fp += 1
 
         affected = (
-            agent.ledger.vars[r.truth_affected_var]
-            if r.truth_affected_var >= 0 else None
+            agent.ledger.vars[truth_affected_var]
+            if truth_affected_var >= 0 else None
         )
         relevant = (
-            r.truth_rule_changed
+            truth_rule_changed
             and affected is not None
             and affected.role_for("skip") == "tareth"
         )
@@ -206,7 +214,9 @@ def _role_salience_audit_lines(agent: ChainedAgent) -> List[str]:
         1 for d in agent.fit_diagnostics
         if d.failure_class == "restriction_missing"
     )
-    true_missing = sum(1 for d in agent.fit_diagnostics if not d.true_present)
+    true_missing = sum(
+        1 for d in agent.fit_diagnostics if not getattr(d, "true_present", True)
+    )
     trass_revisions = sum(
         1 for e in agent.ledger.event_log
         if "role REVISED trass" in e and "tareth" in e
@@ -243,11 +253,14 @@ def concise_report(args: argparse.Namespace, world: CausalWorld, agent: ChainedA
     records = agent.records
     cycles = len(records)
     structural = [m for m in world.hidden_log if m.rule_changed]
+    structural_cycles = {m.cycle for m in structural}
     localized_hits = sum(
         1 for m in structural
         if any(r.cycle >= m.cycle and m.affected_var in r.detected_drift_vars for r in records)
     )
-    false_positive_cycles = sum(1 for r in records if not r.truth_rule_changed and r.detected_drift_vars)
+    false_positive_cycles = sum(
+        1 for r in records if r.cycle not in structural_cycles and r.detected_drift_vars
+    )
     total_deferred = sum(len(r.deferred_vars) for r in records)
     total_decisions = agent.skip_count + agent.full_audit_count + total_deferred
     skip_rate = agent.skip_count / max(1, total_decisions) * 100
@@ -409,6 +422,7 @@ def run() -> None:
         rng_w_b = random.Random(args.seed)
         world_b = CausalWorld(args.n_vars, rng_w_b, noise_sigma=args.noise_sigma,
                               initial_visible=initial_visible)
+        world_b.prepare_schedule(args.schedule, args.settle_cycles)
         baseline = RefitBaseline(world_b, random.Random(args.seed + 20_000), args.intervention_budget)
         baseline.initialize()
 
@@ -421,7 +435,7 @@ def run() -> None:
         if m.kind == "REVEAL":
             agent.on_variable_revealed(m.affected_var, cycle)
         else:
-            agent.run_cycle(m)
+            agent.run_cycle(cycle)
         if args.baseline:
             mb = world_b.perturb_by_schedule(cycle, args.schedule,
                                              settle_cycles=args.settle_cycles,

@@ -33,13 +33,20 @@ C. Discovery report:
   latent_additive          21
   smooth_nonlinear         20
   symbolic                 13
-  structures Dreth over-certified:
+  external-truth mismatches under authority:
   smooth_nonlinear         11
   weak_noisy               11
   delayed                   6
   latent_additive           5
   proxy_confounded          5
   dense_mixed               4
+  authority/evidence mismatch candidates:
+  weak_noisy               11
+  smooth_nonlinear         10
+  latent_additive           5
+  proxy_confounded          4
+  dense_mixed               4
+  delayed                   4
   structures Dreth left uncertain/stressed:
   symbolic                 19
   proxy_confounded         16
@@ -67,13 +74,13 @@ D. Scope report:
   latent_additive          21
   smooth_nonlinear         20
   symbolic                 13
-  where Dreth falsely trusted:
-  smooth_nonlinear         11
+  authority/evidence mismatch candidates:
   weak_noisy               11
-  delayed                   6
+  smooth_nonlinear         10
   latent_additive           5
-  proxy_confounded          5
+  proxy_confounded          4
   dense_mixed               4
+  delayed                   4
   where Dreth properly withheld authority:
   latent_additive           9
   delayed                   8
