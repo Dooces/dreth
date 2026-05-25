@@ -264,6 +264,82 @@ def test_section_f_hidden_truth_selects_not_classifies(tmp_path: Path, capsys) -
     assert "over-certified" not in output
 
 
+def test_section_g_passive_stress_explicitly_shown(tmp_path: Path, capsys) -> None:
+    # rev=0, drift=0 but passive_stress_recent > 0.  Section G must name
+    # passive_stress_trigger as the active trigger for this case.
+    item = _item(
+        truth_parents=[1],
+        truth_delayed_parents=[],
+        learned_parents=[2],
+        authoritative=True,
+        recent_revocations=0,
+        recent_detected_drift=0,
+        consecutive_sentinel_failures=0,
+        open_novelty_observations=0,
+        passive_stress_recent=3,
+        strong_observations=4,
+        sentinel_count=3,
+        fit_history_count=3,
+        last_fit_margin=5,
+    )
+    path = tmp_path / "authority.jsonl"
+    path.write_text(json.dumps(_row(item)) + "\n")
+
+    print_report(load_jsonl(str(path)))
+    output = capsys.readouterr().out
+
+    assert "G." in output
+    assert "Visible evidence trigger breakdown" in output
+    # passive_stress_trigger must appear with count 1 in the Overall section.
+    assert "passive_stress_trigger:" in output
+    # The top-cases table must list passive_stress_trigger as the active signal.
+    assert "passive_stress_trigger" in output
+    # The case is classified contradicted_authority.
+    assert "contradicted_authority" in output
+    # No banned phrases.
+    assert "falsely trusted" not in output
+    assert "false trust" not in output.lower()
+
+
+def test_section_g_prints_for_all_report_modes(tmp_path: Path, capsys) -> None:
+    path = tmp_path / "authority.jsonl"
+    path.write_text(json.dumps(_row(_contradicted_item())) + "\n")
+
+    for mode in ("conservative", "strict"):
+        print_report(load_jsonl(str(path)), throttle_mode=mode)
+        output = capsys.readouterr().out
+        assert "G." in output
+        assert "Visible evidence trigger breakdown" in output
+        assert "Overall:" in output
+        assert f"mode: {mode}" in output
+
+
+def test_section_g_by_reason_shows_trigger_source(tmp_path: Path, capsys) -> None:
+    # A contradicted case driven by revocations: by_reason must show rev>0.
+    item = _item(
+        truth_parents=[1],
+        learned_parents=[2],
+        recent_revocations=2,
+        recent_detected_drift=0,
+        consecutive_sentinel_failures=0,
+        open_novelty_observations=0,
+        strong_observations=5,
+        sentinel_count=3,
+        fit_history_count=3,
+        last_fit_margin=5,
+    )
+    path = tmp_path / "authority.jsonl"
+    path.write_text(json.dumps(_row(item)) + "\n")
+
+    print_report(load_jsonl(str(path)))
+    output = capsys.readouterr().out
+
+    # The by_reason block for contradicted_authority should mention rev.
+    assert "By throttle reason" in output
+    assert "contradicted_authority" in output
+    assert "rev=1" in output
+
+
 def test_report_avoids_false_trust_from_hidden_truth_only(tmp_path: Path, capsys) -> None:
     path = tmp_path / "authority.jsonl"
     path.write_text(json.dumps(_row(_item())) + "\n")

@@ -29,6 +29,42 @@ CLASSIFICATIONS = (
 
 THROTTLE_MODES = ("conservative", "strict")
 
+TRIGGER_NAMES = (
+    "recent_revocations_trigger",
+    "recent_detected_drift_trigger",
+    "consecutive_sentinel_failure_trigger",
+    "open_novelty_trigger",
+    "passive_stress_trigger",
+    "low_strong_observations_trigger",
+    "low_sentinel_count_trigger",
+    "low_fit_history_trigger",
+    "low_margin_trigger",
+    "alternatives_or_ties_trigger",
+)
+
+
+@dataclass
+class EvidenceTriggers:
+    """Boolean flags for each individual observable contradiction or low-evidence signal."""
+
+    recent_revocations_trigger: bool
+    recent_detected_drift_trigger: bool
+    consecutive_sentinel_failure_trigger: bool
+    open_novelty_trigger: bool
+    passive_stress_trigger: bool
+    low_strong_observations_trigger: bool
+    low_sentinel_count_trigger: bool
+    low_fit_history_trigger: bool
+    low_margin_trigger: bool
+    alternatives_or_ties_trigger: bool
+
+    def active_names(self) -> list[str]:
+        """Return names of all triggers that are True."""
+        return [n for n in TRIGGER_NAMES if getattr(self, n)]
+
+    def count_active(self) -> int:
+        return sum(getattr(self, n) for n in TRIGGER_NAMES)
+
 
 @dataclass
 class AuthorityThrottleDecision:
@@ -47,6 +83,17 @@ class AuthorityThrottleDecision:
     alternatives_existed: bool
     tie_count: int
     near_tie_count: int
+    # Per-signal trigger flags
+    recent_revocations_trigger: bool
+    recent_detected_drift_trigger: bool
+    consecutive_sentinel_failure_trigger: bool
+    open_novelty_trigger: bool
+    passive_stress_trigger: bool
+    low_strong_observations_trigger: bool
+    low_sentinel_count_trigger: bool
+    low_fit_history_trigger: bool
+    low_margin_trigger: bool
+    alternatives_or_ties_trigger: bool
 
 
 def _as_int(value: Any) -> int:
@@ -122,6 +169,45 @@ def classify_visible_authority_evidence(item: dict[str, Any]) -> str:
     return "unknown"
 
 
+def extract_evidence_triggers(item: dict[str, Any]) -> EvidenceTriggers:
+    """Extract all observable contradiction and low-evidence signal flags from an item.
+
+    Each flag reflects exactly one observable evidence condition. Never reads
+    truth_parents, truth_func, or any hidden-world field.
+    """
+    return EvidenceTriggers(
+        recent_revocations_trigger=_as_int(item.get("recent_revocations")) >= 2,
+        recent_detected_drift_trigger=_as_int(item.get("recent_detected_drift")) >= 2,
+        consecutive_sentinel_failure_trigger=_as_int(item.get("consecutive_sentinel_failures")) > 0,
+        open_novelty_trigger=_as_int(item.get("open_novelty_observations")) > 0,
+        passive_stress_trigger=(
+            item.get("passive_stress_recent") is not None
+            and _as_int(item.get("passive_stress_recent")) > 0
+        ),
+        low_strong_observations_trigger=(
+            "strong_observations" in item
+            and _as_int(item.get("strong_observations")) <= 0
+        ),
+        low_sentinel_count_trigger=(
+            "sentinel_count" in item
+            and _as_int(item.get("sentinel_count")) <= 0
+        ),
+        low_fit_history_trigger=(
+            "fit_history_count" in item
+            and _as_int(item.get("fit_history_count")) <= 0
+        ),
+        low_margin_trigger=(
+            item.get("last_fit_margin") is not None
+            and _as_int(item.get("last_fit_margin")) <= 0
+        ),
+        alternatives_or_ties_trigger=(
+            bool(item.get("alternatives_existed"))
+            or _as_int(item.get("last_fit_tie_count")) > 1
+            or _as_int(item.get("last_fit_near_tie_count")) > 1
+        ),
+    )
+
+
 def would_throttle_authority(
     item: dict[str, Any], mode: str = "conservative"
 ) -> AuthorityThrottleDecision:
@@ -168,6 +254,8 @@ def would_throttle_authority(
             would_throttle = True
             reason = "weakly_supported_strict"
 
+    trig = extract_evidence_triggers(item)
+
     return AuthorityThrottleDecision(
         var=_as_int(item.get("var", 0)),
         reason=reason,
@@ -184,4 +272,14 @@ def would_throttle_authority(
         alternatives_existed=alternatives_existed,
         tie_count=tie_count,
         near_tie_count=near_tie_count,
+        recent_revocations_trigger=trig.recent_revocations_trigger,
+        recent_detected_drift_trigger=trig.recent_detected_drift_trigger,
+        consecutive_sentinel_failure_trigger=trig.consecutive_sentinel_failure_trigger,
+        open_novelty_trigger=trig.open_novelty_trigger,
+        passive_stress_trigger=trig.passive_stress_trigger,
+        low_strong_observations_trigger=trig.low_strong_observations_trigger,
+        low_sentinel_count_trigger=trig.low_sentinel_count_trigger,
+        low_fit_history_trigger=trig.low_fit_history_trigger,
+        low_margin_trigger=trig.low_margin_trigger,
+        alternatives_or_ties_trigger=trig.alternatives_or_ties_trigger,
     )

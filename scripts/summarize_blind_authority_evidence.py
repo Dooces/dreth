@@ -6,7 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from collections import Counter
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, TextIO
@@ -218,6 +218,155 @@ def _print_cases(title: str, cases: list[dict[str, Any]], out: TextIO, limit: in
         print(f"  ... +{len(cases) - limit} more", file=out)
 
 
+# Abbreviated column labels for the by_relation_type table in section G.
+_TRIG_ABBREVS = {
+    "recent_revocations_trigger": "rev",
+    "recent_detected_drift_trigger": "drift",
+    "consecutive_sentinel_failure_trigger": "sent",
+    "open_novelty_trigger": "novl",
+    "passive_stress_trigger": "strs",
+    "low_strong_observations_trigger": "l_ob",
+    "low_sentinel_count_trigger": "l_sn",
+    "low_fit_history_trigger": "l_ft",
+    "low_margin_trigger": "l_mg",
+    "alternatives_or_ties_trigger": "alts",
+}
+
+
+def _build_trigger_data(
+    summary: "AuthorityEvidenceSummary", mode: str
+) -> dict[str, Any]:
+    from dreth.shadow_authority_throttle import (
+        TRIGGER_NAMES,
+        extract_evidence_triggers,
+        would_throttle_authority,
+    )
+
+    overall: Counter[str] = Counter()
+    by_relation: dict[str, Counter[str]] = defaultdict(Counter)
+    by_reason: dict[str, Counter[str]] = defaultdict(Counter)
+    reason_case_counts: Counter[str] = Counter()
+    top_cases: list[dict[str, Any]] = []
+
+    for case, item in zip(summary.external_mismatch_cases, summary.external_mismatch_items):
+        trig = extract_evidence_triggers(item)
+        decision = would_throttle_authority(item, mode=mode)
+        rel = str(item.get("relation_type", "unknown"))
+        reason = decision.reason
+
+        reason_case_counts[reason] += 1
+        active = trig.active_names()
+        for name in active:
+            overall[name] += 1
+            by_relation[rel][name] += 1
+            by_reason[reason][name] += 1
+
+        if active:
+            top_cases.append({
+                "seed": case.get("seed"),
+                "var": item.get("var"),
+                "relation_type": rel,
+                "reason": reason,
+                "active_triggers": active,
+                "trigger_count": len(active),
+            })
+
+    top_cases.sort(key=lambda c: -c["trigger_count"])
+    return {
+        "overall": overall,
+        "by_relation": dict(by_relation),
+        "by_reason": dict(by_reason),
+        "reason_case_counts": reason_case_counts,
+        "top_cases": top_cases[:20],
+        "trigger_names": TRIGGER_NAMES,
+        "total": len(summary.external_mismatch_items),
+    }
+
+
+def _print_trigger_section(
+    summary: "AuthorityEvidenceSummary", mode: str, out: TextIO
+) -> None:
+    data = _build_trigger_data(summary, mode)
+    total = data["total"]
+    overall = data["overall"]
+    trigger_names = data["trigger_names"]
+    by_relation = data["by_relation"]
+    by_reason = data["by_reason"]
+    reason_case_counts = data["reason_case_counts"]
+    top_cases = data["top_cases"]
+
+    print(f"\nG. Visible evidence trigger breakdown ({total} cases):", file=out)
+    print(
+        "  Offline accounting only. Trigger flags are derived from agent-visible\n"
+        "  evidence fields only; hidden-world fields are not read.",
+        file=out,
+    )
+
+    # Overall counts
+    print("\n  Overall:", file=out)
+    w = 44
+    for name in trigger_names:
+        print(f"    {name + ':':<{w}} {overall[name]:>5}", file=out)
+
+    # By relation_type
+    if by_relation:
+        abbrevs = [_TRIG_ABBREVS[n] for n in trigger_names]
+        legend = (
+            "  By relation_type  (rev=revocations drift=drift_detect sent=sentinel_fail "
+            "novl=open_novelty\n"
+            "    strs=passive_stress l_ob=low_obs l_sn=low_sent l_ft=low_fit "
+            "l_mg=low_margin alts=alts_ties):"
+        )
+        print(f"\n{legend}", file=out)
+        header_cols = " ".join(f"{a:>5}" for a in abbrevs)
+        print(f"    {'relation_type':<24} {header_cols}", file=out)
+        for rel in sorted(by_relation):
+            counts_str = " ".join(
+                f"{by_relation[rel].get(n, 0):>5}" for n in trigger_names
+            )
+            print(f"    {rel:<24} {counts_str}", file=out)
+
+    # By throttle reason
+    if by_reason or reason_case_counts:
+        print(f"\n  By throttle reason (mode: {mode}):", file=out)
+        all_reasons = sorted(
+            set(by_reason) | set(reason_case_counts),
+            key=lambda r: (r == "no_throttle", r),
+        )
+        for reason in all_reasons:
+            n_cases = reason_case_counts.get(reason, 0)
+            reason_triggers = by_reason.get(reason, {})
+            parts = [
+                f"{_TRIG_ABBREVS[n]}={reason_triggers[n]}"
+                for n in trigger_names
+                if reason_triggers.get(n, 0) > 0
+            ]
+            suffix = " ".join(parts) if parts else "(no active triggers)"
+            print(f"    {reason} ({n_cases} cases): {suffix}", file=out)
+
+    # Top 20 cases with explicit triggers
+    print(
+        f"\n  Top {min(20, len(top_cases))} cases with active triggers:",
+        file=out,
+    )
+    if not top_cases:
+        print("    (none)", file=out)
+    else:
+        print(
+            f"    {'seed':>6} {'var':>4} {'relation':<22} {'reason':<25} triggers",
+            file=out,
+        )
+        for case in top_cases:
+            triggers_str = " ".join(case["active_triggers"])
+            print(
+                f"    {str(case.get('seed')):>6} {str(case.get('var')):>4} "
+                f"{str(case.get('relation_type')):<22} "
+                f"{str(case.get('reason')):<25} "
+                f"{triggers_str}",
+                file=out,
+            )
+
+
 def _throttle_counts(
     items: list[dict[str, Any]], mode: str
 ) -> dict[str, int]:
@@ -313,6 +462,7 @@ def print_report(
     )
 
     _print_throttle_section(summary, throttle_mode, out)
+    _print_trigger_section(summary, throttle_mode, out)
 
 
 def main(argv: list[str] | None = None) -> int:

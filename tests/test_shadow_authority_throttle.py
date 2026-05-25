@@ -9,7 +9,10 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from dreth.shadow_authority_throttle import (
+    TRIGGER_NAMES,
+    EvidenceTriggers,
     classify_visible_authority_evidence,
+    extract_evidence_triggers,
     would_throttle_authority,
 )
 
@@ -306,3 +309,172 @@ def test_decision_fields_populated() -> None:
 def test_invalid_mode_raises() -> None:
     with pytest.raises(ValueError, match="Unknown throttle mode"):
         would_throttle_authority(_item(), mode="aggressive")
+
+
+# ---------------------------------------------------------------------------
+# EvidenceTriggers / extract_evidence_triggers
+# ---------------------------------------------------------------------------
+
+
+def test_extract_evidence_triggers_passive_stress_only() -> None:
+    # rev=0, drift=0, but passive_stress_recent > 0: only passive_stress fires.
+    item = _item(
+        recent_revocations=0,
+        recent_detected_drift=0,
+        consecutive_sentinel_failures=0,
+        open_novelty_observations=0,
+        passive_stress_recent=3,
+        strong_observations=4,
+        sentinel_count=3,
+        fit_history_count=3,
+        last_fit_margin=5,
+    )
+    trig = extract_evidence_triggers(item)
+
+    assert trig.passive_stress_trigger is True
+    assert trig.recent_revocations_trigger is False
+    assert trig.recent_detected_drift_trigger is False
+    assert trig.consecutive_sentinel_failure_trigger is False
+    assert trig.open_novelty_trigger is False
+    assert trig.low_strong_observations_trigger is False
+    assert trig.low_sentinel_count_trigger is False
+    assert trig.low_fit_history_trigger is False
+    assert trig.low_margin_trigger is False
+    assert trig.alternatives_or_ties_trigger is False
+
+    assert trig.active_names() == ["passive_stress_trigger"]
+    assert trig.count_active() == 1
+
+    # Item is contradicted_authority due to passive stress alone.
+    assert classify_visible_authority_evidence(item) == "contradicted_authority"
+
+
+def test_extract_evidence_triggers_all_clear() -> None:
+    item = _item(
+        recent_revocations=0,
+        recent_detected_drift=0,
+        consecutive_sentinel_failures=0,
+        open_novelty_observations=0,
+        strong_observations=4,
+        sentinel_count=3,
+        fit_history_count=3,
+        last_fit_margin=5,
+        last_fit_tie_count=1,
+        last_fit_near_tie_count=1,
+        alternatives_existed=False,
+        repeatedly_stable_under_probes=True,
+    )
+    trig = extract_evidence_triggers(item)
+
+    assert trig.active_names() == []
+    assert trig.count_active() == 0
+
+
+def test_extract_evidence_triggers_multiple_contradiction_signals() -> None:
+    item = _item(
+        recent_revocations=2,
+        recent_detected_drift=2,
+        consecutive_sentinel_failures=1,
+        open_novelty_observations=1,
+        passive_stress_recent=1,
+        strong_observations=4,
+        sentinel_count=3,
+        fit_history_count=3,
+        last_fit_margin=5,
+    )
+    trig = extract_evidence_triggers(item)
+
+    assert trig.recent_revocations_trigger is True
+    assert trig.recent_detected_drift_trigger is True
+    assert trig.consecutive_sentinel_failure_trigger is True
+    assert trig.open_novelty_trigger is True
+    assert trig.passive_stress_trigger is True
+    assert trig.count_active() == 5
+
+
+def test_extract_evidence_triggers_low_evidence_fields() -> None:
+    item = _item(
+        recent_revocations=0,
+        recent_detected_drift=0,
+        strong_observations=0,
+        sentinel_count=0,
+        fit_history_count=0,
+        last_fit_margin=0,
+    )
+    trig = extract_evidence_triggers(item)
+
+    assert trig.low_strong_observations_trigger is True
+    assert trig.low_sentinel_count_trigger is True
+    assert trig.low_fit_history_trigger is True
+    assert trig.low_margin_trigger is True
+
+
+def test_extract_evidence_triggers_alternatives_or_ties() -> None:
+    item_alt = _item(alternatives_existed=True)
+    item_tie = _item(last_fit_tie_count=2)
+    item_near = _item(last_fit_near_tie_count=2)
+
+    assert extract_evidence_triggers(item_alt).alternatives_or_ties_trigger is True
+    assert extract_evidence_triggers(item_tie).alternatives_or_ties_trigger is True
+    assert extract_evidence_triggers(item_near).alternatives_or_ties_trigger is True
+
+    item_none = _item(
+        alternatives_existed=False, last_fit_tie_count=1, last_fit_near_tie_count=1
+    )
+    assert extract_evidence_triggers(item_none).alternatives_or_ties_trigger is False
+
+
+def test_extract_evidence_triggers_ignores_truth_fields() -> None:
+    item = _item(
+        truth_parents=[1, 2],
+        truth_func="HIDDEN",
+        truth_delayed_parents=[3],
+        recent_revocations=0,
+        recent_detected_drift=0,
+        strong_observations=4,
+        sentinel_count=3,
+        fit_history_count=3,
+        last_fit_margin=5,
+    )
+    item_no_truth = {
+        k: v
+        for k, v in item.items()
+        if k not in ("truth_parents", "truth_func", "truth_delayed_parents")
+    }
+    assert extract_evidence_triggers(item).active_names() == extract_evidence_triggers(item_no_truth).active_names()
+
+
+def test_decision_trigger_fields_populated() -> None:
+    # Item with recent_revocations=2 only — only rev trigger fires.
+    item = _item(
+        var=3,
+        recent_revocations=2,
+        recent_detected_drift=0,
+        consecutive_sentinel_failures=0,
+        open_novelty_observations=0,
+        strong_observations=5,
+        sentinel_count=3,
+        fit_history_count=3,
+        last_fit_margin=5,
+        last_fit_tie_count=1,
+        last_fit_near_tie_count=1,
+        alternatives_existed=False,
+    )
+    decision = would_throttle_authority(item)
+
+    assert decision.recent_revocations_trigger is True
+    assert decision.recent_detected_drift_trigger is False
+    assert decision.consecutive_sentinel_failure_trigger is False
+    assert decision.open_novelty_trigger is False
+    assert decision.passive_stress_trigger is False
+    assert decision.low_strong_observations_trigger is False
+    assert decision.low_sentinel_count_trigger is False
+    assert decision.low_fit_history_trigger is False
+    assert decision.low_margin_trigger is False
+    assert decision.alternatives_or_ties_trigger is False
+
+
+def test_evidence_triggers_type_exported() -> None:
+    assert EvidenceTriggers is not None
+    assert TRIGGER_NAMES is not None
+    assert len(TRIGGER_NAMES) == 10
