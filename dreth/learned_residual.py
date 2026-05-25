@@ -25,7 +25,7 @@ from __future__ import annotations
 import collections
 import dataclasses
 import math
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 
 # ── Feature / label dataclasses (for future batch training) ──────────────────
@@ -169,13 +169,151 @@ class OnlineResidualCalibrator:
         return ok, not ok, insufficient
 
 
+# ── Feature-conditioned calibrator ───────────────────────────────────────────
+
+class FeatureConditionedResidualCalibrator:
+    """Multi-key backoff residual calibrator conditioned on ResidualFeatureVector fields.
+
+    Maintains rolling stats for five key levels, ordered most-specific to least:
+      1. ("func_var",  func, var)
+      2. ("func_tier_parent", func, consequence_tier, parent_count)
+      3. ("func_tier", func, consequence_tier)
+      4. ("func",      func)
+      5. ("global",)
+
+    Prediction picks the most-specific key with >= min_samples observations.
+    Returns stressed/insufficient when no key qualifies.
+
+    No ledger reference. Receives only ResidualFeatureVector + scalar residual.
+    """
+
+    KEY_FUNC_VAR        = "func_var"
+    KEY_FUNC_TIER_PARENT = "func_tier_parent"
+    KEY_FUNC_TIER       = "func_tier"
+    KEY_FUNC            = "func"
+    KEY_GLOBAL          = "global"
+
+    def __init__(
+        self,
+        conservative_factor: float = 0.4,
+        min_samples: int = 50,
+        window: int = 200,
+    ) -> None:
+        self.conservative_factor = conservative_factor
+        self.min_samples = min_samples
+        self._window = window
+        self._stats: Dict[Tuple, _RollingStats] = {}
+
+        # Last-prediction metadata (set by predict(); read by predictor for forwarding)
+        self._last_key_used: Optional[Tuple] = None
+        self._last_key_n: int = 0
+        self._last_upper_bound: float = float("nan")
+        self._last_threshold: float = float("nan")
+        self._last_derived_features: Dict[str, Any] = {}
+
+    def _get_or_create(self, key: Tuple) -> _RollingStats:
+        if key not in self._stats:
+            self._stats[key] = _RollingStats(window=self._window)
+        return self._stats[key]
+
+    @staticmethod
+    def _count_bucket(value: int) -> str:
+        if value <= 0:
+            return "0"
+        if value == 1:
+            return "1"
+        if value <= 3:
+            return "2-3"
+        if value <= 7:
+            return "4-7"
+        return "8+"
+
+    @staticmethod
+    def _age_bucket(value: int) -> str:
+        if value <= 0:
+            return "0"
+        if value <= 10:
+            return "1-10"
+        if value <= 50:
+            return "11-50"
+        if value <= 200:
+            return "51-200"
+        return "201+"
+
+    @staticmethod
+    def _var_bucket(var: int) -> str:
+        return f"{(max(0, var) // 10) * 10}-{(max(0, var) // 10) * 10 + 9}"
+
+    def derived_features(self, fv: "ResidualFeatureVector") -> Dict[str, Any]:
+        """Return feature keys derived only from ResidualFeatureVector fields."""
+        return {
+            "parent_count": len(fv.parents),
+            "consequence_tier": fv.consequence_tier,
+            "sentinel_count_bucket": self._count_bucket(fv.sentinel_count),
+            "cert_age_bucket": self._age_bucket(fv.cert_age),
+            "full_audits_bucket": self._count_bucket(fv.full_audits),
+            "var": fv.var,
+            "var_bucket": self._var_bucket(fv.var),
+            "func": fv.func,
+        }
+
+    def _make_keys(self, fv: "ResidualFeatureVector") -> List[Tuple]:
+        derived = self.derived_features(fv)
+        parent_count = derived["parent_count"]
+        tier = derived["consequence_tier"]
+        self._last_derived_features = derived
+        return [
+            (self.KEY_FUNC_VAR,         fv.func, fv.var),
+            (self.KEY_FUNC_TIER_PARENT, fv.func, tier, parent_count),
+            (self.KEY_FUNC_TIER,        fv.func, tier),
+            (self.KEY_FUNC,             fv.func),
+            (self.KEY_GLOBAL,),
+        ]
+
+    def update(self, fv: "ResidualFeatureVector", residual: float) -> None:
+        """Update rolling stats for all key levels from a single observation."""
+        for key in self._make_keys(fv):
+            self._get_or_create(key).update(residual)
+
+    def predict(
+        self,
+        fv: "ResidualFeatureVector",
+        tolerance: float,
+    ) -> Tuple[bool, bool, bool]:
+        """Return (ok, stressed, insufficient).
+
+        Tries keys from most- to least-specific; uses the first with >= min_samples.
+        Sets self._last_key_used etc. for predictor metadata forwarding.
+        When no key qualifies, returns conservative (False, True, True).
+        """
+        threshold = tolerance * self.conservative_factor
+        for key in self._make_keys(fv):
+            stats = self._stats.get(key)
+            if stats is None or stats.n < self.min_samples:
+                continue
+            upper = stats.upper_bound
+            ok = upper <= threshold
+            self._last_key_used = key
+            self._last_key_n = stats.n
+            self._last_upper_bound = upper
+            self._last_threshold = threshold
+            return ok, not ok, False
+
+        self._last_key_used = None
+        self._last_key_n = 0
+        self._last_upper_bound = float("nan")
+        self._last_threshold = threshold
+        return False, True, True
+
+
 # ── Shadow predictor ──────────────────────────────────────────────────────────
 
 class ShadowLearnedResidualPredictor:
     """Shadow-mode learned residual predictor (Stage 3A).
 
-    Wraps OnlineResidualCalibrator to provide a ResidualPrediction-compatible
-    interface, but predictions are NEVER used for gating.
+    Wraps either OnlineResidualCalibrator (mode="rolling") or
+    FeatureConditionedResidualCalibrator (mode="feature").  Predictions are
+    NEVER used for gating.
 
     Design invariants:
       - No ledger reference (cannot issue certs or mutate state).
@@ -184,10 +322,18 @@ class ShadowLearnedResidualPredictor:
       - observe() updates the calibrator from symbolic residual only.
     """
 
-    def __init__(self, calibrator: Optional[OnlineResidualCalibrator] = None) -> None:
-        if calibrator is None:
+    def __init__(
+        self,
+        calibrator: Optional[Union[str, Any]] = None,  # mode string or calibrator instance
+    ) -> None:
+        if calibrator is None or calibrator == "rolling":
             calibrator = OnlineResidualCalibrator()
+        elif calibrator == "feature":
+            calibrator = FeatureConditionedResidualCalibrator()
+        elif isinstance(calibrator, str):
+            raise ValueError(f"unknown shadow residual calibrator mode: {calibrator!r}")
         self._calibrator = calibrator
+        self._is_feature_mode: bool = isinstance(calibrator, FeatureConditionedResidualCalibrator)
 
         # Per-call shadow counters
         self.calls: int = 0
@@ -197,21 +343,61 @@ class ShadowLearnedResidualPredictor:
         # Set to True after each predict_shadow call when samples were insufficient
         self._last_call_insufficient: bool = False
 
+        # Prediction metadata (diagnostic; set each call)
+        # feature mode: forwarded from calibrator; rolling mode: None/nan
+        self._last_key_used: Optional[Tuple] = None
+        self._last_key_sample_count: int = 0
+        self._last_upper_bound: float = float("nan")
+        self._last_threshold: float = float("nan")
+
+    @property
+    def last_prediction_metadata(self) -> Dict[str, Any]:
+        """Diagnostic metadata from the most recent shadow prediction."""
+        return {
+            "key_used": self._last_key_used,
+            "key_sample_count": self._last_key_sample_count,
+            "upper_bound": self._last_upper_bound,
+            "threshold": self._last_threshold,
+        }
+
     def predict_shadow(
         self,
         var: int,
         func: str,
         tolerance: float,
+        fv: Optional["ResidualFeatureVector"] = None,
     ) -> "ResidualPrediction":  # type: ignore[name-defined]
         """Return shadow ResidualPrediction — NEVER used for gating.
 
-        Sets self._last_call_insufficient for easy agent-side accounting.
+        In feature mode, uses fv for key-conditioned prediction.
+        In rolling mode, uses func + tolerance (fv ignored).
+        Sets self._last_call_insufficient and metadata for agent-side accounting.
         residual/predicted/actual fields are nan (shadow has no world access).
         """
         from .hybrid import ResidualPrediction
 
         self.calls += 1
-        is_ok, is_stressed, insufficient = self._calibrator.predict(func, tolerance)
+
+        if self._is_feature_mode:
+            if fv is None:
+                is_ok, is_stressed, insufficient = False, True, True
+                self._last_key_used = None
+                self._last_key_sample_count = 0
+                self._last_upper_bound = float("nan")
+                self._last_threshold = tolerance * self._calibrator.conservative_factor  # type: ignore[union-attr]
+            else:
+                is_ok, is_stressed, insufficient = self._calibrator.predict(fv, tolerance)  # type: ignore[union-attr]
+                self._last_key_used = self._calibrator._last_key_used  # type: ignore[union-attr]
+                self._last_key_sample_count = self._calibrator._last_key_n  # type: ignore[union-attr]
+                self._last_upper_bound = self._calibrator._last_upper_bound  # type: ignore[union-attr]
+                self._last_threshold = self._calibrator._last_threshold  # type: ignore[union-attr]
+        else:
+            is_ok, is_stressed, insufficient = self._calibrator.predict(func, tolerance)
+            self._last_key_used = None
+            self._last_key_sample_count = 0
+            self._last_upper_bound = float("nan")
+            self._last_threshold = float("nan")
+
         self._last_call_insufficient = insufficient
 
         if insufficient:
@@ -227,11 +413,19 @@ class ShadowLearnedResidualPredictor:
             residual=float("nan"), predicted=float("nan"), actual=float("nan"),
         )
 
-    def observe(self, func: str, residual: float) -> None:
+    def observe(
+        self,
+        func: str,
+        residual: float,
+        fv: Optional["ResidualFeatureVector"] = None,
+    ) -> None:
         """Update calibrator with an observed symbolic residual.
 
-        Called by ChainedAgent after the symbolic path has computed the actual
-        residual. Does not read world.parents, world.funcs, or hidden_log.
-        Only trains on: func + scalar residual value.
+        In feature mode, uses fv for key-conditioned update.
+        In rolling mode, uses func (fv ignored).
+        Does not read world.parents, world.funcs, or hidden_log.
         """
-        self._calibrator.update(func, residual)
+        if self._is_feature_mode and fv is not None:
+            self._calibrator.update(fv, residual)  # type: ignore[union-attr]
+        else:
+            self._calibrator.update(func, residual)

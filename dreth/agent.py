@@ -92,7 +92,7 @@ from .hybrid import (
     SymbolicResidualPredictor, SensitivityParentRanker,
 )
 from .repair_agenda import RepairAgenda, RepairAgendaItem
-from .learned_residual import ShadowLearnedResidualPredictor
+from .learned_residual import ResidualFeatureVector, ShadowLearnedResidualPredictor
 
 # ── Trass authority thresholds ────────────────────────────────────────────────
 # A trass cert suppresses future sentinel monitoring — the strongest authority
@@ -444,6 +444,19 @@ class ChainedAgent:
         self._shadow_would_miss_symbolic_stress: int = 0
         self._shadow_false_ok_vs_active_sentinel: int = 0
         self._shadow_would_miss_active_failure: int = 0
+        # Feature-conditioned calibrator key-usage counters (nonzero only in feature mode)
+        self._shadow_feature_key_func_var: int = 0
+        self._shadow_feature_key_func_tier_parentcount: int = 0
+        self._shadow_feature_key_func_tier: int = 0
+        self._shadow_feature_key_func: int = 0
+        self._shadow_feature_key_global: int = 0
+        self._shadow_feature_key_insufficient: int = 0
+        # false_ok per key (feature mode only; insufficient cannot produce false_ok)
+        self._shadow_feature_fok_func_var: int = 0
+        self._shadow_feature_fok_func_tier_parentcount: int = 0
+        self._shadow_feature_fok_func_tier: int = 0
+        self._shadow_feature_fok_func: int = 0
+        self._shadow_feature_fok_global: int = 0
 
     def _adaptive_probe_budget(self, n_hypotheses: int) -> int:
         """Return the number of probes to use for a hypothesis space of size
@@ -2739,17 +2752,35 @@ class ChainedAgent:
                     _symbolic_passive_ok = _symbolic_residual_value <= n.current_tolerance
                     _symbolic_passive_stressed = not _symbolic_passive_ok
 
+                    # Build a ResidualFeatureVector for feature-conditioned calibration.
+                    # Only uses already-visible agent/world state — no hidden truth.
+                    _shadow_fv = ResidualFeatureVector(
+                        var=var,
+                        cycle=cycle,
+                        parents=tuple(n.parents),
+                        func=n.func,
+                        parent_vals=tuple(_shadow_pv),
+                        actual=self.world.state[var],
+                        tolerance=n.current_tolerance,
+                        consequence_tier=self._consequence_tier(var),
+                        full_audits=n.full_audits,
+                        sentinel_count=len(n.sentinels),
+                        cert_age=(cycle - n.first_certified_cycle) if n.first_certified_cycle > 0 else 0,
+                    )
+
                     # predict_shadow BEFORE observe — shadow must not train on the
                     # current sample before predicting it. This order is the core
                     # honesty guarantee: the predictor sees only history, not the future.
                     _sp = self._shadow_residual_predictor.predict_shadow(  # type: ignore[union-attr]
-                        var, n.func, n.current_tolerance
+                        var, n.func, n.current_tolerance, fv=_shadow_fv
                     )
                     _sp_insufficient = self._shadow_residual_predictor._last_call_insufficient  # type: ignore[union-attr]
 
                     # observe AFTER predicting — calibrator learns from the actual
                     # symbolic residual using FUNC_LIBRARY (never from provider output).
-                    self._shadow_residual_predictor.observe(n.func, _symbolic_residual_value)  # type: ignore[union-attr]
+                    self._shadow_residual_predictor.observe(  # type: ignore[union-attr]
+                        n.func, _symbolic_residual_value, fv=_shadow_fv
+                    )
 
                     # Track per-call counters
                     self._shadow_residual_calls += 1
@@ -2774,6 +2805,32 @@ class ChainedAgent:
                         self._shadow_would_save_iv += len(n.sentinels)
                         if _symbolic_passive_stressed:
                             self._shadow_would_miss_symbolic_stress += len(n.sentinels)
+
+                    # Feature-calibrator key-usage and false-ok-per-key counters.
+                    if self._shadow_residual_predictor._is_feature_mode:  # type: ignore[union-attr]
+                        _lku = self._shadow_residual_predictor._last_key_used  # type: ignore[union-attr]
+                        if _lku is None:
+                            self._shadow_feature_key_insufficient += 1
+                        elif _lku[0] == "func_var":
+                            self._shadow_feature_key_func_var += 1
+                            if _sp.ok and _symbolic_passive_stressed:
+                                self._shadow_feature_fok_func_var += 1
+                        elif _lku[0] == "func_tier_parent":
+                            self._shadow_feature_key_func_tier_parentcount += 1
+                            if _sp.ok and _symbolic_passive_stressed:
+                                self._shadow_feature_fok_func_tier_parentcount += 1
+                        elif _lku[0] == "func_tier":
+                            self._shadow_feature_key_func_tier += 1
+                            if _sp.ok and _symbolic_passive_stressed:
+                                self._shadow_feature_fok_func_tier += 1
+                        elif _lku[0] == "func":
+                            self._shadow_feature_key_func += 1
+                            if _sp.ok and _symbolic_passive_stressed:
+                                self._shadow_feature_fok_func += 1
+                        else:  # "global"
+                            self._shadow_feature_key_global += 1
+                            if _sp.ok and _symbolic_passive_stressed:
+                                self._shadow_feature_fok_global += 1
 
             # Parked sentinel skip: leaf cert redundant — higher handle covered
             # this var for _PARK_W+ cycles with no unique failures.

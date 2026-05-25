@@ -40,7 +40,7 @@ from collections import Counter
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -55,7 +55,11 @@ from dreth.hybrid import (
     DiscriminationProbeProposer,
     FuncLibraryRouter,
 )
-from dreth.learned_residual import ShadowLearnedResidualPredictor, OnlineResidualCalibrator
+from dreth.learned_residual import (
+    ShadowLearnedResidualPredictor,
+    OnlineResidualCalibrator,
+    FeatureConditionedResidualCalibrator,
+)
 
 
 # ── sweep parser utilities ─────────────────────────────────────────────────────
@@ -82,7 +86,8 @@ class RunConfig:
     log_interval: int = 0       # 0 = disabled; N = print progress every N cycles
     hybrid_control: str = "off" # "off" | "interfaces"
     repair_agenda_enabled: bool = False
-    shadow_residual: str = "off"  # "off" | "online"
+    shadow_residual: str = "off"   # "off" | "online"
+    shadow_calibrator: str = "rolling"  # "rolling" | "feature"
     shadow_conservative_factor: float = 0.4
     shadow_min_samples: int = 50
     shadow_window: int = 200
@@ -182,6 +187,18 @@ class ArchMetrics:
     shadow_would_miss_symbolic_stress: int = 0
     shadow_false_ok_vs_active_sentinel: int = 0
     shadow_would_miss_active_failure: int = 0
+    # Feature-calibrator key-usage counters (nonzero only when shadow_calibrator=feature)
+    shadow_feature_key_func_var: int = 0
+    shadow_feature_key_func_tier_parentcount: int = 0
+    shadow_feature_key_func_tier: int = 0
+    shadow_feature_key_func: int = 0
+    shadow_feature_key_global: int = 0
+    shadow_feature_key_insufficient: int = 0
+    shadow_feature_fok_func_var: int = 0
+    shadow_feature_fok_func_tier_parentcount: int = 0
+    shadow_feature_fok_func_tier: int = 0
+    shadow_feature_fok_func: int = 0
+    shadow_feature_fok_global: int = 0
 
     # Hybrid control metrics (nonzero only when hybrid-control=interfaces)
     hybrid_residual_predictor_calls: int = 0
@@ -492,13 +509,19 @@ def _build_and_run_dreth(
     _shadow_predictor = None
     _shadow_enabled = False
     if cfg.shadow_residual == "online":
-        _shadow_predictor = ShadowLearnedResidualPredictor(
-            OnlineResidualCalibrator(
+        if cfg.shadow_calibrator == "feature":
+            _cal: Any = FeatureConditionedResidualCalibrator(
                 conservative_factor=cfg.shadow_conservative_factor,
                 min_samples=cfg.shadow_min_samples,
                 window=cfg.shadow_window,
             )
-        )
+        else:
+            _cal = OnlineResidualCalibrator(
+                conservative_factor=cfg.shadow_conservative_factor,
+                min_samples=cfg.shadow_min_samples,
+                window=cfg.shadow_window,
+            )
+        _shadow_predictor = ShadowLearnedResidualPredictor(_cal)
         _shadow_enabled = True
 
     agent = ChainedAgent(
@@ -744,6 +767,17 @@ def _extract_arch_metrics(agent: ChainedAgent, world: CausalWorld) -> ArchMetric
     m.shadow_would_miss_symbolic_stress = getattr(agent, "_shadow_would_miss_symbolic_stress", 0)
     m.shadow_false_ok_vs_active_sentinel = getattr(agent, "_shadow_false_ok_vs_active_sentinel", 0)
     m.shadow_would_miss_active_failure = getattr(agent, "_shadow_would_miss_active_failure", 0)
+    m.shadow_feature_key_func_var             = getattr(agent, "_shadow_feature_key_func_var", 0)
+    m.shadow_feature_key_func_tier_parentcount = getattr(agent, "_shadow_feature_key_func_tier_parentcount", 0)
+    m.shadow_feature_key_func_tier            = getattr(agent, "_shadow_feature_key_func_tier", 0)
+    m.shadow_feature_key_func                 = getattr(agent, "_shadow_feature_key_func", 0)
+    m.shadow_feature_key_global               = getattr(agent, "_shadow_feature_key_global", 0)
+    m.shadow_feature_key_insufficient         = getattr(agent, "_shadow_feature_key_insufficient", 0)
+    m.shadow_feature_fok_func_var             = getattr(agent, "_shadow_feature_fok_func_var", 0)
+    m.shadow_feature_fok_func_tier_parentcount = getattr(agent, "_shadow_feature_fok_func_tier_parentcount", 0)
+    m.shadow_feature_fok_func_tier            = getattr(agent, "_shadow_feature_fok_func_tier", 0)
+    m.shadow_feature_fok_func                 = getattr(agent, "_shadow_feature_fok_func", 0)
+    m.shadow_feature_fok_global               = getattr(agent, "_shadow_feature_fok_global", 0)
 
     # Hybrid control metrics (zero when hybrid-control=off)
     m.hybrid_residual_predictor_calls = getattr(agent, "_hybrid_residual_predictor_calls", 0)
@@ -1058,6 +1092,19 @@ def _print_shadow_calibration_summary(results: List[RunResult]) -> None:
         miss_iv_rate_sym  = miss_sym / max(1, save_iv)
         miss_iv_rate_act  = miss_act / max(1, save_iv)
 
+        kfv  = sum(r.arch.shadow_feature_key_func_var for r in runs)
+        kftp = sum(r.arch.shadow_feature_key_func_tier_parentcount for r in runs)
+        kft  = sum(r.arch.shadow_feature_key_func_tier for r in runs)
+        kf   = sum(r.arch.shadow_feature_key_func for r in runs)
+        kg   = sum(r.arch.shadow_feature_key_global for r in runs)
+        ki   = sum(r.arch.shadow_feature_key_insufficient for r in runs)
+        fok_fv  = sum(r.arch.shadow_feature_fok_func_var for r in runs)
+        fok_ftp = sum(r.arch.shadow_feature_fok_func_tier_parentcount for r in runs)
+        fok_ft  = sum(r.arch.shadow_feature_fok_func_tier for r in runs)
+        fok_f   = sum(r.arch.shadow_feature_fok_func for r in runs)
+        fok_g   = sum(r.arch.shadow_feature_fok_global for r in runs)
+        feature_mode = (kfv + kftp + kft + kf + kg + ki) > 0
+
         combo_stats.append({
             "factor": factor, "min_samples": min_samples, "window": window,
             "calls": calls, "ok": ok, "stressed": stressed, "insufficient": insuf,
@@ -1083,6 +1130,20 @@ def _print_shadow_calibration_summary(results: List[RunResult]) -> None:
               f"  false_ok_rate_active={false_ok_rate_act:.3f}")
         print(f"    miss_iv_rate_symbolic={miss_iv_rate_sym:.3f}"
               f"  miss_iv_rate_active={miss_iv_rate_act:.3f}")
+        if feature_mode:
+            print(f"    key_used distribution:"
+                  f"  shadow_feature_key_func_var={kfv}"
+                  f"  shadow_feature_key_func_tier_parentcount={kftp}"
+                  f"  shadow_feature_key_func_tier={kft}"
+                  f"  shadow_feature_key_func={kf}"
+                  f"  shadow_feature_key_global={kg}"
+                  f"  shadow_feature_key_insufficient={ki}")
+            print(f"    false_ok grouped by key_used:"
+                  f"  func_var={fok_fv}"
+                  f"  func_tier_parentcount={fok_ftp}"
+                  f"  func_tier={fok_ft}"
+                  f"  func={fok_f}"
+                  f"  global={fok_g}")
 
     print()
     print("── shadow calibration ranking ──────────────────────────────────────")
@@ -1208,6 +1269,37 @@ def _print_aggregate(results: List[RunResult]) -> None:
         print(f"  false_ok_vs_symbolic={_shadow_fok_t}  false_stress_vs_symbolic={_shadow_fst_t}")
         print(f"  would_save_iv={_shadow_wsv_t}  would_miss_symbolic_stress={_shadow_wms_t}")
         print(f"  false_ok_vs_active={_shadow_fas_t}  would_miss_active_failure={_shadow_wma_t}")
+        _fkey_total = sum(
+            r.arch.shadow_feature_key_func_var + r.arch.shadow_feature_key_func_tier_parentcount
+            + r.arch.shadow_feature_key_func_tier + r.arch.shadow_feature_key_func
+            + r.arch.shadow_feature_key_global + r.arch.shadow_feature_key_insufficient
+            for r in ok_runs
+        )
+        if _fkey_total > 0:
+            _kfv  = sum(r.arch.shadow_feature_key_func_var for r in ok_runs)
+            _kftp = sum(r.arch.shadow_feature_key_func_tier_parentcount for r in ok_runs)
+            _kft  = sum(r.arch.shadow_feature_key_func_tier for r in ok_runs)
+            _kf   = sum(r.arch.shadow_feature_key_func for r in ok_runs)
+            _kg   = sum(r.arch.shadow_feature_key_global for r in ok_runs)
+            _ki   = sum(r.arch.shadow_feature_key_insufficient for r in ok_runs)
+            _fok_fv  = sum(r.arch.shadow_feature_fok_func_var for r in ok_runs)
+            _fok_ftp = sum(r.arch.shadow_feature_fok_func_tier_parentcount for r in ok_runs)
+            _fok_ft  = sum(r.arch.shadow_feature_fok_func_tier for r in ok_runs)
+            _fok_f   = sum(r.arch.shadow_feature_fok_func for r in ok_runs)
+            _fok_g   = sum(r.arch.shadow_feature_fok_global for r in ok_runs)
+            print(f"  key_used distribution:"
+                  f"  shadow_feature_key_func_var={_kfv}"
+                  f"  shadow_feature_key_func_tier_parentcount={_kftp}"
+                  f"  shadow_feature_key_func_tier={_kft}"
+                  f"  shadow_feature_key_func={_kf}"
+                  f"  shadow_feature_key_global={_kg}"
+                  f"  shadow_feature_key_insufficient={_ki}")
+            print(f"  false_ok grouped by key_used:"
+                  f"  func_var={_fok_fv}"
+                  f"  func_tier_parentcount={_fok_ftp}"
+                  f"  func_tier={_fok_ft}"
+                  f"  func={_fok_f}"
+                  f"  global={_fok_g}")
 
     # Print hybrid metrics whenever any provider was active, even if some counts
     # are zero — zero counts expose wiring gaps immediately.
@@ -1341,6 +1433,9 @@ def main():
                    help="comma-separated min_samples values for sweep (only with --shadow-residual online; default: 50)")
     p.add_argument("--shadow-window", default="200",
                    help="comma-separated window sizes for sweep (only with --shadow-residual online; default: 200)")
+    p.add_argument("--shadow-calibrator", default="rolling",
+                   choices=["rolling", "feature"],
+                   help="shadow calibrator type: rolling=per-func rolling stats; feature=feature-conditioned multi-key backoff (default: rolling)")
     args = p.parse_args()
 
     var_list   = [int(x) for x in args.vars.split(",")]
@@ -1378,6 +1473,7 @@ def main():
                   hybrid_control=args.hybrid_control,
                   repair_agenda_enabled=args.repair_agenda,
                   shadow_residual=args.shadow_residual,
+                  shadow_calibrator=args.shadow_calibrator,
                   shadow_conservative_factor=f,
                   shadow_min_samples=ms,
                   shadow_window=w)

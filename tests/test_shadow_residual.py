@@ -16,19 +16,48 @@ Test map:
 """
 
 import random
+import subprocess
+import sys
+from pathlib import Path
 import pytest
 
 from dreth.world import CausalWorld
 from dreth.agent import ChainedAgent
 from dreth.learned_residual import (
+    FeatureConditionedResidualCalibrator,
     _RollingStats,
     OnlineResidualCalibrator,
+    ResidualFeatureVector,
     ShadowLearnedResidualPredictor,
 )
 
 
 _SEED_W = 3
 _SEED_A = 13003
+
+
+def _fv(
+    *,
+    var: int = 1,
+    func: str = "SUM",
+    parents=(0,),
+    tier: int = 1,
+    cycle: int = 1,
+    tolerance: float = 0.1,
+) -> ResidualFeatureVector:
+    return ResidualFeatureVector(
+        var=var,
+        cycle=cycle,
+        parents=tuple(parents),
+        func=func,
+        parent_vals=tuple(float(p) for p in parents),
+        actual=0.0,
+        tolerance=tolerance,
+        consequence_tier=tier,
+        full_audits=cycle,
+        sentinel_count=2,
+        cert_age=cycle,
+    )
 
 
 def _make_agent(shadow_enabled: bool = False, shadow_predictor=None, **kwargs):
@@ -612,3 +641,146 @@ def test_sweep_ranking_prefers_zero_false_ok():
         "zero false_ok_vs_active must rank first regardless of higher coverage"
     )
     assert ranked[1]["false_ok_vs_active"] == 1
+
+
+# ── feature-conditioned calibrator ───────────────────────────────────────────
+
+def test_feature_calibrator_backs_off_to_func_tier():
+    """If func+var and func+tier+parent_count lack samples, use func+tier."""
+    cal = FeatureConditionedResidualCalibrator(
+        conservative_factor=1.0, min_samples=3, window=20
+    )
+    target = _fv(var=1, parents=(0,), func="SUM", tier=2)
+
+    # Same func/tier, but split across vars and parent counts so only func_tier
+    # reaches min_samples for the target prediction.
+    cal.update(target, 0.001)
+    cal.update(_fv(var=2, parents=(0, 1), func="SUM", tier=2), 0.001)
+    cal.update(_fv(var=3, parents=(0, 1, 2), func="SUM", tier=2), 0.001)
+
+    ok, stressed, insufficient = cal.predict(target, target.tolerance)
+
+    assert ok and not stressed and not insufficient
+    assert cal._last_key_used == (
+        FeatureConditionedResidualCalibrator.KEY_FUNC_TIER,
+        "SUM",
+        2,
+    )
+
+
+def test_feature_calibrator_uses_most_specific_eligible_key():
+    """When func+var has enough samples, it wins over broader keys."""
+    cal = FeatureConditionedResidualCalibrator(
+        conservative_factor=1.0, min_samples=2, window=20
+    )
+    target = _fv(var=4, parents=(0,), func="MAX", tier=1)
+    cal.update(target, 0.001)
+    cal.update(target, 0.001)
+    cal.update(_fv(var=5, parents=(0, 1), func="MAX", tier=1), 0.001)
+
+    ok, stressed, insufficient = cal.predict(target, target.tolerance)
+
+    assert ok and not stressed and not insufficient
+    assert cal._last_key_used == (
+        FeatureConditionedResidualCalibrator.KEY_FUNC_VAR,
+        "MAX",
+        4,
+    )
+
+
+def test_feature_mode_remains_shadow_only():
+    """Feature shadow predictions do not change skip/audit/intervention counts."""
+    from scripts.batch_run import RunConfig, _build_and_run_dreth
+
+    base = RunConfig(
+        n_vars=8, cycles=60, seed=42,
+        schedule="incremental",
+        settle_cycles=8,
+        noise_sigma=0.02,
+        shadow_residual="off",
+    )
+    feature = RunConfig(
+        n_vars=8, cycles=60, seed=42,
+        schedule="incremental",
+        settle_cycles=8,
+        noise_sigma=0.02,
+        shadow_residual="online",
+        shadow_calibrator="feature",
+        shadow_conservative_factor=1.0,
+        shadow_min_samples=2,
+        shadow_window=20,
+    )
+
+    agent_off, _ = _build_and_run_dreth(base)
+    agent_on, _ = _build_and_run_dreth(feature)
+
+    assert agent_on.skip_count == agent_off.skip_count
+    assert agent_on.full_audit_count == agent_off.full_audit_count
+    assert agent_on.total_interventions == agent_off.total_interventions
+    assert agent_on._shadow_residual_calls > 0
+
+
+def test_feature_metadata_prints():
+    """A small CLI batch prints the feature key diagnostic counter names."""
+    proc = subprocess.run(
+        [
+            sys.executable, "scripts/batch_run.py",
+            "--vars", "5",
+            "--cycles", "30",
+            "--seeds", "42",
+            "--schedule", "incremental",
+            "--workers", "1",
+            "--shadow-residual", "online",
+            "--shadow-calibrator", "feature",
+            "--shadow-min-samples", "2",
+            "--shadow-window", "10",
+        ],
+        cwd=str(Path(__file__).resolve().parent.parent),
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    out = proc.stdout
+    assert "key_used distribution" in out
+    assert "shadow_feature_key_func_var" in out
+    assert "shadow_feature_key_global" in out
+    assert "shadow_feature_key_insufficient" in out
+
+
+def test_feature_calibrator_has_no_hidden_truth_references():
+    """Feature calibrator only exposes ResidualFeatureVector/residual inputs."""
+    import inspect
+
+    cal = FeatureConditionedResidualCalibrator()
+    for attr in ("ledger", "_ledger", "world", "_world", "parents", "funcs", "hidden_log"):
+        assert not hasattr(cal, attr), f"calibrator must not hold {attr}"
+
+    update_sig = inspect.signature(FeatureConditionedResidualCalibrator.update)
+    predict_sig = inspect.signature(FeatureConditionedResidualCalibrator.predict)
+    assert list(update_sig.parameters) == ["self", "fv", "residual"]
+    assert list(predict_sig.parameters) == ["self", "fv", "tolerance"]
+
+
+def test_shadow_predictor_feature_mode_metadata():
+    cal = FeatureConditionedResidualCalibrator(
+        conservative_factor=1.0, min_samples=1, window=10
+    )
+    fv = _fv(var=2, func="SUM", tier=1)
+    cal.update(fv, 0.001)
+    assert isinstance(
+        ShadowLearnedResidualPredictor("feature")._calibrator,
+        FeatureConditionedResidualCalibrator,
+    )
+    pred = ShadowLearnedResidualPredictor(cal)
+
+    result = pred.predict_shadow(var=fv.var, func=fv.func, tolerance=fv.tolerance, fv=fv)
+    meta = pred.last_prediction_metadata
+
+    assert result.ok
+    assert meta["key_used"] == (
+        FeatureConditionedResidualCalibrator.KEY_FUNC_VAR,
+        "SUM",
+        2,
+    )
+    assert meta["key_sample_count"] == 1
+    assert meta["upper_bound"] <= meta["threshold"]
