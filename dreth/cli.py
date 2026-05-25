@@ -92,6 +92,14 @@ def parse_args() -> argparse.Namespace:
                    choices=["all", "budget_only", "probe_only", "preserve_only",
                             "priority_only", "local_only"],
                    help="assist submode used only with --uncertainty-consolidation assist")
+    p.add_argument("--context-role-index", default="off",
+                   choices=["off", "record", "assist_feature"],
+                   help=("off=disabled; record=context role provenance only; "
+                         "assist_feature=allow uncertainty consolidation to use "
+                         "indexed nethra role history as local-anchor features"))
+    p.add_argument("--nethra-reservoir", dest="context_role_index", default=None,
+                   choices=["off", "record", "assist_feature"],
+                   help=argparse.SUPPRESS)
     return p.parse_args()
 
 
@@ -391,6 +399,7 @@ def run() -> None:
         salience_targets=salience_targets,
         uncertainty_consolidation_mode=args.uncertainty_consolidation,
         uncertainty_assist_policy=args.uncertainty_assist_policy,
+        context_role_index_mode=args.context_role_index or "off",
     )
     agent.probe_retention_per_var = args.probe_retention
 

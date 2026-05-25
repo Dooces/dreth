@@ -100,6 +100,14 @@ from .uncertainty_consolidation import (
     propose_consolidation_assists,
     summarize_clusters,
 )
+from .context_role_index import (
+    ContextRoleRecord,
+    ContextRoleIndex,
+    NethraNode,
+    candidate_id,
+    context_key as nethra_context_key,
+    var_fit_id,
+)
 from .learned_residual import (
     ResidualFeatureVector,
     ShadowLearnedResidualPredictor,
@@ -235,6 +243,8 @@ class ChainedAgent:
         uncertainty_consolidation_mode: str = "off",
         uncertainty_assist_policy: str = "all",
         uncertainty_max_preserve_count: int = 3,
+        context_role_index_mode: str = "off",
+        nethra_reservoir_mode: Optional[str] = None,
     ):
         """Construct agent. Initializes empty ledger, zero counters, and
         applies any provided per-var cost weight overrides."""
@@ -544,6 +554,145 @@ class ChainedAgent:
         self._uncertainty_assist_preserved_alternative_total = 0
         self._uncertainty_assist_priority_hint_total = 0
 
+        # Context-role provenance for reusable learned nethras. Default off
+        # preserves behavior and avoids recording overhead.
+        if nethra_reservoir_mode is not None:
+            context_role_index_mode = nethra_reservoir_mode
+        if context_role_index_mode not in {"off", "record", "assist_feature"}:
+            raise ValueError(
+                "context_role_index_mode must be off, record, or assist_feature"
+            )
+        self._context_role_index_mode = context_role_index_mode
+        self._context_role_index = (
+            ContextRoleIndex() if context_role_index_mode != "off" else None
+        )
+        self._context_role_index_latest_matches = []
+
+    def _context_role_index_enabled(self) -> bool:
+        return self._context_role_index is not None
+
+    def _context_role_index_record_var_fit(
+        self,
+        var: int,
+        cycle: int,
+        source: str = "audit",
+        fit_diag: Optional[FitDiagnostic] = None,
+    ) -> str:
+        if self._context_role_index is None:
+            return ""
+        n = self.ledger.vars[var]
+        nid = var_fit_id(var, tuple(n.parents), n.func)
+        self._context_role_index.add_or_update_node(NethraNode(
+            nethra_id=nid,
+            kind="var_fit",
+            target_var=var,
+            components=tuple(sorted((var, *n.parents))),
+            learned_parents=tuple(n.parents),
+            learned_func=n.func,
+            signature=f"x{var}:{n.func}({','.join(map(str, n.parents))})",
+            first_seen_cycle=cycle,
+            last_seen_cycle=cycle,
+            observations=1,
+            active_probe_count=len(fit_diag.probes) if fit_diag is not None else 0,
+            source=source,  # type: ignore[arg-type]
+        ))
+        return nid
+
+    def _context_role_index_assign_role(
+        self,
+        nethra_id: str,
+        *,
+        var: int,
+        cycle: int,
+        operation: str,
+        role: str,
+        evidence_summary: str = "",
+        witness_probes: Tuple = (),
+        fit_diag: Optional[FitDiagnostic] = None,
+        route_role: str = "",
+        uncertainty_signals: Tuple[str, ...] = (),
+        validity_scope: Tuple[int, ...] = (),
+    ) -> None:
+        if self._context_role_index is None or not nethra_id:
+            return
+        n = self.ledger.vars[var]
+        revoked = sum(
+            1 for cert in list(n.certificates.values()) + list(n.route_certs.values())
+            if getattr(cert, "revoked_by", None)
+        )
+        self._context_role_index.assign_context_role(ContextRoleRecord(
+            nethra_id=nethra_id,
+            context_key=nethra_context_key(
+                operation=operation,
+                var=var,
+                visible=self.world.visible_count,
+                parents=tuple(n.parents),
+            ),
+            operation=operation,
+            role=role,  # type: ignore[arg-type]
+            cycle=cycle,
+            evidence_summary=evidence_summary,
+            witness_probes=witness_probes,
+            sentinel_passes=sum(
+                int(getattr(cert, "sentinel_passes", 0) or 0)
+                for cert in n.certificates.values()
+            ),
+            sentinel_failures=int(n.consecutive_sentinel_failures),
+            fit_margin=fit_diag.margin if fit_diag is not None else None,
+            tie_count=len(fit_diag.tie_set) if fit_diag is not None else 0,
+            near_tie_count=len(fit_diag.near_tie_candidates) if fit_diag is not None else 0,
+            strong_observations=int(n.strong_observations),
+            revocations=revoked,
+            skip_role=n.role_for("skip"),
+            route_role=route_role,
+            uncertainty_signals=uncertainty_signals,
+            validity_scope=validity_scope or tuple(sorted((var, *n.parents))),
+        ))
+
+    def _context_role_index_record_candidate(
+        self,
+        *,
+        prefix: str,
+        kind: str,
+        var: int,
+        parents: Tuple[int, ...],
+        func: str,
+        cycle: int,
+        source: str,
+        role: str,
+        score: int = 0,
+        context_operation: str = "candidate",
+        fit_diag: Optional[FitDiagnostic] = None,
+    ) -> str:
+        if self._context_role_index is None:
+            return ""
+        nid = candidate_id(prefix, var, parents, func)
+        self._context_role_index.add_or_update_node(NethraNode(
+            nethra_id=nid,
+            kind=kind,  # type: ignore[arg-type]
+            target_var=var,
+            components=tuple(sorted((var, *parents))),
+            learned_parents=tuple(parents),
+            learned_func=func,
+            signature=f"x{var}:{func}({','.join(map(str, parents))})",
+            first_seen_cycle=cycle,
+            last_seen_cycle=cycle,
+            observations=1,
+            active_probe_count=len(fit_diag.probes) if fit_diag is not None else 0,
+            source=source,  # type: ignore[arg-type]
+        ))
+        self._context_role_index_assign_role(
+            nid,
+            var=var,
+            cycle=cycle,
+            operation=context_operation,
+            role=role,
+            evidence_summary=f"score={score}",
+            fit_diag=fit_diag,
+            validity_scope=tuple(sorted((var, *parents))),
+        )
+        return nid
+
     def _reset_uncertainty_assist_surfaces(self) -> None:
         self._uncertainty_assist_vars = {}
         self._uncertainty_forced_probes = {}
@@ -572,6 +721,47 @@ class ChainedAgent:
         self._uncertainty_latest_clusters = clusters
         self._uncertainty_latest_assists = assists
         self._uncertainty_summary = summary
+        index_matches_by_cluster: Dict[str, Tuple[Any, ...]] = {}
+        if self._context_role_index is not None:
+            for cluster in clusters:
+                nid = f"uncertainty_cluster:{cluster.cluster_id}:{','.join(map(str, cluster.vars))}"
+                self._context_role_index.add_or_update_node(NethraNode(
+                    nethra_id=nid,
+                    kind="unknown",
+                    target_var=None,
+                    components=tuple(sorted(set(cluster.vars) | set(cluster.shared_parents) | set(cluster.shared_graph_neighbors))),
+                    learned_parents=tuple(cluster.shared_parents),
+                    learned_func=str(cluster.proposed_handle_kind),
+                    signature=f"{cluster.proposed_handle_kind}:{cluster.evidence_summary}",
+                    first_seen_cycle=cycle,
+                    last_seen_cycle=cycle,
+                    observations=max(1, len(cluster.vars)),
+                    source="uncertainty_cluster",
+                ))
+                self._context_role_index.assign_context_role(ContextRoleRecord(
+                    nethra_id=nid,
+                    context_key=nethra_context_key(operation="uncertainty_cluster", visible=self.world.visible_count),
+                    operation="uncertainty_consolidation",
+                    role="unresolved",
+                    cycle=cycle,
+                    evidence_summary=cluster.evidence_summary,
+                    fit_margin=None,
+                    near_tie_count=cluster.shared_near_tie_count,
+                    uncertainty_signals=tuple(cluster.shared_signals),
+                    validity_scope=tuple(cluster.vars),
+                ))
+                if (
+                    self._context_role_index_mode == "assist_feature"
+                    and not cluster.is_giant_cluster
+                ):
+                    index_matches_by_cluster[cluster.cluster_id] = (
+                        self._context_role_index.query_for_uncertainty_cluster(cluster)
+                    )
+            self._context_role_index_latest_matches = [
+                match
+                for matches in index_matches_by_cluster.values()
+                for match in matches
+            ]
         self._uncertainty_cases_seen_total += len(cases)
         self._uncertainty_clusters_total += len(clusters)
         for cluster in clusters:
@@ -598,6 +788,15 @@ class ChainedAgent:
                 cluster_has_specific_local_anchor(cluster)
                 if cluster is not None else False
             )
+            index_local_anchor = bool(
+                cluster is not None
+                and index_matches_by_cluster.get(cluster.cluster_id)
+            )
+            if index_local_anchor and self._context_role_index is not None:
+                self._context_role_index.mark_matches_used_as_local_anchor(
+                    len(index_matches_by_cluster.get(cluster.cluster_id, ()))
+                )
+                is_local_cluster = True
             is_giant_cluster = bool(cluster and cluster.is_giant_cluster)
             if not is_local_cluster or (
                 self._uncertainty_assist_policy == "local_only" and is_giant_cluster
@@ -721,6 +920,55 @@ class ChainedAgent:
             ),
             "assist_priority_hint_total": self._uncertainty_assist_priority_hint_total,
         }
+
+    def context_role_index_metrics(self) -> Dict[str, Any]:
+        if self._context_role_index is None:
+            return {
+                "context_role_index_mode": self._context_role_index_mode,
+                "context_role_index_nodes": 0,
+                "context_role_records": 0,
+                "context_role_tareth": 0,
+                "context_role_trass": 0,
+                "context_role_unresolved": 0,
+                "context_role_best_available": 0,
+                "context_role_index_queries": 0,
+                "context_role_index_matches": 0,
+                "context_role_matches_used_as_local_anchor": 0,
+                "context_role_assist_feature_hits": 0,
+                "context_role_nodes_by_kind": {},
+                "context_role_nodes_by_source": {},
+                "context_roles_by_context": {},
+                "context_roles_by_role": {},
+                "nethra_reservoir_records": 0,
+                "nethra_context_roles": 0,
+                "nethra_role_tareth": 0,
+                "nethra_role_trass": 0,
+                "nethra_role_unresolved": 0,
+                "nethra_role_best_available": 0,
+                "reservoir_queries": 0,
+                "reservoir_matches": 0,
+                "reservoir_matches_used_as_local_anchor": 0,
+                "reservoir_assist_feature_hits": 0,
+                "reservoir_records_by_kind": {},
+                "reservoir_records_by_source": {},
+                "reservoir_roles_by_context": {},
+                "reservoir_roles_by_role": {},
+            }
+        summary = self._context_role_index.summarize()
+        summary["context_role_index_mode"] = self._context_role_index_mode
+        summary["nethra_reservoir_mode"] = self._context_role_index_mode
+        return summary
+
+    def context_role_index_export(self, limit: int = 200) -> Dict[str, Any]:
+        if self._context_role_index is None:
+            return {"nodes": [], "edges": [], "roles": [], "records": []}
+        return self._context_role_index.export_records(limit=limit)
+
+    def nethra_reservoir_metrics(self) -> Dict[str, Any]:
+        return self.context_role_index_metrics()
+
+    def nethra_reservoir_export(self, limit: int = 200) -> Dict[str, Any]:
+        return self.context_role_index_export(limit=limit)
 
     def _adaptive_probe_budget(self, n_hypotheses: int) -> int:
         """Return the number of probes to use for a hypothesis space of size
@@ -975,6 +1223,16 @@ class ChainedAgent:
                     changes=0, trials=0,
                     earned_by="manual_bootstrap",
                 )
+                nid = self._context_role_index_record_var_fit(var, cycle, source="operation_role")
+                self._context_role_index_assign_role(
+                    nid,
+                    var=var,
+                    cycle=cycle,
+                    operation="skip",
+                    role="tareth",
+                    evidence_summary="declared_salience_target",
+                    validity_scope=(var,),
+                )
             return "tareth"
 
         n_other_visible = sum(1 for j in range(self.world.visible_count) if j != var)
@@ -983,6 +1241,16 @@ class ChainedAgent:
                 self.ledger.event_log.append(
                     f"c{cycle}: x{var} operation_role test DEFERRED "
                     f"(only {n_other_visible} other visible vars; need ≥2)"
+                )
+                nid = self._context_role_index_record_var_fit(var, cycle, source="operation_role")
+                self._context_role_index_assign_role(
+                    nid,
+                    var=var,
+                    cycle=cycle,
+                    operation="skip",
+                    role="unresolved",
+                    evidence_summary="operation_role_deferred",
+                    validity_scope=(var,),
                 )
             return "untested"
 
@@ -1072,6 +1340,17 @@ class ChainedAgent:
             earned_by="substitution_test",
             witnesses=tuple(witnesses) if role == "tareth" else (),
             audits_at_issuance=n.full_audits,
+        )
+        nid = self._context_role_index_record_var_fit(var, cycle, source="operation_role")
+        self._context_role_index_assign_role(
+            nid,
+            var=var,
+            cycle=cycle,
+            operation="skip",
+            role=role,
+            evidence_summary=f"substitution_test changes={changes} trials={n_trials}",
+            witness_probes=tuple(witnesses) if role == "tareth" else (),
+            validity_scope=filtered_targets,
         )
         return role
 
@@ -1212,6 +1491,36 @@ class ChainedAgent:
                 certified_at_cycle=cycle,
                 context_visible=self.world.visible_count,
             )
+            if self._context_role_index is not None:
+                nid = f"composite:x{var_a},x{var_b}->x{probe_j}"
+                self._context_role_index.add_or_update_node(NethraNode(
+                    nethra_id=nid,
+                    kind="composite",
+                    target_var=probe_j,
+                    components=tuple(sorted((var_a, var_b, probe_j))),
+                    learned_parents=(var_a, var_b),
+                    learned_func="joint_interaction",
+                    signature=f"x{var_a},x{var_b}->x{probe_j}",
+                    first_seen_cycle=cycle,
+                    last_seen_cycle=cycle,
+                    observations=1,
+                    active_probe_count=total_trials,
+                    composition_links=(
+                        var_fit_id(var_a, tuple(self.ledger.vars[var_a].parents), self.ledger.vars[var_a].func),
+                        var_fit_id(var_b, tuple(self.ledger.vars[var_b].parents), self.ledger.vars[var_b].func),
+                    ),
+                    source="composite",
+                ))
+                self._context_role_index_assign_role(
+                    nid,
+                    var=probe_j,
+                    cycle=cycle,
+                    operation="composite",
+                    role="tareth",
+                    evidence_summary=f"joint_interaction {interaction_trials}/{total_trials}",
+                    witness_probes=((var_a, probe_va), (var_b, probe_vb), (probe_j, probe_tol)),
+                    validity_scope=tuple(sorted((var_a, var_b, probe_j))),
+                )
             self.ledger.emit(LedgerEvent(
                 type="composite_installed", var=var_a, cycle=cycle,
                 payload={"members": (var_a, var_b), "sentinel_var": probe_j,
@@ -1857,6 +2166,22 @@ class ChainedAgent:
             n.first_audited_cycle = cycle
         n.full_audits += 1
         n.margins.append(margin)
+        audit_nethra_id = self._context_role_index_record_var_fit(
+            var,
+            cycle,
+            source="audit",
+            fit_diag=fit_diag,
+        )
+        self._context_role_index_assign_role(
+            audit_nethra_id,
+            var=var,
+            cycle=cycle,
+            operation="audit",
+            role="best_available",
+            evidence_summary="selected by fit_var",
+            fit_diag=fit_diag,
+            validity_scope=tuple(sorted((var, *new_parents))),
+        )
 
         if n.role_for("skip") == "untested":
             self._certify_operation_role(var, cycle)
@@ -2106,6 +2431,33 @@ class ChainedAgent:
                 trials=1,
                 earned_by="counterfactual_fit",
             )
+            if self._context_role_index is not None:
+                nid = f"route:x{p}->x{var}:{base_func}({','.join(map(str, base_parents))})"
+                self._context_role_index.add_or_update_node(NethraNode(
+                    nethra_id=nid,
+                    kind="route_handle",
+                    target_var=var,
+                    components=tuple(sorted((var, p, *base_parents))),
+                    learned_parents=tuple(base_parents),
+                    learned_func=base_func,
+                    signature=f"x{p}->x{var}:{role}",
+                    first_seen_cycle=cycle,
+                    last_seen_cycle=cycle,
+                    observations=1,
+                    active_probe_count=rc_budget,
+                    source="route_cert",
+                ))
+                self._context_role_index_assign_role(
+                    nid,
+                    var=var,
+                    cycle=cycle,
+                    operation="route",
+                    role=role,
+                    evidence_summary="counterfactual_fit same_winner=" + str(same_winner),
+                    fit_diag=fit_diag,
+                    route_role=role,
+                    validity_scope=tuple(sorted((var, p, *base_parents))),
+                )
 
     def _derive_separating_probes(
         self, frontier: "TiedFrontier",
@@ -2167,6 +2519,20 @@ class ChainedAgent:
         """
         n = self.ledger.vars[var]
         existing = n.tied_frontier
+        for cand_parents, cand_func in near_tie_set:
+            self._context_role_index_record_candidate(
+                prefix="frontier",
+                kind="tied_frontier_candidate",
+                var=var,
+                parents=tuple(cand_parents),
+                func=cand_func,
+                cycle=cycle,
+                source="tied_frontier",
+                role="unresolved",
+                score=scores_dict.get((cand_parents, cand_func), 0),
+                context_operation="tied_frontier",
+                fit_diag=fit_diag,
+            )
         if existing is None:
             new_frontier = TiedFrontier(
                 candidates=near_tie_set,
@@ -2207,6 +2573,19 @@ class ChainedAgent:
                         last_seen_cycle=cycle,
                     )
                 )
+                self._context_role_index_record_candidate(
+                    prefix="dormant",
+                    kind="dormant_alternative",
+                    var=var,
+                    parents=h[0],
+                    func=h[1],
+                    cycle=cycle,
+                    source="dormant_alternative",
+                    role="unresolved",
+                    score=existing.scores.get(h, 0),
+                    context_operation="frontier_context_change",
+                    fit_diag=fit_diag,
+                )
             new_frontier = TiedFrontier(
                 candidates=near_tie_set,
                 scores={h: scores_dict.get(h, 0) for h in near_tie_set},
@@ -2230,6 +2609,19 @@ class ChainedAgent:
                         last_score=existing.scores.get(h, 0),
                         last_seen_cycle=cycle,
                     )
+                )
+                self._context_role_index_record_candidate(
+                    prefix="dormant",
+                    kind="dormant_alternative",
+                    var=var,
+                    parents=h[0],
+                    func=h[1],
+                    cycle=cycle,
+                    source="dormant_alternative",
+                    role="unresolved",
+                    score=existing.scores.get(h, 0),
+                    context_operation="frontier_narrowed",
+                    fit_diag=fit_diag,
                 )
             new_frontier = TiedFrontier(
                 candidates=near_tie_set,
@@ -2273,6 +2665,18 @@ class ChainedAgent:
                             last_seen_cycle=cycle,
                         )
                     )
+                    self._context_role_index_record_candidate(
+                        prefix="dormant",
+                        kind="dormant_alternative",
+                        var=var,
+                        parents=h[0],
+                        func=h[1],
+                        cycle=cycle,
+                        source="dormant_alternative",
+                        role="unresolved",
+                        score=f.scores.get(h, 0),
+                        context_operation="frontier_collapse",
+                    )
             if winning_hyp is not None:
                 self.ledger.event_log.append(
                     f"c{cycle}: x{var} frontier collapsed → "
@@ -2296,6 +2700,18 @@ class ChainedAgent:
                             last_score=f.scores.get(h, 0),
                             last_seen_cycle=cycle,
                         )
+                    )
+                    self._context_role_index_record_candidate(
+                        prefix="dormant",
+                        kind="dormant_alternative",
+                        var=var,
+                        parents=h[0],
+                        func=h[1],
+                        cycle=cycle,
+                        source="dormant_alternative",
+                        role="unresolved",
+                        score=f.scores.get(h, 0),
+                        context_operation="frontier_preserve",
                     )
                     self._uncertainty_preserve_remaining -= 1
                     self._uncertainty_assist_preserved_alternative_total += 1
@@ -3709,6 +4125,33 @@ class ChainedAgent:
             )
             if _newly_confirmed and _regime_id is not None:
                 self._commission_regime_sentinel(_regime_id)
+                if self._context_role_index is not None:
+                    members = tuple(sorted({int(e.var) for e in _cert_events}))
+                    nid = f"regime:R{_regime_id}:{','.join(map(str, members))}"
+                    self._context_role_index.add_or_update_node(NethraNode(
+                        nethra_id=nid,
+                        kind="regime_handle",
+                        target_var=None,
+                        components=members,
+                        learned_parents=(),
+                        learned_func="regime_cofailure",
+                        signature=f"R{_regime_id}:{members}",
+                        first_seen_cycle=cycle,
+                        last_seen_cycle=cycle,
+                        observations=len(_cert_events),
+                        passive_evidence_count=len(_passive_stressed_vars),
+                        active_probe_count=sum(1 for e in _cert_events if e.event_type == "failed"),
+                        source="regime",
+                    ))
+                    self._context_role_index.assign_context_role(ContextRoleRecord(
+                        nethra_id=nid,
+                        context_key=nethra_context_key(operation="regime", visible=self.world.visible_count),
+                        operation="regime",
+                        role="unresolved",
+                        cycle=cycle,
+                        evidence_summary=f"confirmed_regime failed={_n_failed}",
+                        validity_scope=members,
+                    ))
 
         # Passive co-stress: if ≥ 2 vars were passive-stressed this cycle, feed
         # them to the regime register as a seeded candidate. Passive evidence

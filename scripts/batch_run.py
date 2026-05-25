@@ -196,6 +196,7 @@ class RunConfig:
     challenge_blind: bool = False
     uncertainty_consolidation: str = "off"  # "off" | "shadow" | "assist"
     uncertainty_assist_policy: str = "all"
+    context_role_index: str = "off"  # "off" | "record" | "assist_feature"
 
 
 # ── per-run result ─────────────────────────────────────────────────────────────
@@ -425,6 +426,26 @@ class ArchMetrics:
     assist_extra_probe_total: int = 0
     assist_preserved_alternative_total: int = 0
     assist_priority_hint_total: int = 0
+
+    # ContextRoleIndex / NethraGraphIndex metrics.
+    context_role_index_mode: str = "off"
+    context_role_index_nodes: int = 0
+    context_role_records: int = 0
+    context_role_tareth: int = 0
+    context_role_trass: int = 0
+    context_role_unresolved: int = 0
+    context_role_best_available: int = 0
+    context_role_index_queries: int = 0
+    context_role_index_matches: int = 0
+    context_role_matches_used_as_local_anchor: int = 0
+    context_role_assist_feature_hits: int = 0
+    context_role_nodes_by_kind: Dict[str, int] = field(default_factory=dict)
+    context_role_nodes_by_source: Dict[str, int] = field(default_factory=dict)
+    context_roles_by_context: Dict[str, int] = field(default_factory=dict)
+    context_roles_by_role: Dict[str, int] = field(default_factory=dict)
+    context_role_edges: int = 0
+    context_role_edges_by_kind: Dict[str, int] = field(default_factory=dict)
+    context_role_export: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -778,6 +799,7 @@ def _build_and_run_dreth(
         shadow_key_authority=_shadow_key_authority,
         uncertainty_consolidation_mode=cfg.uncertainty_consolidation,
         uncertainty_assist_policy=cfg.uncertainty_assist_policy,
+        context_role_index_mode=cfg.context_role_index,
     )
     if cfg.relative_authority_frontier_temporal_report:
         from dreth.relative_authority_frontier import TemporalGraphFrontierEvaluator
@@ -1119,6 +1141,29 @@ def _extract_arch_metrics(agent: ChainedAgent, world: CausalWorld) -> ArchMetric
             _uc.get("assist_preserved_alternative_total", 0)
         )
         m.assist_priority_hint_total = int(_uc.get("assist_priority_hint_total", 0))
+    if hasattr(agent, "context_role_index_metrics"):
+        _cri = agent.context_role_index_metrics()
+        m.context_role_index_mode = str(_cri.get("context_role_index_mode", "off"))
+        m.context_role_index_nodes = int(_cri.get("context_role_index_nodes", 0))
+        m.context_role_records = int(_cri.get("context_role_records", 0))
+        m.context_role_tareth = int(_cri.get("context_role_tareth", 0))
+        m.context_role_trass = int(_cri.get("context_role_trass", 0))
+        m.context_role_unresolved = int(_cri.get("context_role_unresolved", 0))
+        m.context_role_best_available = int(_cri.get("context_role_best_available", 0))
+        m.context_role_index_queries = int(_cri.get("context_role_index_queries", 0))
+        m.context_role_index_matches = int(_cri.get("context_role_index_matches", 0))
+        m.context_role_matches_used_as_local_anchor = int(
+            _cri.get("context_role_matches_used_as_local_anchor", 0)
+        )
+        m.context_role_assist_feature_hits = int(_cri.get("context_role_assist_feature_hits", 0))
+        m.context_role_nodes_by_kind = dict(_cri.get("context_role_nodes_by_kind", {}))
+        m.context_role_nodes_by_source = dict(_cri.get("context_role_nodes_by_source", {}))
+        m.context_roles_by_context = dict(_cri.get("context_roles_by_context", {}))
+        m.context_roles_by_role = dict(_cri.get("context_roles_by_role", {}))
+        m.context_role_edges = int(_cri.get("context_role_edges", 0))
+        m.context_role_edges_by_kind = dict(_cri.get("context_role_edges_by_kind", {}))
+        if hasattr(agent, "context_role_index_export"):
+            m.context_role_export = agent.context_role_index_export(limit=300)
     _temporal_frontier = getattr(agent, "_diagnostic_audit_observer", None)
     if _temporal_frontier is not None and hasattr(_temporal_frontier, "summary"):
         _tfs = _temporal_frontier.summary()
@@ -2765,6 +2810,13 @@ def main():
                    choices=["all", "budget_only", "probe_only", "preserve_only",
                             "priority_only", "local_only"],
                    help="assist submode used only with --uncertainty-consolidation assist")
+    p.add_argument("--context-role-index", default="off",
+                   choices=["off", "record", "assist_feature"],
+                   help=("ContextRoleIndex over nethra graph provenance: off, "
+                         "record, or assist_feature (default: off)"))
+    p.add_argument("--nethra-reservoir", dest="context_role_index", default=None,
+                   choices=["off", "record", "assist_feature"],
+                   help=argparse.SUPPRESS)
     p.add_argument("--shadow-residual", default="off",
                    choices=["off", "online"],
                    help="shadow residual mode: off=disabled; online=shadow learned predictor (default: off)")
@@ -2893,7 +2945,8 @@ def main():
                   relative_authority_frontier_max_depth=args.relative_authority_frontier_max_depth,
                   challenge_blind=args.challenge_blind,
                   uncertainty_consolidation=args.uncertainty_consolidation,
-                  uncertainty_assist_policy=args.uncertainty_assist_policy)
+                  uncertainty_assist_policy=args.uncertainty_assist_policy,
+                  context_role_index=args.context_role_index or "off")
         for schedule in schedule_list
         for v in var_list
         for c in cycle_list
@@ -2919,6 +2972,8 @@ def main():
         mode += " +repair-agenda"
     if args.uncertainty_consolidation != "off":
         mode += f" +uncertainty-consolidation({args.uncertainty_consolidation})"
+    if (args.context_role_index or "off") != "off":
+        mode += f" +context-role-index({args.context_role_index})"
     if shadow_sweep:
         mode += (f" +shadow-sweep(f={factor_list} ms={ms_list} w={window_list})")
     elif args.shadow_residual != "off":
@@ -3075,6 +3130,44 @@ def main():
                         r.arch.assist_preserved_alternative_total
                     ),
                     "assist_priority_hint_total": r.arch.assist_priority_hint_total,
+                    "context_role_index_mode": r.arch.context_role_index_mode,
+                    "context_role_index_nodes": r.arch.context_role_index_nodes,
+                    "context_role_records": r.arch.context_role_records,
+                    "context_role_tareth": r.arch.context_role_tareth,
+                    "context_role_trass": r.arch.context_role_trass,
+                    "context_role_unresolved": r.arch.context_role_unresolved,
+                    "context_role_best_available": r.arch.context_role_best_available,
+                    "context_role_index_queries": r.arch.context_role_index_queries,
+                    "context_role_index_matches": r.arch.context_role_index_matches,
+                    "context_role_matches_used_as_local_anchor": (
+                        r.arch.context_role_matches_used_as_local_anchor
+                    ),
+                    "context_role_assist_feature_hits": (
+                        r.arch.context_role_assist_feature_hits
+                    ),
+                    "context_role_nodes_by_kind": r.arch.context_role_nodes_by_kind,
+                    "context_role_nodes_by_source": r.arch.context_role_nodes_by_source,
+                    "context_roles_by_context": r.arch.context_roles_by_context,
+                    "context_roles_by_role": r.arch.context_roles_by_role,
+                    "context_role_edges": r.arch.context_role_edges,
+                    "context_role_edges_by_kind": r.arch.context_role_edges_by_kind,
+                    "context_role_index": r.arch.context_role_export,
+                    # Compatibility aliases for older smoke scripts/reports.
+                    "nethra_reservoir_mode": r.arch.context_role_index_mode,
+                    "nethra_reservoir_records": r.arch.context_role_index_nodes,
+                    "nethra_context_roles": r.arch.context_role_records,
+                    "nethra_role_tareth": r.arch.context_role_tareth,
+                    "nethra_role_trass": r.arch.context_role_trass,
+                    "nethra_role_unresolved": r.arch.context_role_unresolved,
+                    "nethra_role_best_available": r.arch.context_role_best_available,
+                    "reservoir_queries": r.arch.context_role_index_queries,
+                    "reservoir_matches": r.arch.context_role_index_matches,
+                    "reservoir_matches_used_as_local_anchor": (
+                        r.arch.context_role_matches_used_as_local_anchor
+                    ),
+                    "reservoir_assist_feature_hits": r.arch.context_role_assist_feature_hits,
+                    "reservoir_records_by_kind": r.arch.context_role_nodes_by_kind,
+                    "reservoir_roles_by_context": r.arch.context_roles_by_context,
                     "quality_cost": r.quality.quality_cost if r.quality else None,
                     "quality_weights": quality_weights.__dict__,
                     "earned_by_dist": r.arch.earned_by_dist,
