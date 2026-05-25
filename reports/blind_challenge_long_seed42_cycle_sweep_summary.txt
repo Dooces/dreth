@@ -1,0 +1,91 @@
+A. Basic outcome:
+  runs=3 ok=3
+  invariants=PASS
+  interventions=2370419 audits=4071 skips=256821 revocations=34
+  skip_paths: trass=72960 sentinel=171846 compression=12015
+  novelty_open=242 frontier_stress=0
+  temporal_frontier: evals=412 avg_recall=0.271 avg_lift=1.356
+
+B. Post-hoc manifest comparison:
+  manifests=3 latent_drivers=21 intervention_side_effect_rules=51
+  generated relation types:
+  symbolic                 57
+  weak_noisy               54
+  dense_mixed              54
+  delayed                  48
+  latent_additive          42
+  smooth_nonlinear         33
+  proxy_confounded         12
+
+C. Discovery report:
+  structures Dreth appeared to learn:
+  symbolic                 29
+  dense_mixed              19
+  weak_noisy               14
+  latent_additive           5
+  smooth_nonlinear          5
+  delayed                   3
+  structures Dreth failed to learn:
+  delayed                  39
+  dense_mixed              32
+  smooth_nonlinear         28
+  symbolic                 25
+  weak_noisy               25
+  latent_additive          22
+  proxy_confounded         12
+  external-truth mismatches under authority:
+  smooth_nonlinear         16
+  weak_noisy               12
+  delayed                   8
+  proxy_confounded          2
+  latent_additive           1
+  symbolic                  1
+  authority/evidence mismatch candidates:
+  smooth_nonlinear         16
+  weak_noisy               11
+  delayed                   5
+  proxy_confounded          2
+  latent_additive           1
+  symbolic                  1
+  structures Dreth left uncertain/stressed:
+  dense_mixed              26
+  symbolic                 24
+  delayed                  17
+  latent_additive          11
+  smooth_nonlinear          8
+  proxy_confounded          7
+  weak_noisy                5
+  structures where graph locality helped:
+    temporal frontier produced post-hoc recall/lift signal
+
+D. Scope report:
+  where Dreth had grip:
+  symbolic                 29
+  dense_mixed              19
+  weak_noisy               14
+  latent_additive           5
+  smooth_nonlinear          5
+  delayed                   3
+  where Dreth lost grip:
+  delayed                  39
+  dense_mixed              32
+  smooth_nonlinear         28
+  symbolic                 25
+  weak_noisy               25
+  latent_additive          22
+  proxy_confounded         12
+  authority/evidence mismatch candidates:
+  smooth_nonlinear         16
+  weak_noisy               11
+  delayed                   5
+  proxy_confounded          2
+  latent_additive           1
+  symbolic                  1
+  where Dreth properly withheld authority:
+  delayed                  19
+  dense_mixed              16
+  latent_additive           5
+  symbolic                  3
+
+E. Warning:
+  This is not proof of real-world capability. It is a blind procedural stress test for scope discovery.
