@@ -38,7 +38,10 @@ from dreth.hybrid import (
     SymbolicResidualPredictor,
 )
 from dreth.summary import RunAnalyzer
-from scripts.batch_run import _print_provider_policy_comparison
+from scripts.batch_run import (
+    _build_policy_report_rows,
+    _print_provider_policy_comparison,
+)
 
 
 # ── world: seed 3 ──────────────────────────────────────────────────────────────
@@ -965,3 +968,139 @@ def test_11d_provider_policy_comparison_block_prints_for_two_policies():
     assert "sensitivity/none" in out
     assert "history/history" in out
     assert "diagnostic only" in out
+
+
+def _fake_policy_report_run(
+    *,
+    schedule="regime_switch",
+    n_vars=50,
+    cycles=3000,
+    seed=42,
+    parent="sensitivity",
+    probe="none",
+    quality_cost_extra=0,
+    iv=100,
+    audits=10,
+    revocations=1,
+    unique_fails=2,
+    regime_fail=3,
+    no_sentinel=4,
+    skip_pct=80.0,
+    elapsed=1.0,
+    violations=None,
+):
+    arch = SimpleNamespace(
+        revoked_by_dist={"test": revocations} if revocations else {},
+        total_unique_failures=unique_fails,
+        regime_sentinel_fails=regime_fail,
+        regime_no_sentinel=no_sentinel,
+        passive_saved_iv=0,
+        provider_probe_no_effect_count=quality_cost_extra,
+        provider_probe_improved_margin_count=0,
+    )
+    return SimpleNamespace(
+        ok=True,
+        config=SimpleNamespace(
+            schedule=schedule,
+            n_vars=n_vars,
+            cycles=cycles,
+            seed=seed,
+            parent_ranker=parent,
+            probe_proposer=probe,
+        ),
+        elapsed=elapsed,
+        skip_pct=skip_pct,
+        interventions=iv,
+        full_audits=audits,
+        arch=arch,
+        violations=violations or [],
+    )
+
+
+def test_11e_policy_report_groups_by_schedule_scale_and_policy():
+    rows = _build_policy_report_rows(
+        [
+            _fake_policy_report_run(schedule="regime_switch", n_vars=50, cycles=3000),
+            _fake_policy_report_run(schedule="regime_switch", n_vars=50, cycles=3000, seed=99),
+            _fake_policy_report_run(
+                schedule="regime_switch", n_vars=75, cycles=3000,
+                parent="history", probe="history",
+            ),
+            _fake_policy_report_run(
+                schedule="false_trass", n_vars=50, cycles=3000,
+                parent="history", probe="history",
+            ),
+        ],
+        QualityWeights(),
+    )
+
+    by_key = {(r["schedule"], r["n_vars"], r["cycles"], r["policy"]): r for r in rows}
+
+    assert by_key[("regime_switch", 50, 3000, "sensitivity/none")]["runs"] == 2
+    assert ("regime_switch", 75, 3000, "history/history") in by_key
+    assert ("false_trass", 50, 3000, "history/history") in by_key
+
+
+def test_11f_policy_report_deltas_use_sensitivity_none_baseline():
+    rows = _build_policy_report_rows(
+        [
+            _fake_policy_report_run(
+                parent="sensitivity", probe="none",
+                iv=100, audits=10, revocations=1, unique_fails=2,
+            ),
+            _fake_policy_report_run(
+                parent="history", probe="history",
+                iv=125, audits=13, revocations=4, unique_fails=7,
+            ),
+        ],
+        QualityWeights(),
+    )
+    history = next(r for r in rows if r["policy"] == "history/history")
+
+    assert history["delta_iv_vs_sensitivity"] == 25
+    assert history["delta_audits_vs_sensitivity"] == 3
+    assert history["delta_revocations_vs_sensitivity"] == 3
+    assert history["delta_unique_fails_vs_sensitivity"] == 5
+    assert history["delta_quality_cost_vs_sensitivity"] > 0
+
+
+def test_11g_policy_report_pareto_marks_obviously_dominated_policy():
+    rows = _build_policy_report_rows(
+        [
+            _fake_policy_report_run(
+                parent="sensitivity", probe="none",
+                iv=100, audits=10, revocations=1, unique_fails=2,
+            ),
+            _fake_policy_report_run(
+                parent="history", probe="history",
+                iv=110, audits=11, revocations=2, unique_fails=3,
+            ),
+        ],
+        QualityWeights(),
+    )
+    by_policy = {r["policy"]: r for r in rows}
+
+    assert by_policy["sensitivity/none"]["pareto_status"] == "efficient"
+    assert by_policy["history/history"]["pareto_status"] == "dominated"
+
+
+def test_11h_policy_report_generation_does_not_mutate_results():
+    run = _fake_policy_report_run()
+    before = (
+        run.interventions,
+        run.full_audits,
+        dict(run.arch.revoked_by_dist),
+        run.arch.total_unique_failures,
+        list(run.violations),
+    )
+
+    _ = _build_policy_report_rows([run], QualityWeights())
+
+    after = (
+        run.interventions,
+        run.full_audits,
+        dict(run.arch.revoked_by_dist),
+        run.arch.total_unique_failures,
+        list(run.violations),
+    )
+    assert after == before

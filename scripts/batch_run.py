@@ -31,6 +31,7 @@ Usage:
 """
 
 import argparse
+import csv
 import itertools
 import json
 import random
@@ -68,6 +69,45 @@ from dreth.learned_residual import (
 from dreth.quality import QualityWeights, RunQualityScore, make_quality_score
 
 
+_ALLOWED_SCHEDULES = (
+    "incremental",
+    "periodic_shifts",
+    "novelty",
+    "shaped",
+    "rare_catastrophe",
+    "regime_switch",
+    "false_trass",
+)
+_DEFAULT_PARENT_RANKER = "sensitivity"
+_DEFAULT_PROBE_PROPOSER = "none"
+_POLICY_REPORT_PARENT_RANKERS = "sensitivity,history,history_rescue"
+_POLICY_REPORT_PROBE_PROPOSERS = "none,history,history_rescue"
+_POLICY_REPORT_BASELINE = "sensitivity/none"
+_POLICY_REPORT_FIELDS = [
+    "schedule",
+    "n_vars",
+    "cycles",
+    "policy",
+    "runs",
+    "avg_quality_cost",
+    "avg_iv",
+    "avg_full_audits",
+    "avg_revocations",
+    "avg_unique_fails",
+    "avg_regime_fail",
+    "avg_no_sentinel",
+    "avg_skip_pct",
+    "avg_elapsed",
+    "invariants_ok",
+    "delta_quality_cost_vs_sensitivity",
+    "delta_iv_vs_sensitivity",
+    "delta_audits_vs_sensitivity",
+    "delta_revocations_vs_sensitivity",
+    "delta_unique_fails_vs_sensitivity",
+    "pareto_status",
+]
+
+
 # ── sweep parser utilities ─────────────────────────────────────────────────────
 
 def _parse_float_list(s: str) -> List[float]:
@@ -84,6 +124,10 @@ def _parse_choice_list(s: str, allowed: Tuple[str, ...], name: str) -> List[str]
     if not values:
         raise SystemExit(f"{name} must contain at least one value")
     return values
+
+
+def _parse_schedule_list(s: str) -> List[str]:
+    return _parse_choice_list(s, _ALLOWED_SCHEDULES, "--schedule")
 
 
 def _provider_policy_pairs(parent_arg: str, probe_arg: str) -> List[Tuple[str, str]]:
@@ -1428,6 +1472,168 @@ def _print_provider_policy_comparison(results: List[RunResult], weights: Quality
         )
 
 
+def _policy_report_group_key(r: RunResult) -> Tuple[str, int, int, str]:
+    return (r.config.schedule, r.config.n_vars, r.config.cycles, _policy_label(r))
+
+
+def _policy_report_scope_key(row: Dict[str, Any]) -> Tuple[str, int, int]:
+    return (row["schedule"], row["n_vars"], row["cycles"])
+
+
+def _policy_report_pareto_metrics(row: Dict[str, Any]) -> Tuple[float, float, float, float, float]:
+    return (
+        float(row["avg_quality_cost"]),
+        float(row["avg_iv"]),
+        float(row["avg_full_audits"]),
+        float(row["avg_revocations"]),
+        float(row["avg_unique_fails"]),
+    )
+
+
+def _mark_policy_report_pareto(rows: List[Dict[str, Any]]) -> None:
+    grouped: Dict[Tuple[str, int, int], List[Dict[str, Any]]] = {}
+    for row in rows:
+        grouped.setdefault(_policy_report_scope_key(row), []).append(row)
+
+    for group_rows in grouped.values():
+        for row in group_rows:
+            metrics = _policy_report_pareto_metrics(row)
+            dominated = False
+            for other in group_rows:
+                if other is row:
+                    continue
+                other_metrics = _policy_report_pareto_metrics(other)
+                if (
+                    all(o <= m for o, m in zip(other_metrics, metrics))
+                    and any(o < m for o, m in zip(other_metrics, metrics))
+                ):
+                    dominated = True
+                    break
+            row["pareto_status"] = "dominated" if dominated else "efficient"
+
+
+def _build_policy_report_rows(
+    results: List[RunResult],
+    weights: QualityWeights,
+) -> List[Dict[str, Any]]:
+    ok_runs = [r for r in results if r.ok]
+    groups: Dict[Tuple[str, int, int, str], List[RunResult]] = {}
+    for r in ok_runs:
+        groups.setdefault(_policy_report_group_key(r), []).append(r)
+
+    rows: List[Dict[str, Any]] = []
+    for (schedule, n_vars, cycles, policy), runs in sorted(groups.items()):
+        n = max(1, len(runs))
+        q = _quality_for_runs(runs, weights)
+        row: Dict[str, Any] = {
+            "schedule": schedule,
+            "n_vars": n_vars,
+            "cycles": cycles,
+            "policy": policy,
+            "parent_ranker": runs[0].config.parent_ranker,
+            "probe_proposer": runs[0].config.probe_proposer,
+            "runs": len(runs),
+            "avg_quality_cost": q.quality_cost / n,
+            "avg_iv": q.iv / n,
+            "avg_full_audits": q.full_audits / n,
+            "avg_revocations": q.revocations / n,
+            "avg_unique_fails": q.unique_fails / n,
+            "avg_regime_fail": q.regime_sentinel_fail / n,
+            "avg_no_sentinel": q.regime_sentinel_no_sentinel / n,
+            "avg_skip_pct": sum(r.skip_pct for r in runs) / n,
+            "avg_elapsed": sum(r.elapsed for r in runs) / n,
+            "invariants_ok": all(not r.violations for r in runs),
+            "delta_quality_cost_vs_sensitivity": None,
+            "delta_iv_vs_sensitivity": None,
+            "delta_audits_vs_sensitivity": None,
+            "delta_revocations_vs_sensitivity": None,
+            "delta_unique_fails_vs_sensitivity": None,
+            "pareto_status": "efficient",
+        }
+        rows.append(row)
+
+    baseline_by_scope = {
+        _policy_report_scope_key(row): row
+        for row in rows
+        if row["policy"] == _POLICY_REPORT_BASELINE
+    }
+    for row in rows:
+        baseline = baseline_by_scope.get(_policy_report_scope_key(row))
+        if baseline is None:
+            continue
+        row["delta_quality_cost_vs_sensitivity"] = (
+            row["avg_quality_cost"] - baseline["avg_quality_cost"]
+        )
+        row["delta_iv_vs_sensitivity"] = row["avg_iv"] - baseline["avg_iv"]
+        row["delta_audits_vs_sensitivity"] = (
+            row["avg_full_audits"] - baseline["avg_full_audits"]
+        )
+        row["delta_revocations_vs_sensitivity"] = (
+            row["avg_revocations"] - baseline["avg_revocations"]
+        )
+        row["delta_unique_fails_vs_sensitivity"] = (
+            row["avg_unique_fails"] - baseline["avg_unique_fails"]
+        )
+
+    _mark_policy_report_pareto(rows)
+    return rows
+
+
+def _format_policy_report_value(field: str, value: Any) -> str:
+    if value is None:
+        return "NA"
+    if field in {"avg_quality_cost", "delta_quality_cost_vs_sensitivity"}:
+        return f"{float(value):.0f}"
+    if field == "avg_elapsed":
+        return f"{float(value):.2f}"
+    if field in {
+        "avg_iv",
+        "avg_full_audits",
+        "avg_revocations",
+        "avg_unique_fails",
+        "avg_regime_fail",
+        "avg_no_sentinel",
+        "avg_skip_pct",
+        "delta_iv_vs_sensitivity",
+        "delta_audits_vs_sensitivity",
+        "delta_revocations_vs_sensitivity",
+        "delta_unique_fails_vs_sensitivity",
+    }:
+        return f"{float(value):.1f}"
+    return str(value)
+
+
+def _print_policy_report(rows: List[Dict[str, Any]]) -> None:
+    if not rows:
+        return
+
+    print()
+    print("-- policy comparison report ----------------------------------------")
+    print("  diagnostic only - no policy is selected or activated")
+    print("  " + "\t".join(_POLICY_REPORT_FIELDS))
+    for row in rows:
+        print(
+            "  "
+            + "\t".join(
+                _format_policy_report_value(field, row.get(field))
+                for field in _POLICY_REPORT_FIELDS
+            )
+        )
+
+
+def _write_policy_report_tsv(path: str, rows: List[Dict[str, Any]]) -> None:
+    with open(path, "w", newline="") as fh:
+        writer = csv.DictWriter(
+            fh,
+            fieldnames=_POLICY_REPORT_FIELDS,
+            delimiter="\t",
+            extrasaction="ignore",
+        )
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
+
+
 def _print_aggregate(results: List[RunResult], weights: QualityWeights = QualityWeights()) -> None:
     ok_runs = [r for r in results if r.ok]
     if not ok_runs:
@@ -1775,9 +1981,8 @@ def main():
     p.add_argument("--seeds",   default="42,7,99",
                    help="comma-separated seeds (default: 42,7,99)")
     p.add_argument("--schedule", default="incremental",
-                   choices=["incremental", "periodic_shifts", "novelty", "shaped",
-                            "rare_catastrophe", "regime_switch", "false_trass"],
-                   help="mutation schedule (default: incremental)")
+                   help=("mutation schedule(s), comma-separated. allowed: "
+                         f"{','.join(_ALLOWED_SCHEDULES)} (default: incremental)"))
     p.add_argument("--settle-cycles", type=int, default=8,
                    help="settle cycles for incremental reveals or regime_switch initial window (default: 8)")
     p.add_argument("--noise-sigma", type=float, default=0.02,
@@ -1786,6 +1991,10 @@ def main():
                    help="max parallel workers (default: cpu count)")
     p.add_argument("--out", default=None,
                    help="write one JSON line per run to this file")
+    p.add_argument("--policy-report", action="store_true",
+                   help="print diagnostic-only provider policy comparison rows")
+    p.add_argument("--policy-report-tsv", default=None, metavar="PATH",
+                   help="write policy comparison report rows as TSV")
     p.add_argument("--verbose-violations", action="store_true",
                    help="print full violation details for each failing run")
     p.add_argument("--compare", action="store_true",
@@ -1797,11 +2006,11 @@ def main():
     p.add_argument("--hybrid-control", default="off",
                    choices=["off", "interfaces"],
                    help="hybrid control mode: off=current behavior; interfaces=symbolic provider wrappers (default: off)")
-    p.add_argument("--parent-ranker", default="sensitivity",
+    p.add_argument("--parent-ranker", default=None,
                    help=("parent ranker provider(s) for --hybrid-control interfaces. "
                          "Use comma-separated values to compare policies: "
                          "sensitivity,history,history_rescue (default: sensitivity)"))
-    p.add_argument("--probe-proposer", default="none",
+    p.add_argument("--probe-proposer", default=None,
                    help=("probe proposer provider(s) for --hybrid-control interfaces. "
                          "Use comma-separated values to compare policies: "
                          "none,history,history_rescue (default: none)"))
@@ -1855,10 +2064,31 @@ def main():
         improved_probe_credit=args.quality_improved_probe_credit,
     )
 
+    if args.policy_report and args.hybrid_control != "interfaces":
+        raise SystemExit("--policy-report requires --hybrid-control interfaces")
+
+    parent_ranker_arg = args.parent_ranker
+    probe_proposer_arg = args.probe_proposer
+    if args.policy_report:
+        if parent_ranker_arg is None:
+            parent_ranker_arg = _POLICY_REPORT_PARENT_RANKERS
+        if probe_proposer_arg is None:
+            probe_proposer_arg = _POLICY_REPORT_PROBE_PROPOSERS
+    else:
+        if parent_ranker_arg is None:
+            parent_ranker_arg = _DEFAULT_PARENT_RANKER
+        if probe_proposer_arg is None:
+            probe_proposer_arg = _DEFAULT_PROBE_PROPOSER
+
     var_list   = [int(x) for x in args.vars.split(",")]
     cycle_list = [int(x) for x in args.cycles.split(",")]
     seed_list  = [int(x) for x in args.seeds.split(",")]
-    policy_pairs = _provider_policy_pairs(args.parent_ranker, args.probe_proposer)
+    schedule_list = _parse_schedule_list(args.schedule)
+    policy_pairs = _provider_policy_pairs(parent_ranker_arg, probe_proposer_arg)
+    if args.policy_report and _POLICY_REPORT_BASELINE not in {
+        f"{parent}/{probe}" for parent, probe in policy_pairs
+    }:
+        raise SystemExit("--policy-report requires sensitivity/none baseline policy")
 
     factor_list = _parse_float_list(args.shadow_conservative_factors)
     ms_list     = _parse_int_list(args.shadow_min_samples)
@@ -1882,7 +2112,7 @@ def main():
 
     configs = [
         RunConfig(n_vars=v, cycles=c, seed=s,
-                  schedule=args.schedule,
+                  schedule=schedule,
                   settle_cycles=args.settle_cycles,
                   noise_sigma=args.noise_sigma,
                   compare=args.compare,
@@ -1901,6 +2131,7 @@ def main():
                   shadow_key_symbolic_false_ok_tolerance=args.shadow_key_symbolic_false_ok_tolerance,
                   parent_ranker=parent_ranker,
                   probe_proposer=probe_proposer)
+        for schedule in schedule_list
         for v in var_list
         for c in cycle_list
         for s in seed_list
@@ -1919,6 +2150,8 @@ def main():
             f" +hybrid({args.hybrid_control})"
             f" +policies({','.join(f'{p}/{q}' for p, q in policy_pairs)})"
         )
+    if args.policy_report:
+        mode += " +policy-report"
     if args.repair_agenda:
         mode += " +repair-agenda"
     if shadow_sweep:
@@ -1929,7 +2162,7 @@ def main():
         mode += " +shadow-key-authority"
     print(f"dreth arch-test{mode}: {total} runs | "
           f"vars={var_list} cycles={cycle_list} seeds={seed_list} "
-          f"schedule={args.schedule}", flush=True)
+          f"schedule={schedule_list}", flush=True)
     print(f"  workers={n_workers}  settle={args.settle_cycles}  "
           f"noise={args.noise_sigma}", flush=True)
     if args.compare:
@@ -2030,13 +2263,28 @@ def main():
                 out_fh.write(json.dumps(rec) + "\n")
                 out_fh.flush()
 
+    policy_report_rows = (
+        _build_policy_report_rows(results, quality_weights)
+        if args.policy_report
+        else []
+    )
+    if out_fh and policy_report_rows:
+        for row in policy_report_rows:
+            rec = {"record_type": "policy_report", **row}
+            out_fh.write(json.dumps(rec) + "\n")
+        out_fh.flush()
     if out_fh:
         out_fh.close()
+    if args.policy_report_tsv:
+        _write_policy_report_tsv(args.policy_report_tsv, policy_report_rows)
 
     print()
     print("── aggregate ──────────────────────────────────────────────────────")
     _print_aggregate(results, quality_weights)
-    _print_provider_policy_comparison(results, quality_weights)
+    if args.policy_report:
+        _print_policy_report(policy_report_rows)
+    else:
+        _print_provider_policy_comparison(results, quality_weights)
 
     if shadow_sweep:
         _print_shadow_calibration_summary(results)
