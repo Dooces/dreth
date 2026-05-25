@@ -32,6 +32,17 @@ SHADOW_ROW_FIELDS: Tuple[str, ...] = (
     "shadow_history_history_wins_missed",
 )
 
+# Fields written to policy-report rows by the baseline-only shadow selector.
+# One prediction per (schedule, n_vars, cycles) scope; features from sensitivity/none only.
+BASELINE_SHADOW_ROW_FIELDS: Tuple[str, ...] = (
+    "baseline_shadow_predicted_policy",
+    "baseline_shadow_actual_best_policy",
+    "baseline_shadow_correct",
+    "baseline_shadow_false_switch_to_history_rescue_under_regime_switch",
+    "baseline_shadow_missed_history_rescue_under_false_trass",
+    "baseline_shadow_history_history_wins_missed",
+)
+
 POLICIES = (
     "sensitivity/none",
     "history/history",
@@ -418,3 +429,54 @@ def annotate_rows(
             pred.missed_history_rescue_under_false_trass
         )
         row["shadow_history_history_wins_missed"] = pred.history_history_wins_missed
+
+
+def baseline_annotate_rows(
+    rows: List[Dict[str, Any]],
+    run_groups: Dict[Tuple[str, int, int, str], List[Any]],
+    selector: ShadowPolicySelector,
+) -> None:
+    """Annotate policy-report rows with baseline-only shadow predictions.
+
+    For each (schedule, n_vars, cycles) scope:
+      - extracts DiagnosticFeatures from the sensitivity/none RunResult group only
+      - predicts once for the whole scope (not once per policy row)
+      - writes the prediction to every row in that scope
+
+    Measures whether the default active policy's diagnostics alone are sufficient
+    to predict which policy would win. The schedule label is post-hoc only and
+    never visible inside predict(). No agent or provider state is touched.
+    """
+    best_by_scope = best_policy_by_scope(rows)
+
+    scope_rows: Dict[Tuple[str, int, int], List[Dict[str, Any]]] = {}
+    for row in rows:
+        scope: Tuple[str, int, int] = (row["schedule"], row["n_vars"], row["cycles"])
+        scope_rows.setdefault(scope, []).append(row)
+
+    for scope, scope_group in scope_rows.items():
+        schedule, n_vars, cycles = scope
+        actual_best = best_by_scope.get(scope)
+        baseline_key: Tuple[str, int, int, str] = (schedule, n_vars, cycles, "sensitivity/none")
+        baseline_runs = run_groups.get(baseline_key, [])
+
+        if not baseline_runs or actual_best is None:
+            for row in scope_group:
+                for f in BASELINE_SHADOW_ROW_FIELDS:
+                    row[f] = None
+            continue
+
+        features = features_from_run_results(baseline_runs)
+        pred = selector.observe(features, actual_best, schedule=schedule)
+
+        for row in scope_group:
+            row["baseline_shadow_predicted_policy"] = pred.predicted_policy
+            row["baseline_shadow_actual_best_policy"] = pred.actual_best_policy
+            row["baseline_shadow_correct"] = pred.correct
+            row["baseline_shadow_false_switch_to_history_rescue_under_regime_switch"] = (
+                pred.false_switch_to_history_rescue_under_regime_switch
+            )
+            row["baseline_shadow_missed_history_rescue_under_false_trass"] = (
+                pred.missed_history_rescue_under_false_trass
+            )
+            row["baseline_shadow_history_history_wins_missed"] = pred.history_history_wins_missed

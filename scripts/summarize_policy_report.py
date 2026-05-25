@@ -64,6 +64,13 @@ class Row(NamedTuple):
     shadow_false_switch_to_history_rescue_under_regime_switch: str = ""
     shadow_missed_history_rescue_under_false_trass: str = ""
     shadow_history_history_wins_missed: str = ""
+    # Baseline-only shadow selector fields (sensitivity/none diagnostics → one prediction/scope).
+    baseline_shadow_predicted_policy: str = ""
+    baseline_shadow_actual_best_policy: str = ""
+    baseline_shadow_correct: str = ""
+    baseline_shadow_false_switch_to_history_rescue_under_regime_switch: str = ""
+    baseline_shadow_missed_history_rescue_under_false_trass: str = ""
+    baseline_shadow_history_history_wins_missed: str = ""
 
 
 def load_tsv(path: str) -> list[Row]:
@@ -104,6 +111,24 @@ def load_tsv(path: str) -> list[Row]:
                 ),
                 shadow_history_history_wins_missed=(
                     r.get("shadow_history_history_wins_missed", "") or ""
+                ),
+                baseline_shadow_predicted_policy=(
+                    r.get("baseline_shadow_predicted_policy", "") or ""
+                ),
+                baseline_shadow_actual_best_policy=(
+                    r.get("baseline_shadow_actual_best_policy", "") or ""
+                ),
+                baseline_shadow_correct=(
+                    r.get("baseline_shadow_correct", "") or ""
+                ),
+                baseline_shadow_false_switch_to_history_rescue_under_regime_switch=(
+                    r.get("baseline_shadow_false_switch_to_history_rescue_under_regime_switch", "") or ""
+                ),
+                baseline_shadow_missed_history_rescue_under_false_trass=(
+                    r.get("baseline_shadow_missed_history_rescue_under_false_trass", "") or ""
+                ),
+                baseline_shadow_history_history_wins_missed=(
+                    r.get("baseline_shadow_history_history_wins_missed", "") or ""
                 ),
             ))
     return rows
@@ -397,6 +422,92 @@ def print_shadow_selector_summary(summary: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
+# 8. Baseline-only shadow selector summary
+# ---------------------------------------------------------------------------
+
+def compute_baseline_shadow_selector_summary(rows: list[Row]) -> dict:
+    """Compute baseline-only shadow selector accuracy from per-row baseline fields.
+
+    Each scope contributes one prediction (from sensitivity/none diagnostics).
+    Returns an empty dict if the TSV was produced without baseline annotation.
+    """
+    annotated = [r for r in rows if r.baseline_shadow_predicted_policy]
+    if not annotated:
+        return {}
+
+    # De-duplicate by scope: all rows in a scope carry the same baseline prediction,
+    # so count each scope once to match the one-prediction-per-scope invariant.
+    seen_scopes: set = set()
+    unique: list[Row] = []
+    for r in annotated:
+        scope = (r.schedule, r.n_vars, r.cycles)
+        if scope not in seen_scopes:
+            seen_scopes.add(scope)
+            unique.append(r)
+
+    n = len(unique)
+    n_correct = sum(
+        1 for r in unique if r.baseline_shadow_correct.strip().lower() == "true"
+    )
+    false_switches = sum(
+        1 for r in unique
+        if r.baseline_shadow_false_switch_to_history_rescue_under_regime_switch.strip().lower() == "true"
+    )
+    missed_rescues = sum(
+        1 for r in unique
+        if r.baseline_shadow_missed_history_rescue_under_false_trass.strip().lower() == "true"
+    )
+    history_history_wins_missed = sum(
+        1 for r in unique
+        if r.baseline_shadow_history_history_wins_missed.strip().lower() == "true"
+    )
+
+    predicted_counts: dict[str, int] = defaultdict(int)
+    actual_counts: dict[str, int] = defaultdict(int)
+    for r in unique:
+        predicted_counts[r.baseline_shadow_predicted_policy] += 1
+        actual_counts[r.baseline_shadow_actual_best_policy] += 1
+
+    return {
+        "n_predictions": n,
+        "accuracy": n_correct / n,
+        "false_switch_to_history_rescue_under_regime_switch": false_switches,
+        "missed_history_rescue_under_false_trass": missed_rescues,
+        "history_history_wins_missed": history_history_wins_missed,
+        "predicted_policy": dict(predicted_counts),
+        "actual_best_policy": dict(actual_counts),
+    }
+
+
+def print_baseline_shadow_selector_summary(summary: dict) -> None:
+    print("\n=== 8. Baseline-Only Shadow Policy Selector Summary ===")
+    if not summary:
+        print("  (no baseline shadow annotation in TSV — re-run with current batch_run.py)")
+        return
+    print("  diagnostic only — no runtime policy switching")
+    print(f"  n_predictions : {summary['n_predictions']}")
+    print(f"  accuracy      : {summary['accuracy']:.3f}")
+    print(
+        f"  false_switch_to_history_rescue_under_regime_switch : "
+        f"{summary['false_switch_to_history_rescue_under_regime_switch']}"
+    )
+    print(
+        f"  missed_history_rescue_under_false_trass            : "
+        f"{summary['missed_history_rescue_under_false_trass']}"
+    )
+    print(
+        f"  history_history_wins_missed                        : "
+        f"{summary['history_history_wins_missed']}"
+    )
+    print("  predicted_policy counts:")
+    for policy, count in sorted(summary["predicted_policy"].items()):
+        print(f"    {policy:<36} {count}")
+    print("  actual_best_policy counts:")
+    for policy, count in sorted(summary["actual_best_policy"].items()):
+        print(f"    {policy:<36} {count}")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -410,6 +521,7 @@ def summarize(path: str) -> None:
     tradeoff = compute_iv_tradeoff(rows)
     recs = compute_recommendations(rows)
     shadow_summary = compute_shadow_selector_summary(rows)
+    baseline_summary = compute_baseline_shadow_selector_summary(rows)
 
     print_winner_table(winners)
     print_winner_counts(counts)
@@ -418,6 +530,7 @@ def summarize(path: str) -> None:
     print_iv_tradeoff(tradeoff)
     print_recommendations(recs)
     print_shadow_selector_summary(shadow_summary)
+    print_baseline_shadow_selector_summary(baseline_summary)
 
 
 def main() -> None:
