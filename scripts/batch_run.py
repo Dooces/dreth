@@ -190,6 +190,8 @@ class RunConfig:
     relative_authority_frontier_report: bool = False
     relative_authority_frontier_temporal_report: bool = False
     relative_authority_frontier_warmup_cycles: Optional[int] = None
+    relative_authority_frontier_max_candidates: int = 20
+    relative_authority_frontier_max_depth: int = 2
 
 
 # ── per-run result ─────────────────────────────────────────────────────────────
@@ -386,6 +388,13 @@ class ArchMetrics:
     temporal_frontier_revoked_recall: float = 0.0
     temporal_frontier_candidate_reduction_vs_visible: float = 0.0
     temporal_frontier_misses: int = 0
+    temporal_frontier_avg_visible_count: float = 0.0
+    temporal_frontier_frontier_fraction: float = 0.0
+    temporal_frontier_random_recall_baseline: float = 0.0
+    temporal_frontier_recall_lift: float = 0.0
+    temporal_frontier_warmup_cycles: int = 0
+    temporal_frontier_max_candidates: int = 20
+    temporal_frontier_max_depth: int = 2
 
 
 @dataclass
@@ -746,6 +755,8 @@ def _build_and_run_dreth(
         )
         agent._diagnostic_audit_observer = TemporalGraphFrontierEvaluator(
             warmup_cycles=warmup_cycles,
+            max_depth=cfg.relative_authority_frontier_max_depth,
+            max_candidates=cfg.relative_authority_frontier_max_candidates,
         )
     agent.initialize()
 
@@ -1062,6 +1073,21 @@ def _extract_arch_metrics(agent: ChainedAgent, world: CausalWorld) -> ArchMetric
             _tfs["temporal_frontier_candidate_reduction_vs_visible"]
         )
         m.temporal_frontier_misses = int(_tfs["temporal_frontier_misses"])
+        m.temporal_frontier_avg_visible_count = float(
+            _tfs["temporal_frontier_avg_visible_count"]
+        )
+        m.temporal_frontier_frontier_fraction = float(
+            _tfs["temporal_frontier_frontier_fraction"]
+        )
+        m.temporal_frontier_random_recall_baseline = float(
+            _tfs["temporal_frontier_random_recall_baseline"]
+        )
+        m.temporal_frontier_recall_lift = float(
+            _tfs["temporal_frontier_recall_lift"]
+        )
+        m.temporal_frontier_warmup_cycles = int(_temporal_frontier.warmup_cycles)
+        m.temporal_frontier_max_candidates = int(_temporal_frontier.max_candidates)
+        m.temporal_frontier_max_depth = int(_temporal_frontier.max_depth)
 
     return m
 
@@ -2287,10 +2313,10 @@ def _print_aggregate(results: List[RunResult], weights: QualityWeights = Quality
             else 0.0
         )
 
-        def _label_recall(hit_attr: str, total_attr: str) -> float:
+        def _label_recall(hit_attr: str, total_attr: str) -> str:
             hits = sum(getattr(r.arch, hit_attr) for r in ok_runs)
             total = sum(getattr(r.arch, total_attr) for r in ok_runs)
-            return hits / total if total else 0.0
+            return f"{(hits / total):.3f}" if total else "N/A"
 
         chosen_parent_recall = _label_recall(
             "direct_frontier_chosen_parent_hits",
@@ -2321,12 +2347,12 @@ def _print_aggregate(results: List[RunResult], weights: QualityWeights = Quality
         print("relative_authority_frontier:")
         print(f"  evals={total_evals}")
         print(f"  avg_frontier_size={avg_frontier_size:.1f}")
-        print(f"  direct_frontier_chosen_parent_recall={chosen_parent_recall:.3f}")
-        print(f"  loo_frontier_chosen_parent_recall={loo_chosen_parent_recall:.3f}")
-        print(f"  direct_frontier_revoked_recall={revoked_neighbor_recall:.3f}")
-        print(f"  loo_frontier_revoked_recall={loo_revoked_neighbor_recall:.3f}")
-        print(f"  direct_frontier_dormant_recall={dormant_neighbor_recall:.3f}")
-        print(f"  loo_frontier_dormant_recall={loo_dormant_neighbor_recall:.3f}")
+        print(f"  direct_frontier_chosen_parent_recall={chosen_parent_recall}")
+        print(f"  loo_frontier_chosen_parent_recall={loo_chosen_parent_recall}")
+        print(f"  direct_frontier_revoked_recall={revoked_neighbor_recall}")
+        print(f"  loo_frontier_revoked_recall={loo_revoked_neighbor_recall}")
+        print(f"  direct_frontier_dormant_recall={dormant_neighbor_recall}")
+        print(f"  loo_frontier_dormant_recall={loo_dormant_neighbor_recall}")
 
     if any(r.config.relative_authority_frontier_temporal_report for r in ok_runs):
         total_evals = sum(r.arch.temporal_frontier_evals for r in ok_runs)
@@ -2339,9 +2365,9 @@ def _print_aggregate(results: List[RunResult], weights: QualityWeights = Quality
             if total_evals
             else 0.0
         )
-        reduction = (
+        avg_visible = (
             sum(
-                r.arch.temporal_frontier_candidate_reduction_vs_visible
+                r.arch.temporal_frontier_avg_visible_count
                 * r.arch.temporal_frontier_evals
                 for r in ok_runs
             )
@@ -2349,22 +2375,29 @@ def _print_aggregate(results: List[RunResult], weights: QualityWeights = Quality
             if total_evals
             else 0.0
         )
+        frontier_fraction = avg_size / avg_visible if avg_visible else 0.0
+        reduction = 1.0 - frontier_fraction if total_evals else 0.0
         chosen_hits = sum(r.arch.temporal_frontier_chosen_parent_hits for r in ok_runs)
         chosen_total = sum(r.arch.temporal_frontier_chosen_parent_total for r in ok_runs)
         revoked_hits = sum(r.arch.temporal_frontier_revoked_hits for r in ok_runs)
         revoked_total = sum(r.arch.temporal_frontier_revoked_total for r in ok_runs)
+        chosen_recall = chosen_hits / chosen_total if chosen_total else 0.0
+        recall_lift = chosen_recall / max(frontier_fraction, 1e-9)
         print()
         print("relative_authority_frontier_temporal:")
         print(f"  evals={total_evals}")
+        print(f"  avg_visible_count={avg_visible:.1f}")
         print(f"  avg_frontier_size={avg_size:.1f}")
-        print(
-            "  chosen_parent_recall="
-            f"{(chosen_hits / chosen_total if chosen_total else 0.0):.3f}"
+        print(f"  frontier_fraction={frontier_fraction:.3f}")
+        print(f"  chosen_parent_recall={chosen_recall:.3f}")
+        print(f"  random_recall_baseline={frontier_fraction:.3f}")
+        print(f"  recall_lift={recall_lift:.3f}")
+        revoked_recall = (
+            f"{(revoked_hits / revoked_total):.3f}"
+            if revoked_total
+            else "N/A"
         )
-        print(
-            "  revoked_recall="
-            f"{(revoked_hits / revoked_total if revoked_total else 0.0):.3f}"
-        )
+        print(f"  revoked_recall={revoked_recall}")
         print(f"  candidate_reduction_vs_visible={reduction:.3f}")
         print(f"  misses={sum(r.arch.temporal_frontier_misses for r in ok_runs)}")
 
@@ -2504,6 +2537,10 @@ def main():
                    help="print shadow-only warmup temporal NethraGraph frontier summary; requires --relative-authority-report")
     p.add_argument("--relative-authority-frontier-warmup-cycles", type=int, default=None,
                    help="warmup cycles before temporal frontier proposals; default max(100, cycles//3)")
+    p.add_argument("--relative-authority-frontier-max-candidates", type=int, default=20,
+                   help="maximum candidates in diagnostic temporal graph frontier (default: 20)")
+    p.add_argument("--relative-authority-frontier-max-depth", type=int, default=2,
+                   help="maximum BFS depth for diagnostic temporal graph frontier (default: 2)")
     args = p.parse_args()
     quality_weights = QualityWeights(
         audit_weight=args.quality_audit_weight,
@@ -2589,7 +2626,9 @@ def main():
                   relative_authority_report=args.relative_authority_report,
                   relative_authority_frontier_report=args.relative_authority_frontier_report,
                   relative_authority_frontier_temporal_report=args.relative_authority_frontier_temporal_report,
-                  relative_authority_frontier_warmup_cycles=args.relative_authority_frontier_warmup_cycles)
+                  relative_authority_frontier_warmup_cycles=args.relative_authority_frontier_warmup_cycles,
+                  relative_authority_frontier_max_candidates=args.relative_authority_frontier_max_candidates,
+                  relative_authority_frontier_max_depth=args.relative_authority_frontier_max_depth)
         for schedule in schedule_list
         for v in var_list
         for c in cycle_list
@@ -2629,7 +2668,11 @@ def main():
             if args.relative_authority_frontier_warmup_cycles is not None
             else "default"
         )
-        mode += f" +relative-authority-frontier-temporal(warmup={_warmup_label})"
+        mode += (
+            " +relative-authority-frontier-temporal"
+            f"(warmup={_warmup_label},cap={args.relative_authority_frontier_max_candidates},"
+            f"depth={args.relative_authority_frontier_max_depth})"
+        )
     print(f"dreth arch-test{mode}: {total} runs | "
           f"vars={var_list} cycles={cycle_list} seeds={seed_list} "
           f"schedule={schedule_list}", flush=True)
@@ -2796,6 +2839,21 @@ def main():
                             r.arch.temporal_frontier_candidate_reduction_vs_visible, 6
                         ),
                         "temporal_frontier_misses": r.arch.temporal_frontier_misses,
+                        "temporal_frontier_avg_visible_count": round(
+                            r.arch.temporal_frontier_avg_visible_count, 6
+                        ),
+                        "temporal_frontier_frontier_fraction": round(
+                            r.arch.temporal_frontier_frontier_fraction, 6
+                        ),
+                        "temporal_frontier_random_recall_baseline": round(
+                            r.arch.temporal_frontier_random_recall_baseline, 6
+                        ),
+                        "temporal_frontier_recall_lift": round(
+                            r.arch.temporal_frontier_recall_lift, 6
+                        ),
+                        "warmup_cycles": r.arch.temporal_frontier_warmup_cycles,
+                        "max_candidates": r.arch.temporal_frontier_max_candidates,
+                        "max_depth": r.arch.temporal_frontier_max_depth,
                     })
                 if r.baseline and r.baseline.ok:
                     rec["baseline"] = {

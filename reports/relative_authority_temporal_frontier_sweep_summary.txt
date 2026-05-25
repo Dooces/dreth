@@ -1,0 +1,53 @@
+A. Temporal frontier scaling table:
+  schedule         policy                           n_vars  cycles  warmup  cap depth runs  evals avg_visible avg_frontier_size frontier_fraction   chosen_parent_recall  random_recall_baseline recall_lift candidate_reduction_vs_visible  misses
+  false_trass      history_rescue/history_rescue        50    3000    1000   20     2    3      1       50.00              1.00             0.020                  0.000                   0.020       0.000                          0.980       2
+  false_trass      sensitivity/none                     50    3000    1000   20     2    3      0        0.00              0.00             0.000                    N/A                   0.000         N/A                          0.000       0
+  false_trass      history_rescue/history_rescue        50    7500    2500   20     2    3      1       50.00              1.00             0.020                  0.000                   0.020       0.000                          0.980       2
+  false_trass      sensitivity/none                     50    7500    2500   20     2    3      0        0.00              0.00             0.000                    N/A                   0.000         N/A                          0.000       0
+  false_trass      history_rescue/history_rescue        50   10000    3333   20     2    3      0        0.00              0.00             0.000                    N/A                   0.000         N/A                          0.000       0
+  false_trass      sensitivity/none                     50   10000    3333   20     2    3      0        0.00              0.00             0.000                    N/A                   0.000         N/A                          0.000       0
+  false_trass      history_rescue/history_rescue        75    3000    1000   20     2    3      4       75.00              8.75             0.117                  0.250                   0.117       2.143                          0.883       3
+  false_trass      sensitivity/none                     75    3000    1000   20     2    3      2       75.00              9.00             0.120                  0.333                   0.120       2.778                          0.880       2
+  false_trass      history_rescue/history_rescue        75    7500    2500   20     2    3     10       75.00              5.60             0.075                  0.400                   0.075       5.357                          0.925       3
+  false_trass      sensitivity/none                     75    7500    2500   20     2    3      0        0.00              0.00             0.000                    N/A                   0.000         N/A                          0.000       0
+  false_trass      history_rescue/history_rescue        75   10000    3333   20     2    3     12       75.00              7.33             0.098                  0.429                   0.098       4.383                          0.902       4
+  false_trass      sensitivity/none                     75   10000    3333   20     2    3      0        0.00              0.00             0.000                    N/A                   0.000         N/A                          0.000       0
+  false_trass      history_rescue/history_rescue       100    3000    1000   20     2    3      8      100.00              4.75             0.047                  0.333                   0.047       7.018                          0.953       4
+  false_trass      sensitivity/none                    100    3000    1000   20     2    3      2      100.00              3.50             0.035                  0.000                   0.035       0.000                          0.965       1
+  false_trass      history_rescue/history_rescue       100    7500    2500   20     2    3     75      100.00              5.15             0.051                  0.579                   0.051      11.249                          0.949      16
+  false_trass      sensitivity/none                    100    7500    2500   20     2    3      2      100.00              3.00             0.030                  0.250                   0.030       8.333                          0.970       3
+  false_trass      history_rescue/history_rescue       100   10000    3333   20     2    3     67      100.00              5.90             0.059                  0.611                   0.059      10.366                          0.941      14
+  false_trass      sensitivity/none                    100   10000    3333   20     2    3      1      100.00              5.00             0.050                  0.500                   0.050      10.000                          0.950       1
+  regime_switch    history_rescue/history_rescue        50    3000    1000   20     2    3    261       50.00             16.30             0.326                  0.478                   0.326       1.467                          0.674     144
+  regime_switch    sensitivity/none                     50    3000    1000   20     2    3     86       50.00             10.79             0.216                  0.608                   0.216       2.818                          0.784      29
+  regime_switch    history_rescue/history_rescue        50    7500    2500   20     2    3    233       50.00             17.94             0.359                  0.358                   0.359       0.997                          0.641     140
+  regime_switch    sensitivity/none                     50    7500    2500   20     2    3    129       50.00             15.09             0.302                  0.523                   0.302       1.733                          0.698      52
+  regime_switch    history_rescue/history_rescue        50   10000    3333   20     2    3    267       50.00             17.67             0.353                  0.321                   0.353       0.910                          0.647     171
+  regime_switch    sensitivity/none                     50   10000    3333   20     2    3    123       50.00             16.75             0.335                  0.535                   0.335       1.597                          0.665      53
+  regime_switch    history_rescue/history_rescue        75    3000    1000   20     2    3    391       75.00             15.23             0.203                  0.607                   0.203       2.986                          0.797     144
+  regime_switch    sensitivity/none                     75    3000    1000   20     2    3    232       75.00             16.03             0.214                  0.586                   0.214       2.741                          0.786      82
+  regime_switch    history_rescue/history_rescue        75    7500    2500   20     2    3    483       75.00             16.92             0.226                  0.419                   0.226       1.857                          0.774     301
+  regime_switch    sensitivity/none                     75    7500    2500   20     2    3    187       75.00             12.44             0.166                  0.457                   0.166       2.754                          0.834      82
+  regime_switch    history_rescue/history_rescue        75   10000    3333   20     2    3    361       75.00             17.36             0.232                  0.385                   0.232       1.665                          0.768     252
+  regime_switch    sensitivity/none                     75   10000    3333   20     2    3    155       75.00             15.05             0.201                  0.440                   0.201       2.191                          0.799      79
+  regime_switch    history_rescue/history_rescue       100    3000    1000   20     2    3    547      100.00             15.45             0.154                  0.400                   0.154       2.592                          0.846     277
+  regime_switch    sensitivity/none                    100    3000    1000   20     2    3    275      100.00             12.25             0.123                  0.410                   0.123       3.343                          0.877     134
+  regime_switch    history_rescue/history_rescue       100    7500    2500   20     2    3    306      100.00             16.19             0.162                  0.397                   0.162       2.455                          0.838     185
+  regime_switch    sensitivity/none                    100    7500    2500   20     2    3    201      100.00             15.12             0.151                  0.505                   0.151       3.343                          0.849      90
+  regime_switch    history_rescue/history_rescue       100   10000    3333   20     2    3    257      100.00             16.96             0.170                  0.325                   0.170       1.918                          0.830     168
+  regime_switch    sensitivity/none                    100   10000    3333   20     2    3    173      100.00             15.36             0.154                  0.439                   0.154       2.859                          0.846      92
+
+B. Warmup/scaffold curve:
+   cycles warmup_cycles   chosen_parent_recall recall_lift frontier_fraction
+     3000          1000                  0.492       2.717             0.181
+     7500          2500                  0.430       2.189             0.197
+    10000          3333                  0.393       1.873             0.210
+
+C. Scale curve:
+  n_vars   chosen_parent_recall recall_lift frontier_fraction
+      50                  0.434       1.320             0.329
+      75                  0.472       2.244             0.210
+     100                  0.413       2.857             0.145
+
+D. Interpretation warning:
+  Diagnostic only; this measures proposal-prior quality, not safe exclusive filtering.

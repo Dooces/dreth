@@ -476,34 +476,41 @@ class TemporalGraphFrontierEvaluator:
     def summary(self) -> Dict[str, float | int]:
         evals = len(self.evaluations)
         frontier_size_total = sum(ev.frontier_size for ev in self.evaluations)
+        visible_count_total = sum(ev.visible_count for ev in self.evaluations)
         chosen_hits = sum(ev.chosen_parent_hits for ev in self.evaluations)
         chosen_total = sum(ev.chosen_parent_total for ev in self.evaluations)
         revoked_hits = sum(ev.revoked_hits for ev in self.evaluations)
         revoked_total = sum(ev.revoked_total for ev in self.evaluations)
-        reduction_total = sum(
-            1.0 - (ev.frontier_size / max(1, ev.visible_count))
-            for ev in self.evaluations
+        avg_frontier_size = frontier_size_total / evals if evals else 0.0
+        avg_visible_count = visible_count_total / evals if evals else 0.0
+        frontier_fraction = (
+            avg_frontier_size / avg_visible_count
+            if avg_visible_count
+            else 0.0
         )
+        chosen_parent_recall = chosen_hits / chosen_total if chosen_total else 0.0
         misses = (chosen_total - chosen_hits) + (revoked_total - revoked_hits)
         return {
             "temporal_frontier_evals": evals,
-            "temporal_frontier_avg_size": (
-                frontier_size_total / evals if evals else 0.0
-            ),
+            "temporal_frontier_avg_size": avg_frontier_size,
             "temporal_frontier_chosen_parent_hits": chosen_hits,
             "temporal_frontier_chosen_parent_total": chosen_total,
-            "temporal_frontier_chosen_parent_recall": (
-                chosen_hits / chosen_total if chosen_total else 0.0
-            ),
+            "temporal_frontier_chosen_parent_recall": chosen_parent_recall,
             "temporal_frontier_revoked_hits": revoked_hits,
             "temporal_frontier_revoked_total": revoked_total,
             "temporal_frontier_revoked_recall": (
                 revoked_hits / revoked_total if revoked_total else 0.0
             ),
             "temporal_frontier_candidate_reduction_vs_visible": (
-                reduction_total / evals if evals else 0.0
+                1.0 - frontier_fraction if evals else 0.0
             ),
             "temporal_frontier_misses": misses,
+            "temporal_frontier_avg_visible_count": avg_visible_count,
+            "temporal_frontier_frontier_fraction": frontier_fraction,
+            "temporal_frontier_random_recall_baseline": frontier_fraction,
+            "temporal_frontier_recall_lift": (
+                chosen_parent_recall / max(frontier_fraction, 1e-9)
+            ),
         }
 
 
