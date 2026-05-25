@@ -65,6 +65,7 @@ from dreth.learned_residual import (
     OnlineResidualCalibrator,
     FeatureConditionedResidualCalibrator,
 )
+from dreth.quality import QualityWeights, RunQualityScore, make_quality_score
 
 
 # ── sweep parser utilities ─────────────────────────────────────────────────────
@@ -74,6 +75,34 @@ def _parse_float_list(s: str) -> List[float]:
 
 def _parse_int_list(s: str) -> List[int]:
     return [int(x.strip()) for x in s.split(",")]
+
+def _parse_choice_list(s: str, allowed: Tuple[str, ...], name: str) -> List[str]:
+    values = [x.strip() for x in s.split(",") if x.strip()]
+    bad = [x for x in values if x not in allowed]
+    if bad:
+        raise SystemExit(f"invalid {name}: {bad}; allowed={allowed}")
+    if not values:
+        raise SystemExit(f"{name} must contain at least one value")
+    return values
+
+
+def _provider_policy_pairs(parent_arg: str, probe_arg: str) -> List[Tuple[str, str]]:
+    parents = _parse_choice_list(
+        parent_arg, ("sensitivity", "history", "history_rescue"), "--parent-ranker"
+    )
+    probes = _parse_choice_list(
+        probe_arg, ("none", "history", "history_rescue"), "--probe-proposer"
+    )
+    if len(parents) == len(probes):
+        return list(zip(parents, probes))
+    if len(parents) == 1:
+        return [(parents[0], probe) for probe in probes]
+    if len(probes) == 1:
+        return [(parent, probes[0]) for parent in parents]
+    raise SystemExit(
+        "--parent-ranker and --probe-proposer comma lists must have equal length, "
+        "unless one side has exactly one value"
+    )
 
 
 # ── configuration ─────────────────────────────────────────────────────────────
@@ -310,6 +339,8 @@ class RunResult:
     tier_no_cw: Optional[TierMetrics] = None
     # Regime register summary (populated for all dreth runs)
     regime_summary: str = ""
+    # Diagnostic-only cost/quality score.
+    quality: Optional[RunQualityScore] = None
 
 
 # ── sparse-cached-refit baseline agent ────────────────────────────────────────
@@ -1332,7 +1363,72 @@ def _print_shadow_calibration_summary(results: List[RunResult]) -> None:
         )
 
 
-def _print_aggregate(results: List[RunResult]) -> None:
+def _quality_for_run(r: RunResult, weights: QualityWeights) -> RunQualityScore:
+    return make_quality_score(
+        iv=r.interventions,
+        full_audits=r.full_audits,
+        revocations=sum(r.arch.revoked_by_dist.values()),
+        unique_fails=r.arch.total_unique_failures,
+        regime_sentinel_fail=r.arch.regime_sentinel_fails,
+        regime_sentinel_no_sentinel=r.arch.regime_no_sentinel,
+        passive_saved_iv=r.arch.passive_saved_iv,
+        provider_probe_no_effect_count=r.arch.provider_probe_no_effect_count,
+        provider_probe_improved_margin_count=r.arch.provider_probe_improved_margin_count,
+        weights=weights,
+    )
+
+
+def _quality_for_runs(runs: List[RunResult], weights: QualityWeights) -> RunQualityScore:
+    return make_quality_score(
+        iv=sum(r.interventions for r in runs),
+        full_audits=sum(r.full_audits for r in runs),
+        revocations=sum(sum(r.arch.revoked_by_dist.values()) for r in runs),
+        unique_fails=sum(r.arch.total_unique_failures for r in runs),
+        regime_sentinel_fail=sum(r.arch.regime_sentinel_fails for r in runs),
+        regime_sentinel_no_sentinel=sum(r.arch.regime_no_sentinel for r in runs),
+        passive_saved_iv=sum(r.arch.passive_saved_iv for r in runs),
+        provider_probe_no_effect_count=sum(r.arch.provider_probe_no_effect_count for r in runs),
+        provider_probe_improved_margin_count=sum(
+            r.arch.provider_probe_improved_margin_count for r in runs
+        ),
+        weights=weights,
+    )
+
+
+def _policy_label(r: RunResult) -> str:
+    return f"{r.config.parent_ranker}/{r.config.probe_proposer}"
+
+
+def _print_provider_policy_comparison(results: List[RunResult], weights: QualityWeights) -> None:
+    ok_runs = [r for r in results if r.ok]
+    groups: Dict[str, List[RunResult]] = {}
+    for r in ok_runs:
+        groups.setdefault(_policy_label(r), []).append(r)
+    if len(groups) < 2:
+        return
+
+    print()
+    print("── provider policy comparison ─────────────────────────────────────")
+    print("  diagnostic only — no policy is selected or activated")
+    print(
+        f"  {'policy':<32} {'avg_iv':>10} {'avg_auds':>9} {'avg_rev':>8} "
+        f"{'avg_unique_fails':>16} {'avg_regime_fail':>16} {'quality_cost':>14}"
+    )
+    for policy, runs in sorted(groups.items()):
+        n = max(1, len(runs))
+        q = _quality_for_runs(runs, weights)
+        print(
+            f"  {policy:<32} "
+            f"{q.iv / n:>10.0f} "
+            f"{q.full_audits / n:>9.1f} "
+            f"{q.revocations / n:>8.1f} "
+            f"{q.unique_fails / n:>16.1f} "
+            f"{q.regime_sentinel_fail / n:>16.1f} "
+            f"{q.quality_cost / n:>14.0f}"
+        )
+
+
+def _print_aggregate(results: List[RunResult], weights: QualityWeights = QualityWeights()) -> None:
     ok_runs = [r for r in results if r.ok]
     if not ok_runs:
         print("  no successful runs")
@@ -1370,6 +1466,11 @@ def _print_aggregate(results: List[RunResult]) -> None:
 
     print(f"  runs ok={n}/{len(results)}")
     print(f"  avg: skip%={avg_skip:.1f}  iv={avg_iv:.0f}")
+    _quality = _quality_for_runs(ok_runs, weights)
+    print(
+        f"  quality_cost={_quality.quality_cost} "
+        "(diagnostic only; no policy selected)"
+    )
     print(
         f"  diagnostic raw: full_audits={sum(r.full_audits for r in ok_runs)} "
         f"revocations={sum(sum(r.arch.revoked_by_dist.values()) for r in ok_runs)} "
@@ -1697,11 +1798,27 @@ def main():
                    choices=["off", "interfaces"],
                    help="hybrid control mode: off=current behavior; interfaces=symbolic provider wrappers (default: off)")
     p.add_argument("--parent-ranker", default="sensitivity",
-                   choices=["sensitivity", "history", "history_rescue"],
-                   help="parent ranker provider for --hybrid-control interfaces (default: sensitivity)")
+                   help=("parent ranker provider(s) for --hybrid-control interfaces. "
+                         "Use comma-separated values to compare policies: "
+                         "sensitivity,history,history_rescue (default: sensitivity)"))
     p.add_argument("--probe-proposer", default="none",
-                   choices=["none", "history", "history_rescue"],
-                   help="probe proposer provider for --hybrid-control interfaces (default: none)")
+                   help=("probe proposer provider(s) for --hybrid-control interfaces. "
+                         "Use comma-separated values to compare policies: "
+                         "none,history,history_rescue (default: none)"))
+    p.add_argument("--quality-audit-weight", type=int, default=1000,
+                   help="diagnostic quality score audit weight (default: 1000)")
+    p.add_argument("--quality-revocation-weight", type=int, default=5000,
+                   help="diagnostic quality score revocation weight (default: 5000)")
+    p.add_argument("--quality-unique-fail-weight", type=int, default=2000,
+                   help="diagnostic quality score unique-failure weight (default: 2000)")
+    p.add_argument("--quality-regime-fail-weight", type=int, default=500,
+                   help="diagnostic quality score regime-sentinel-fail weight (default: 500)")
+    p.add_argument("--quality-no-sentinel-weight", type=int, default=0,
+                   help="diagnostic quality score regime-no-sentinel weight (default: 0)")
+    p.add_argument("--quality-no-effect-probe-weight", type=int, default=10,
+                   help="diagnostic quality score no-effect probe weight (default: 10)")
+    p.add_argument("--quality-improved-probe-credit", type=int, default=-25,
+                   help="diagnostic quality score improved-probe credit (default: -25)")
     p.add_argument("--repair-agenda", action="store_true",
                    help="enable RepairAgenda: annotate needs_audit entries with scope/authority metadata")
     p.add_argument("--shadow-residual", default="off",
@@ -1728,10 +1845,20 @@ def main():
     p.add_argument("--shadow-key-symbolic-false-ok-tolerance", type=int, default=0,
                    help="symbolic false-OK tolerance before diagnostic key revocation (default: 0)")
     args = p.parse_args()
+    quality_weights = QualityWeights(
+        audit_weight=args.quality_audit_weight,
+        revocation_weight=args.quality_revocation_weight,
+        unique_fail_weight=args.quality_unique_fail_weight,
+        regime_fail_weight=args.quality_regime_fail_weight,
+        no_sentinel_weight=args.quality_no_sentinel_weight,
+        no_effect_probe_weight=args.quality_no_effect_probe_weight,
+        improved_probe_credit=args.quality_improved_probe_credit,
+    )
 
     var_list   = [int(x) for x in args.vars.split(",")]
     cycle_list = [int(x) for x in args.cycles.split(",")]
     seed_list  = [int(x) for x in args.seeds.split(",")]
+    policy_pairs = _provider_policy_pairs(args.parent_ranker, args.probe_proposer)
 
     factor_list = _parse_float_list(args.shadow_conservative_factors)
     ms_list     = _parse_int_list(args.shadow_min_samples)
@@ -1772,12 +1899,13 @@ def main():
                   shadow_key_min_ok=args.shadow_key_min_ok,
                   shadow_key_min_clean_streak=args.shadow_key_min_clean_streak,
                   shadow_key_symbolic_false_ok_tolerance=args.shadow_key_symbolic_false_ok_tolerance,
-                  parent_ranker=args.parent_ranker,
-                  probe_proposer=args.probe_proposer)
+                  parent_ranker=parent_ranker,
+                  probe_proposer=probe_proposer)
         for v in var_list
         for c in cycle_list
         for s in seed_list
         for f, ms, w in shadow_combos
+        for parent_ranker, probe_proposer in policy_pairs
     ]
 
     total = len(configs)
@@ -1789,8 +1917,7 @@ def main():
     if args.hybrid_control != "off":
         mode += (
             f" +hybrid({args.hybrid_control})"
-            f" +parent-ranker({args.parent_ranker})"
-            f" +probe-proposer({args.probe_proposer})"
+            f" +policies({','.join(f'{p}/{q}' for p, q in policy_pairs)})"
         )
     if args.repair_agenda:
         mode += " +repair-agenda"
@@ -1825,6 +1952,8 @@ def main():
         futures = {pool.submit(_run_one, cfg): cfg for cfg in configs}
         for fut in as_completed(futures):
             r = fut.result()
+            if r.ok:
+                r.quality = _quality_for_run(r, quality_weights)
             results.append(r)
             done += 1
             print(f"[{done:3d}/{total}] {_fmt_row(r)}", flush=True)
@@ -1883,6 +2012,8 @@ def main():
                         r.arch.provider_probe_improved_margin_count
                     ),
                     "provider_probe_no_effect_count": r.arch.provider_probe_no_effect_count,
+                    "quality_cost": r.quality.quality_cost if r.quality else None,
+                    "quality_weights": quality_weights.__dict__,
                     "earned_by_dist": r.arch.earned_by_dist,
                     "revoked_by_dist": r.arch.revoked_by_dist,
                     "violations": r.violations,
@@ -1904,7 +2035,8 @@ def main():
 
     print()
     print("── aggregate ──────────────────────────────────────────────────────")
-    _print_aggregate(results)
+    _print_aggregate(results, quality_weights)
+    _print_provider_policy_comparison(results, quality_weights)
 
     if shadow_sweep:
         _print_shadow_calibration_summary(results)

@@ -13,6 +13,8 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from typing import TYPE_CHECKING, Dict, List, Tuple
 
+from .quality import QualityWeights, make_quality_score
+
 if TYPE_CHECKING:
     from .agent import ChainedAgent
 
@@ -297,6 +299,28 @@ class RunAnalyzer:
             self.provider_probe_improved_margin_count = 0
             self.provider_probe_no_effect_count = 0
 
+        self.revocations = sum(
+            1 for n in visible
+            for cert in list(n.certificates.values()) + list(n.route_certs.values())
+            if getattr(cert, "revoked_by", None) is not None
+        )
+        self.unique_fails = sum(n.unique_failures_caught for n in visible)
+        self.regime_sentinel_fail = getattr(agent, "_regime_sentinel_fails", 0)
+        self.regime_sentinel_no_sentinel = getattr(agent, "_regime_no_sentinel", 0)
+        self.passive_saved_iv = getattr(agent, "_passive_saved_iv", 0)
+        self.quality_score = make_quality_score(
+            iv=self.total_interventions,
+            full_audits=self.full_audit_count,
+            revocations=self.revocations,
+            unique_fails=self.unique_fails,
+            regime_sentinel_fail=self.regime_sentinel_fail,
+            regime_sentinel_no_sentinel=self.regime_sentinel_no_sentinel,
+            passive_saved_iv=self.passive_saved_iv,
+            provider_probe_no_effect_count=self.provider_probe_no_effect_count,
+            provider_probe_improved_margin_count=self.provider_probe_improved_margin_count,
+            weights=QualityWeights(),
+        )
+
         _agenda = getattr(agent, "_repair_agenda", None)
         if _agenda is not None:
             _agenda_summary = _agenda.summary()
@@ -348,6 +372,10 @@ class SummaryRenderer:
             f"comp={a.compression_skip_count} sent={a.sentinel_skip_count}"
         )
         lines.append(f"  iv={a.total_interventions}")
+        lines.append(
+            f"  quality_cost={a.quality_score.quality_cost} "
+            "(diagnostic only; no policy selected)"
+        )
 
         worst_str = ", ".join(
             f"x{v}:n={c},max={a.max_defer_streak[v]}"

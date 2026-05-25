@@ -16,11 +16,15 @@ Test map:
 """
 
 import random
+from contextlib import redirect_stdout
+from io import StringIO
+from types import SimpleNamespace
 import pytest
 
 from dreth.world import CausalWorld
 from dreth.agent import ChainedAgent
 from dreth.ledger import CompositeNethra, NethraCertificate
+from dreth.quality import QualityWeights, compute_quality_cost
 from dreth.hybrid import (
     SensitivityParentRanker,
     HistoryParentRanker,
@@ -33,6 +37,8 @@ from dreth.hybrid import (
     FuncLibraryRouter,
     SymbolicResidualPredictor,
 )
+from dreth.summary import RunAnalyzer
+from scripts.batch_run import _print_provider_policy_comparison
 
 
 # ── world: seed 3 ──────────────────────────────────────────────────────────────
@@ -847,3 +853,115 @@ def test_10m_chosen_parent_source_history_and_rescue_recorded():
     assert diag.chosen_parent_from_rescue == 1
     assert diag.rescue_chosen_parent_hits == 1
     assert diag.sensitivity_rescue_interventions == 4
+
+
+# ── 11 provider policy quality diagnostics ───────────────────────────────────
+
+def test_11a_quality_score_formula_fixed_metrics():
+    score = compute_quality_cost(
+        iv=100,
+        full_audits=2,
+        revocations=3,
+        unique_fails=4,
+        regime_sentinel_fail=5,
+        regime_sentinel_no_sentinel=6,
+        provider_probe_no_effect_count=7,
+        provider_probe_improved_margin_count=8,
+        weights=QualityWeights(),
+    )
+
+    assert score == 100 + 1000 * 2 + 5000 * 3 + 2000 * 4 + 500 * 5 + 0 * 6 + 10 * 7 - 25 * 8
+
+
+def test_11b_quality_weight_override_changes_score():
+    base = compute_quality_cost(
+        iv=100,
+        full_audits=2,
+        revocations=0,
+        unique_fails=0,
+        regime_sentinel_fail=0,
+        regime_sentinel_no_sentinel=0,
+        provider_probe_no_effect_count=0,
+        provider_probe_improved_margin_count=0,
+        weights=QualityWeights(),
+    )
+    changed = compute_quality_cost(
+        iv=100,
+        full_audits=2,
+        revocations=0,
+        unique_fails=0,
+        regime_sentinel_fail=0,
+        regime_sentinel_no_sentinel=0,
+        provider_probe_no_effect_count=0,
+        provider_probe_improved_margin_count=0,
+        weights=QualityWeights(audit_weight=7),
+    )
+
+    assert base != changed
+    assert changed == 114
+
+
+def test_11c_quality_summary_does_not_affect_run_behavior():
+    agent, world = _make_hybrid_agent()
+    agent.initialize()
+    for c in range(1, 4):
+        agent.run_cycle(c)
+    before = (
+        agent.skip_count,
+        agent.full_audit_count,
+        agent.total_interventions,
+        tuple(
+            (v, n.status, n.role_for("skip"), len(n.certificates), len(n.route_certs))
+            for v, n in agent.ledger.vars.items()
+        ),
+    )
+
+    _ = RunAnalyzer(agent).quality_score
+
+    after = (
+        agent.skip_count,
+        agent.full_audit_count,
+        agent.total_interventions,
+        tuple(
+            (v, n.status, n.role_for("skip"), len(n.certificates), len(n.route_certs))
+            for v, n in agent.ledger.vars.items()
+        ),
+    )
+    assert after == before
+
+
+def test_11d_provider_policy_comparison_block_prints_for_two_policies():
+    def fake_run(policy, iv, audits):
+        parent, probe = policy
+        arch = SimpleNamespace(
+            revoked_by_dist={},
+            total_unique_failures=0,
+            regime_sentinel_fails=0,
+            regime_no_sentinel=0,
+            passive_saved_iv=0,
+            provider_probe_no_effect_count=0,
+            provider_probe_improved_margin_count=0,
+        )
+        return SimpleNamespace(
+            ok=True,
+            config=SimpleNamespace(parent_ranker=parent, probe_proposer=probe),
+            interventions=iv,
+            full_audits=audits,
+            arch=arch,
+        )
+
+    buf = StringIO()
+    with redirect_stdout(buf):
+        _print_provider_policy_comparison(
+            [
+                fake_run(("sensitivity", "none"), 100, 1),
+                fake_run(("history", "history"), 50, 3),
+            ],
+            QualityWeights(),
+        )
+    out = buf.getvalue()
+
+    assert "provider policy comparison" in out
+    assert "sensitivity/none" in out
+    assert "history/history" in out
+    assert "diagnostic only" in out
