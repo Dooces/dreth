@@ -2906,9 +2906,11 @@ class ChainedAgent:
                 _ra_kind = (
                     "sentinel_failure" if _ra_var in _sentinel_failed_vars else "unknown"
                 )
-                # #SHORTCUT: priority mirrors consequence-tier ordering; A*-style
-                # cost/benefit priority is reserved for a later stage.
-                _ra_priority = float(self._consequence_tier(_ra_var))
+                # #SHORTCUT: priority is negated consequence tier so higher-consequence
+                # vars sort first (RepairAgenda.pop() is a min-heap: lower value = more
+                # urgent). T2 → -2.0, T1 → -1.0, T0 → 0.0. A*-style cost/benefit
+                # weighting is reserved for a later stage.
+                _ra_priority = -float(self._consequence_tier(_ra_var))
                 self._repair_agenda.push(RepairAgendaItem(
                     cycle=cycle,
                     target_var=_ra_var,
