@@ -29,28 +29,19 @@ from typing import FrozenSet, Optional, Tuple
 
 @dataclass
 class CycleRecord:
-    """One row in the agent's per-cycle history. Compares ground truth (what
-    the world did) to agent action (what was attended/skipped) for offline
-    diagnostics and confusion-matrix computation. The agent does NOT see
-    the truth fields during operation; they're filled in by the test harness.
+    """One row in the agent's per-cycle history. Records what the agent
+    did each cycle — what was attended/skipped — for offline diagnostics.
+    Contains no ground-truth oracle fields.
 
     Fields:
-      cycle:                cycle number (1-indexed)
-      truth_kind:           VALUE / EDGE / FUNC / NOVELTY / REVEAL
-      truth_rule_changed:   did world structure (edges/funcs) change this cycle
-      truth_affected_var:   which var changed (-1 for value-only)
-      truth_novelty_active: is any visible var currently using SIN
-      detected_drift_vars:  vars the agent flagged as drifted this cycle
-      skipped_vars:         vars that ran cheap-path (trass/comp/sentinel)
-      fully_audited_vars:   vars that ran a full audit
-      novelty_attention:    did the agent fire/sustain a novelty this cycle
-      deferred_vars:        vars that needed audit but exceeded budget
+      cycle:               cycle number (1-indexed)
+      detected_drift_vars: vars the agent flagged as drifted this cycle
+      skipped_vars:        vars that ran cheap-path (trass/comp/sentinel)
+      fully_audited_vars:  vars that ran a full audit
+      novelty_attention:   did the agent fire/sustain a novelty this cycle
+      deferred_vars:       vars that needed audit but exceeded budget
     """
     cycle: int
-    truth_kind: str
-    truth_rule_changed: bool
-    truth_affected_var: int
-    truth_novelty_active: bool
     detected_drift_vars: Tuple[int, ...]
     skipped_vars: Tuple[int, ...]
     fully_audited_vars: Tuple[int, ...]

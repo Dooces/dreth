@@ -113,6 +113,19 @@ class ArchMetrics:
     composite_skip_count: int = 0     # sentinel checks avoided by composite handle
     vars_under_composite: int = 0     # distinct vars covered by >= 1 composite
     active_composites: int = 0        # composites that passed their probe this run
+    composite_revoked: int = 0        # composites revoked during the run
+    composite_components: int = 0     # connected components in live composite graph
+    composite_max_degree: int = 0     # highest composite membership count for any var
+    composite_mean_degree: float = 0.0
+    composite_duplicate_factor: float = 0.0  # raw_pair_passes / true_skip; >1 = overlap
+    # HyperCompositeNethra (component) metrics
+    component_live: int = 0
+    component_revoked: int = 0
+    component_members: int = 0
+    component_skips: int = 0
+    pairwise_fallbacks: int = 0
+    duplicate_factor_before: float = 0.0
+    duplicate_factor_after: float = 0.0
 
     # Regime-based sentinel amortization metrics
     regime_skip_count: int = 0        # leaf checks skipped when regime sentinel passed
@@ -433,7 +446,7 @@ def _build_and_run_dreth(
         if m.kind == "REVEAL":
             agent.on_variable_revealed(m.affected_var, cycle)
         else:
-            agent.run_cycle(m)
+            agent.run_cycle(cycle)
 
         if log_interval > 0:
             changed = [
@@ -566,8 +579,44 @@ def _extract_arch_metrics(agent: ChainedAgent, world: CausalWorld) -> ArchMetric
 
     # Composite nethra (nethra-of-nethra) handle metrics
     m.composite_skip_count = agent.composite_skip_count
-    m.vars_under_composite = len({mem for cn in agent.ledger.composites for mem in cn.members})
-    m.active_composites = len(agent.ledger.composites)
+    _live_cns = agent.ledger.composites
+    _degrees = {}
+    for cn in _live_cns:
+        for v in cn.members:
+            _degrees[v] = _degrees.get(v, 0) + 1
+    m.vars_under_composite = len(_degrees)
+    m.active_composites = len(_live_cns)
+    m.composite_revoked = len(agent.ledger.revoked_composites)
+    _deg_vals = list(_degrees.values())
+    m.composite_max_degree = max(_deg_vals) if _deg_vals else 0
+    m.composite_mean_degree = sum(_deg_vals) / len(_deg_vals) if _deg_vals else 0.0
+    _raw_pair = sum(cn.pass_count * len(cn.members) for cn in _live_cns)
+    m.composite_duplicate_factor = _raw_pair / max(1, agent.composite_skip_count)
+    # connected components via union-find
+    _par = {v: v for v in _degrees}
+    def _find_c(x: int) -> int:
+        while _par[x] != x:
+            _par[x] = _par[_par[x]]
+            x = _par[x]
+        return x
+    for cn in _live_cns:
+        ra, rb = _find_c(cn.members[0]), _find_c(cn.members[1])
+        if ra != rb:
+            _par[ra] = rb
+    m.composite_components = len({_find_c(v) for v in _degrees}) if _degrees else 0
+    # HyperCompositeNethra (component) metrics
+    _live_hc = agent.ledger.hyper_composites
+    m.component_live = len(_live_hc)
+    m.component_revoked = len(agent.ledger.revoked_hyper_composites)
+    m.component_members = len({v for hc in _live_hc for v in hc.members})
+    m.component_skips = getattr(agent, "component_skip_count", 0)
+    m.pairwise_fallbacks = getattr(agent, "pairwise_fallback_count", 0)
+    _all_pair = list(_live_cns) + list(agent.ledger.absorbed_composites)
+    _raw_before = sum(cn.pass_count * len(cn.members) for cn in _all_pair)
+    _total_skips = agent.composite_skip_count + m.component_skips
+    m.duplicate_factor_before = _raw_before / max(1, _total_skips)
+    _raw_after = _raw_pair + m.component_skips
+    m.duplicate_factor_after = _raw_after / max(1, _total_skips)
 
     # Regime-based skip metrics
     m.regime_skip_count = agent._regime_skip_count
@@ -888,6 +937,27 @@ def _print_aggregate(results: List[RunResult]) -> None:
     print(f"  avg: skip%={avg_skip:.1f}  iv={avg_iv:.0f}")
     print(f"  handle amortization: {amort_pct:.1f}%  "
           f"(composite={avg_comp_sk:.0f} regime={avg_rsk:.0f} park={avg_psk_agg:.0f} of {total_sk_avg:.0f} avg total skips)")
+    avg_comp_live = sum(r.arch.active_composites for r in ok_runs) / n
+    avg_comp_rev  = sum(r.arch.composite_revoked for r in ok_runs) / n
+    avg_comp_umem = sum(r.arch.vars_under_composite for r in ok_runs) / n
+    avg_comp_comp = sum(r.arch.composite_components for r in ok_runs) / n
+    avg_comp_maxd = sum(r.arch.composite_max_degree for r in ok_runs) / n
+    avg_comp_meand = sum(r.arch.composite_mean_degree for r in ok_runs) / n
+    avg_comp_dup  = sum(r.arch.composite_duplicate_factor for r in ok_runs) / n
+    print(f"  composite overlap: live={avg_comp_live:.0f} rev={avg_comp_rev:.0f} "
+          f"members={avg_comp_umem:.0f} components={avg_comp_comp:.1f} "
+          f"deg(max={avg_comp_maxd:.0f} mean={avg_comp_meand:.1f}) "
+          f"dup_factor={avg_comp_dup:.2f}x")
+    avg_hc_live  = sum(r.arch.component_live for r in ok_runs) / n
+    avg_hc_rev   = sum(r.arch.component_revoked for r in ok_runs) / n
+    avg_hc_mem   = sum(r.arch.component_members for r in ok_runs) / n
+    avg_hc_skip  = sum(r.arch.component_skips for r in ok_runs) / n
+    avg_hc_fall  = sum(r.arch.pairwise_fallbacks for r in ok_runs) / n
+    avg_dup_bef  = sum(r.arch.duplicate_factor_before for r in ok_runs) / n
+    avg_dup_aft  = sum(r.arch.duplicate_factor_after for r in ok_runs) / n
+    print(f"  component handle: live={avg_hc_live:.0f} rev={avg_hc_rev:.0f} "
+          f"members={avg_hc_mem:.0f} skips={avg_hc_skip:.0f} fallbacks={avg_hc_fall:.0f} "
+          f"dup_factor {avg_dup_bef:.2f}x→{avg_dup_aft:.2f}x")
     total_rpass = sum(r.arch.regime_sentinel_passes for r in ok_runs)
     total_rfail = sum(r.arch.regime_sentinel_fails for r in ok_runs)
     total_rno   = sum(r.arch.regime_no_sentinel for r in ok_runs)

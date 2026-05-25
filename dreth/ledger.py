@@ -66,7 +66,7 @@ from __future__ import annotations
 
 import dataclasses
 from dataclasses import dataclass, field
-from typing import Dict, FrozenSet, List, Literal, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, FrozenSet, List, Literal, Optional, Sequence, Set, Tuple
 
 from .functions import State
 
@@ -295,6 +295,46 @@ class Compression:
 
 
 @dataclass
+class HyperCompositeNethra:
+    """Component-level handle that replaces many pairwise CompositeNethra certs.
+
+    When the live composite graph contains a dense connected component (nearly
+    every pair certified), the O(k²) pairwise representation is compressed into
+    one component sentinel: a single joint intervention on ALL members is checked
+    once per cycle. If it passes, all members are covered. If it fails, execution
+    falls back to the absorbed pairwise composites for that cycle and the
+    component cert is revoked.
+
+    Fields:
+      component_id:       monotonically assigned at promotion time
+      members:            all vars in the component (sorted tuple)
+      sentinel_var:       dominant downstream witness from absorbed pairwise certs
+      probe_values:       {var: intervention value} for the joint component probe
+      tol:                min |RAB[sentinel_var] - R0[sentinel_var]| to count as pass
+      certified_at_cycle: cycle of promotion
+      context_visible:    visible_count at promotion (stale-context guard)
+      absorbed_pairs:     number of pairwise composites absorbed at promotion
+      pass_count:         cycles where component sentinel passed → all members covered
+      pairwise_fallback_count: cycles where component sentinel failed → pairwise ran
+      revoke_reason:      set just before removal
+      revoked_at_cycle:   0 while live
+    """
+    component_id: int
+    members: Tuple[int, ...]
+    sentinel_var: int
+    probe_values: Dict[int, float]
+    tol: float
+    certified_at_cycle: int
+    context_visible: int
+    absorbed_pairs: int
+    pass_count: int = 0
+    pairwise_fallback_count: int = 0
+    revoke_reason: str = ""
+    revoked_at_cycle: int = 0
+    earned_by: str = "component_promotion"
+
+
+@dataclass
 class CompositeNethra:
     """Joint interaction cert earned by two individually-trass vars.
 
@@ -330,6 +370,9 @@ class CompositeNethra:
     context_visible: int
     earned_by: str = "joint_interaction"
     sentinels: List["CompositeSentinel"] = field(default_factory=list)
+    pass_count: int = 0        # cycles where joint probe passed → members skipped
+    revoke_reason: str = ""    # set just before removal ("stale_context" / "sentinel_trass" / "interaction_lost")
+    revoked_at_cycle: int = 0  # set just before removal; 0 while still live
     # sentinels: per-composite sentinels monitoring the RELATION (not individual
     # members). Each CompositeSentinel probes the joint intervention and checks
     # the downstream sentinel_var. Populated after composite is certified.
@@ -746,6 +789,22 @@ class NoveltyNethra:
                 f"obs={self.observations}")
 
 
+@dataclass
+class LedgerEvent:
+    """Structured record of a ledger-visible authority transaction or state change.
+
+    type:    what happened — e.g. "cert_issued", "cert_revoked", "composite_installed",
+             "role_changed", "sentinel_failed", "inert_woken"
+    var:     primary variable index (-1 for multi-var or non-var events)
+    cycle:   when it happened
+    payload: key→value annotations — role, authority, parents, etc.
+    """
+    type: str
+    var: int
+    cycle: int
+    payload: Dict[str, Any] = field(default_factory=dict)
+
+
 class ChainedLedger:
     """The agent's persistent state: one VarNethra per variable, plus a list
     of open/resolved NoveltyNethra records, plus an event log. The "ledger"
@@ -758,7 +817,9 @@ class ChainedLedger:
       history:         per-var archive of past VarNethra states (on signature change)
       novelty:         list of all NoveltyNethra (open + resolved)
       next_novelty_id: counter for ID generation
-      event_log:       chronological list of significant events
+      event_log:       chronological string log (human-readable)
+      events:          structured LedgerEvent list (machine-readable)
+      composites:      active CompositeNethra handles
     """
 
     def __init__(self, n_vars: int):
@@ -769,7 +830,13 @@ class ChainedLedger:
         self.novelty: List[NoveltyNethra] = []
         self.next_novelty_id = 1
         self.event_log: List[str] = []
+        self.events: List[LedgerEvent] = []
         self.composites: List[CompositeNethra] = []
+        self.revoked_composites: List[CompositeNethra] = []
+        self.absorbed_composites: List[CompositeNethra] = []  # absorbed by hyper; may be restored
+        self.hyper_composites: List[HyperCompositeNethra] = []
+        self.revoked_hyper_composites: List[HyperCompositeNethra] = []
+        self._next_component_id: int = 0
 
     def variable_dependents(self, var: int) -> Set[int]:
         """Return all variables whose CURRENT FIT lists `var` as a parent.
@@ -963,3 +1030,109 @@ class ChainedLedger:
         n.in_watch_state = n.stability_horizon <= n.watch_threshold_cycles
         if n.in_watch_state != prev_watch:
             n._watch_propagated = False
+
+    # ── authority transaction methods ─────────────────────────────────────────
+    # All cert creation and composite installation goes through here.
+    # These are the only paths that should write to n.certificates,
+    # n.route_certs, or self.composites.
+
+    def emit(self, event: LedgerEvent) -> None:
+        """Record a structured event. Writes to both events[] and event_log[]."""
+        self.events.append(event)
+        payload_str = " ".join(f"{k}={v}" for k, v in event.payload.items())
+        msg = f"c{event.cycle}: x{event.var} {event.type}"
+        if payload_str:
+            msg += f" {payload_str}"
+        self.event_log.append(msg)
+
+    def issue_cert(
+        self,
+        var: int,
+        operation: str,
+        role: str,
+        authority: str,
+        **kwargs: Any,
+    ) -> NethraCertificate:
+        """Issue a NethraCertificate and install it on var's certificates dict.
+
+        The ledger is the only path through which certs may be created.
+        Returns the cert so callers can inspect it without reading back from
+        the dict (useful for chained operations, not for policy decisions).
+        """
+        cert = NethraCertificate(operation=operation, role=role, authority=authority, **kwargs)
+        self.vars[var].certificates[operation] = cert
+        return cert
+
+    def issue_route_cert(
+        self,
+        target_var: int,
+        candidate_var: int,
+        role: str,
+        **kwargs: Any,
+    ) -> NethraCertificate:
+        """Issue a route cert for candidate_var relative to target_var.
+
+        Route certs are target-owned: they live on n.route_certs[candidate_var]
+        for target_var's VarNethra, not on candidate_var's certificates.
+        authority is derived from role: tareth → "none", trass → "guarded_reuse".
+        """
+        authority: str = "none" if role == "tareth" else "guarded_reuse"
+        cert = NethraCertificate(operation="route", role=role, authority=authority, **kwargs)
+        self.vars[target_var].route_certs[candidate_var] = cert
+        return cert
+
+    def install_composite(
+        self,
+        members: Tuple[int, int],
+        sentinel_var: int,
+        probe_val_a: float,
+        probe_val_b: float,
+        tol: float,
+        changes: int,
+        trials: int,
+        certified_at_cycle: int,
+        context_visible: int,
+    ) -> CompositeNethra:
+        """Deduplicate and install a CompositeNethra. Returns the new composite.
+
+        Removes any existing composite whose member set equals {members[0], members[1]}
+        before appending the new one — deduplication is part of the transaction.
+        """
+        cn = CompositeNethra(
+            members=members, sentinel_var=sentinel_var,
+            probe_val_a=probe_val_a, probe_val_b=probe_val_b, tol=tol,
+            changes=changes, trials=trials,
+            certified_at_cycle=certified_at_cycle, context_visible=context_visible,
+        )
+        self.composites = [c for c in self.composites if set(c.members) != set(members)]
+        self.composites.append(cn)
+        return cn
+
+    def install_hyper_composite(
+        self,
+        members: Tuple[int, ...],
+        sentinel_var: int,
+        probe_values: Dict[int, float],
+        tol: float,
+        certified_at_cycle: int,
+        context_visible: int,
+        absorbed_pairs: int,
+    ) -> "HyperCompositeNethra":
+        """Promote a dense pairwise composite component to a single component handle.
+
+        Does NOT modify composites or absorbed_composites — caller is responsible
+        for moving absorbed pairwise composites before calling this.
+        """
+        hc = HyperCompositeNethra(
+            component_id=self._next_component_id,
+            members=members,
+            sentinel_var=sentinel_var,
+            probe_values=probe_values,
+            tol=tol,
+            certified_at_cycle=certified_at_cycle,
+            context_visible=context_visible,
+            absorbed_pairs=absorbed_pairs,
+        )
+        self._next_component_id += 1
+        self.hyper_composites.append(hc)
+        return hc

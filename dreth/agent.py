@@ -79,13 +79,14 @@ import random
 from typing import Callable, Dict, FrozenSet, List, Optional, Protocol, Set, Tuple
 
 from .functions import FUNC_LIBRARY
-from .world import CausalWorld, HiddenMutation
-from .ledger import (ChainedLedger, Compression, CompositeNethra,
+from .world import CausalWorld
+from .ledger import (ChainedLedger, CompositeNethra, HyperCompositeNethra, Compression, LedgerEvent,
                      DEFAULT_TOLERANCE, DormantAlternative, NethraCertificate, Role, TiedFrontier)
 from .fit import fit_var
 from .sentinels import select_var_sentinels, check_var_sentinels_with_envelope
 from .regime import RegimeRegister, CertEvent as RegimeCertEvent
 from .records import CycleRecord, FitDiagnostic
+from .summary import RunAnalyzer, SummaryRenderer
 
 # ── Trass authority thresholds ────────────────────────────────────────────────
 # A trass cert suppresses future sentinel monitoring — the strongest authority
@@ -124,6 +125,15 @@ _PARK_REVALIDATE_INTERVAL = 500  # parked vars re-run full sentinel every N cycl
 # This catches PROD(TINY, TINY) patterns where neither var is individually
 # salient but their joint effect on a tareth sentinel var is large.
 _JOINT_SCAN_INTERVAL = 50
+
+# Component promotion: when the live composite graph has a dense connected
+# component, promote it to a HyperCompositeNethra that checks one joint
+# sentinel instead of k² pairwise sentinels.
+_COMPONENT_MIN_SIZE       = 4     # minimum member count to consider a component
+_COMPONENT_MIN_DENSITY    = 0.4   # fraction of possible edges that must exist
+_COMPONENT_MIN_PASSES     = 10    # individual pair pass threshold
+_COMPONENT_MIN_PASSES_FRAC = 0.5  # fraction of pairs that must meet _COMPONENT_MIN_PASSES
+_COMPONENT_PROMOTE_INTERVAL = 100 # how often to scan for promotable components
 
 # Repair-authority escalation: if a sentinel fires and re-audit returns the same
 # fit _REPAIR_FAILURE_ESCALATION_THRESHOLD times, the var's audit budget is
@@ -254,6 +264,8 @@ class ChainedAgent:
         self.compression_skip_count = 0
         self.sentinel_skip_count = 0
         self.composite_skip_count = 0
+        self.component_skip_count = 0    # var-skips via HyperCompositeNethra sentinel
+        self.pairwise_fallback_count = 0 # times component sentinel failed → pairwise ran
         self.total_interventions = 0
         # Graded cascade event counters — track the four outcomes of sentinel
         # failure separately so logs can show the distinction the policy recovers:
@@ -290,7 +302,7 @@ class ChainedAgent:
         # offline analysis. Truth fields filled here are never read by the
         # agent for action decisions.
         self.fit_diagnostics: List[FitDiagnostic] = []
-        self._last_fit_diag: Optional[FitDiagnostic] = None
+        # _last_fit_diag removed — FitDiagnostic now passed explicitly via AuditResult
         # Deferral counters: distinguish "this var is hard to fit" from
         # "this var keeps getting bumped off the schedule by budget."
         self.defer_count: Dict[int, int] = {i: 0 for i in range(world.n_vars)}
@@ -392,12 +404,13 @@ class ChainedAgent:
         scaled = int(math.ceil(math.sqrt(n_hypotheses) * 2.0))
         return max(self.intervention_budget, min(self.intervention_budget * 2, scaled))
 
-    def _full_audit_var(self, var: int, cycle: int) -> Tuple[Tuple[int, ...], str, int, int]:
+    def _full_audit_var(self, var: int, cycle: int) -> Tuple[Tuple[int, ...], str, int, int, FitDiagnostic]:
         """Run a full hypothesis-space search for one variable. Steps:
           1. Build available_parents set (exclude only cert-excluded candidates)
           2. Call fit_var which enumerates, scores, and ranks hypotheses
           3. Record FitDiagnostic for offline analysis
-        Returns (best_parents, best_func, best_score, second_score).
+        Returns (best_parents, best_func, best_score, second_score, fit_diag).
+        fit_diag is passed explicitly to _install_var — no side-channel.
         Increments full_audit_count and total_interventions."""
         self.full_audit_count += 1
         n = self.ledger.vars[var]
@@ -481,7 +494,6 @@ class ChainedAgent:
             near_tie_context_key=int(diag_dict.get("near_tie_context_key", 0)),
         )
         self.fit_diagnostics.append(fd)
-        self._last_fit_diag = fd
         # Tie-tracking: bump count for this var's tie set if size > 1
         if len(fd.tie_set) > 1:
             self.tie_log.setdefault(var, {})
@@ -490,13 +502,13 @@ class ChainedAgent:
         if self.probe_retention_per_var > 0:
             var_diags = [d for d in self.fit_diagnostics if d.var == var]
             if len(var_diags) > self.probe_retention_per_var:
-                # Clear oldest var_diag's per-probe arrays to free memory
                 oldest = var_diags[-(self.probe_retention_per_var + 1)]
                 oldest.probes = ()
                 oldest.actuals = ()
                 oldest.pick_preds = ()
                 oldest.truth_preds = None
-        return result
+        parents, func, score, second = result
+        return parents, func, score, second, fd
 
     def _certify_operation_role(self, var: int, cycle: int) -> str:
         """Substitution test: does perturbing `var` change other visible vars
@@ -522,12 +534,13 @@ class ChainedAgent:
         n = self.ledger.vars[var]
         if self.salience_targets is not None and var in self.salience_targets:
             if n.role_for("skip") != "tareth":
-                self.ledger.event_log.append(
-                    f"c{cycle}: x{var} operation_role: {n.role_for('skip')}->tareth "
-                    f"(declared salience target)"
-                )
-                n.certificates["skip"] = NethraCertificate(
-                    operation="skip", role="tareth", authority="skip",
+                self.ledger.emit(LedgerEvent(
+                    type="role_changed", var=var, cycle=cycle,
+                    payload={"from": n.role_for("skip"), "to": "tareth",
+                             "reason": "declared_salience_target"},
+                ))
+                self.ledger.issue_cert(
+                    var, "skip", "tareth", "skip",
                     context_parents=tuple(n.parents) if n.parents else (),
                     context_visible=self.world.visible_count, context_cycle=cycle,
                     targets=(), substitutions_tested=("declared_salience",),
@@ -613,13 +626,14 @@ class ChainedAgent:
         n = self.ledger.vars[var]
         prev_role = n.role_for("skip")
         if prev_role != role:
-            self.ledger.event_log.append(
-                f"c{cycle}: x{var} operation_role: {prev_role}→{role} ({changes}/{n_trials} perturbations propagated)"
-            )
-        cert = NethraCertificate(
-            operation="skip",
-            role=role,
-            authority="skip" if role == "tareth" else "none",
+            self.ledger.emit(LedgerEvent(
+                type="role_changed", var=var, cycle=cycle,
+                payload={"from": prev_role, "to": role,
+                         "changes": changes, "trials": n_trials},
+            ))
+        self.ledger.issue_cert(
+            var, "skip", role,
+            "skip" if role == "tareth" else "none",
             context_parents=tuple(n.parents) if n.parents else (),
             context_visible=self.world.visible_count,
             context_cycle=cycle,
@@ -631,7 +645,6 @@ class ChainedAgent:
             witnesses=tuple(witnesses) if role == "tareth" else (),
             audits_at_issuance=n.full_audits,
         )
-        n.certificates["skip"] = cert
         return role
 
     def _provisional_trass_probe(self, var: int) -> bool:
@@ -760,7 +773,7 @@ class ChainedAgent:
         # interaction; _check_composites replays it each cycle.
         if first_probe is not None:
             probe_va, probe_vb, probe_j, probe_tol = first_probe
-            cn = CompositeNethra(
+            self.ledger.install_composite(
                 members=(var_a, var_b),
                 sentinel_var=probe_j,
                 probe_val_a=probe_va,
@@ -771,12 +784,11 @@ class ChainedAgent:
                 certified_at_cycle=cycle,
                 context_visible=self.world.visible_count,
             )
-            # Deduplicate: replace any existing composite for this member pair.
-            self.ledger.composites = [
-                c for c in self.ledger.composites
-                if set(c.members) != {var_a, var_b}
-            ]
-            self.ledger.composites.append(cn)
+            self.ledger.emit(LedgerEvent(
+                type="composite_installed", var=var_a, cycle=cycle,
+                payload={"members": (var_a, var_b), "sentinel_var": probe_j,
+                         "interactions": f"{interaction_trials}/{total_trials}"},
+            ))
 
         # Individual certs are left unchanged. xA and xB proved individually trass
         # before this test ran — that evidence is still accurate. The composite
@@ -819,7 +831,7 @@ class ChainedAgent:
         composite-skip path in run_cycle's first-pass loop.
         """
         passing_members: Set[int] = set()
-        to_remove = []
+        to_remove: List[Tuple[CompositeNethra, str]] = []
         for cn in self.ledger.composites:
             a, b = cn.members
             # Activation-scoped: if both members are dormant (not in live_set),
@@ -829,14 +841,15 @@ class ChainedAgent:
             if (self._live_set is not None
                     and a not in self._live_set
                     and b not in self._live_set):
+                cn.pass_count += 1
                 passing_members.add(a)
                 passing_members.add(b)
                 continue
             if cn.context_visible != self.world.visible_count:
-                to_remove.append(cn)
+                to_remove.append((cn, "stale_context"))
                 continue
             if self.ledger.vars[cn.sentinel_var].role_for("skip") == "trass":
-                to_remove.append(cn)
+                to_remove.append((cn, "sentinel_trass"))
                 continue
             saved = self.world.state
             R0_val = list(self.world.predict_under_joint_intervention({}))[cn.sentinel_var]
@@ -847,12 +860,16 @@ class ChainedAgent:
             self.world.state = saved
             self.total_interventions += 2
             if abs(RAB_val - R0_val) > cn.tol:
+                cn.pass_count += 1
                 passing_members.add(a)
                 passing_members.add(b)
             else:
-                to_remove.append(cn)
-        for cn in to_remove:
+                to_remove.append((cn, "interaction_lost"))
+        for cn, reason in to_remove:
+            cn.revoke_reason = reason
+            cn.revoked_at_cycle = cycle
             self.ledger.composites.remove(cn)
+            self.ledger.revoked_composites.append(cn)
             a, b = cn.members
             na, nb = self.ledger.vars[a], self.ledger.vars[b]
             na.invalidate_certs("false_trass_contradiction")
@@ -862,11 +879,171 @@ class ChainedAgent:
             if nb.status == "trass":
                 nb.status = "proposed"
             self.ledger.event_log.append(
-                f"c{cycle}: x{a},x{b} composite REVOKED "
-                f"(interaction gone at probe ({cn.probe_val_a:.2f},{cn.probe_val_b:.2f})"
+                f"c{cycle}: x{a},x{b} composite REVOKED ({reason}) "
+                f"(probe ({cn.probe_val_a:.2f},{cn.probe_val_b:.2f})"
                 f" → x{cn.sentinel_var})"
             )
         return passing_members
+
+    def _check_hyper_composites(self, cycle: int) -> Set[int]:
+        """Check each live HyperCompositeNethra with one joint probe.
+
+        2 world calls per component regardless of member count.
+        Pass: all members added to covered set, pass_count incremented.
+        Fail: absorbed pairwise composites restored to ledger.composites,
+              component annotated and moved to revoked list, pairwise_fallback_count
+              incremented on agent and component.
+
+        Returns covered_vars — caller excludes them from pairwise _check_composites.
+        """
+        covered: Set[int] = set()
+        to_revoke: List[HyperCompositeNethra] = []
+        for hc in self.ledger.hyper_composites:
+            if hc.context_visible != self.world.visible_count:
+                hc.revoke_reason = "stale_context"
+                hc.revoked_at_cycle = cycle
+                to_revoke.append(hc)
+                continue
+            if self.ledger.vars[hc.sentinel_var].role_for("skip") == "trass":
+                hc.revoke_reason = "sentinel_trass"
+                hc.revoked_at_cycle = cycle
+                to_revoke.append(hc)
+                continue
+            saved = self.world.state
+            R0_val = list(self.world.predict_under_joint_intervention({}))[hc.sentinel_var]
+            self.world.state = saved
+            RAB_val = list(self.world.predict_under_joint_intervention(hc.probe_values))[hc.sentinel_var]
+            self.world.state = saved
+            self.total_interventions += 2
+            if abs(RAB_val - R0_val) > hc.tol:
+                hc.pass_count += 1
+                for v in hc.members:
+                    covered.add(v)
+                    self.component_skip_count += 1
+            else:
+                hc.pairwise_fallback_count += 1
+                self.pairwise_fallback_count += 1
+                hc.revoke_reason = "interaction_lost"
+                hc.revoked_at_cycle = cycle
+                to_revoke.append(hc)
+        for hc in to_revoke:
+            self.ledger.hyper_composites.remove(hc)
+            self.ledger.revoked_hyper_composites.append(hc)
+            # Restore absorbed pairwise composites so _check_composites covers them.
+            restored = [
+                cn for cn in self.ledger.absorbed_composites
+                if set(cn.members) <= set(hc.members)
+            ]
+            for cn in restored:
+                self.ledger.absorbed_composites.remove(cn)
+                self.ledger.composites.append(cn)
+            self.ledger.event_log.append(
+                f"c{cycle}: component C{hc.component_id} ({len(hc.members)} members) "
+                f"REVOKED ({hc.revoke_reason}), restored {len(restored)} pairwise composites"
+            )
+        return covered
+
+    def _promote_dense_components(self, cycle: int) -> None:
+        """Scan live pairwise composites for dense connected components and
+        promote qualifying ones to HyperCompositeNethra handles.
+
+        Promotion criteria (all must hold for a connected component):
+          - size >= _COMPONENT_MIN_SIZE
+          - edge density >= _COMPONENT_MIN_DENSITY  (edges / max_possible_edges)
+          - all constituent pairwise composites have pass_count >= _COMPONENT_MIN_PASSES
+          - >= _COMPONENT_SENTINEL_FRAC of pairs share the dominant sentinel_var
+
+        Cost: O(len(composites)) per call. Called every _COMPONENT_PROMOTE_INTERVAL cycles.
+        """
+        if len(self.ledger.composites) < _COMPONENT_MIN_SIZE:
+            return
+
+        # Union-find to identify connected components.
+        parent: Dict[int, int] = {}
+        def find(x: int) -> int:
+            while parent.get(x, x) != x:
+                parent[x] = parent.get(parent.get(x, x), x)
+                x = parent[x]
+            return x
+        def union(x: int, y: int) -> None:
+            parent[find(x)] = find(y)
+
+        for cn in self.ledger.composites:
+            a, b = cn.members
+            if a not in parent:
+                parent[a] = a
+            if b not in parent:
+                parent[b] = b
+            union(a, b)
+
+        # Group composites by component root.
+        from collections import defaultdict as _defaultdict, Counter as _Counter
+        comp_pairs: Dict[int, List[CompositeNethra]] = _defaultdict(list)
+        for cn in self.ledger.composites:
+            comp_pairs[find(cn.members[0])].append(cn)
+
+        for _, pairs in comp_pairs.items():
+            members_set = {v for cn in pairs for v in cn.members}
+            size = len(members_set)
+            if size < _COMPONENT_MIN_SIZE:
+                continue
+            max_edges = size * (size - 1) // 2
+            density = len(pairs) / max_edges if max_edges > 0 else 0.0
+            if density < _COMPONENT_MIN_DENSITY:
+                continue
+            passes_ok = sum(1 for cn in pairs if cn.pass_count >= _COMPONENT_MIN_PASSES)
+            if passes_ok < _COMPONENT_MIN_PASSES_FRAC * len(pairs):
+                continue
+
+            # Build probe_values: one value per member from any constituent pair.
+            probe_values: Dict[int, float] = {}
+            for cn in pairs:
+                a, b = cn.members
+                if a not in probe_values:
+                    probe_values[a] = cn.probe_val_a
+                if b not in probe_values:
+                    probe_values[b] = cn.probe_val_b
+
+            # Verify a sentinel_var responds to the full joint probe on all members.
+            # Try candidate sentinel_vars in descending frequency order — the most
+            # commonly used pairwise sentinel is the most likely to respond.
+            sentinel_counts = _Counter(cn.sentinel_var for cn in pairs)
+            saved = self.world.state
+            R0 = list(self.world.predict_under_joint_intervention({}))
+            self.world.state = saved
+            RAB = list(self.world.predict_under_joint_intervention(probe_values))
+            self.world.state = saved
+            self.total_interventions += 2
+
+            chosen_sv: Optional[int] = None
+            chosen_tol: float = 0.0
+            for sv, _ in sentinel_counts.most_common():
+                sv_tol = self.ledger.vars[sv].current_tolerance
+                if abs(RAB[sv] - R0[sv]) > sv_tol:
+                    chosen_sv = sv
+                    chosen_tol = sv_tol
+                    break
+            if chosen_sv is None:
+                continue  # no downstream var responds to full joint probe; skip
+
+            members_tuple = tuple(sorted(members_set))
+            self.ledger.install_hyper_composite(
+                members=members_tuple,
+                sentinel_var=chosen_sv,
+                probe_values=probe_values,
+                tol=chosen_tol,
+                certified_at_cycle=cycle,
+                context_visible=self.world.visible_count,
+                absorbed_pairs=len(pairs),
+            )
+            # Move constituent pairwise composites to absorbed list.
+            for cn in pairs:
+                self.ledger.composites.remove(cn)
+                self.ledger.absorbed_composites.append(cn)
+            self.ledger.event_log.append(
+                f"c{cycle}: promoted C{self.ledger._next_component_id - 1} "
+                f"({size} members, {len(pairs)} pairs, density={density:.2f}, sv=x{chosen_sv})"
+            )
 
     def _commission_regime_sentinel(self, regime_id: int) -> bool:
         """Try to build a cluster-level witness probe for a newly confirmed regime.
@@ -1175,7 +1352,8 @@ class ChainedAgent:
         return None
 
     def _install_var(self, var: int, parents: Tuple[int, ...], func: str,
-                     score: int, second: int, cycle: int) -> bool:
+                     score: int, second: int, cycle: int,
+                     fit_diag: Optional[FitDiagnostic] = None) -> bool:
         """Apply the result of a full audit. Returns semantic_changed (True if
         the new fit is not same-parent tied churn).
 
@@ -1210,12 +1388,10 @@ class ChainedAgent:
         tie_set = frozenset()
         near_tie_candidates: Tuple = ()
         near_tie_context_key: int = 0
-        if (self._last_fit_diag is not None
-            and self._last_fit_diag.var == var
-            and self._last_fit_diag.cycle == cycle):
-            tie_set = self._last_fit_diag.tie_set
-            near_tie_candidates = self._last_fit_diag.near_tie_candidates
-            near_tie_context_key = self._last_fit_diag.near_tie_context_key
+        if fit_diag is not None:
+            tie_set = fit_diag.tie_set
+            near_tie_candidates = fit_diag.near_tie_candidates
+            near_tie_context_key = fit_diag.near_tie_context_key
         near_tie_set = frozenset((p, f) for p, f, _ in near_tie_candidates)
         same_parent_tied_churn = (
             syntactic_changed
@@ -1266,9 +1442,9 @@ class ChainedAgent:
             # sentinel_passes is cycle-counted in the hot-pass trass block, not here.
             n.sentinels = []
             n.expected_outcomes = []
-            if self._last_fit_diag is not None and self._last_fit_diag.var == var and self._last_fit_diag.cycle == cycle:
-                self._last_fit_diag.status_after = n.status
-                self._last_fit_diag.role_after = n.role_for("skip")
+            if fit_diag is not None:
+                fit_diag.status_after = n.status
+                fit_diag.role_after = n.role_for("skip")
             return semantic_changed
 
         # Provisional commitment: trust the best fit, let sentinels validate.
@@ -1354,12 +1530,10 @@ class ChainedAgent:
                      or other_n.role_for("skip") == "trass"
                      or (other_n.status == "proposed" and bool(other_n.sentinels)))
             }
-            self._certify_route_certs(var, new_parents, avail_for_route, cycle)
+            self._certify_route_certs(var, new_parents, avail_for_route, cycle, fit_diag)
             # Audit cert: stable fit earned enough observations; mark as reusable.
-            n.certificates["audit"] = NethraCertificate(
-                operation="audit",
-                role="reusable",
-                authority="guarded_reuse",
+            self.ledger.issue_cert(
+                var, "audit", "reusable", "guarded_reuse",
                 context_parents=new_parents,
                 context_visible=self.world.visible_count,
                 context_cycle=cycle,
@@ -1417,16 +1591,16 @@ class ChainedAgent:
                     f"c{cycle}: x{var} extension error: {type(e).__name__}: {e}"
                 )
 
-        if self._last_fit_diag is not None and self._last_fit_diag.var == var and self._last_fit_diag.cycle == cycle:
-            self._last_fit_diag.status_after = n.status
-            self._last_fit_diag.role_after = n.role_for("skip")
+        if fit_diag is not None:
+            fit_diag.status_after = n.status
+            fit_diag.role_after = n.role_for("skip")
 
         # Frontier management: maintain TiedFrontier on the VarNethra.
         # Skipped for trass (already returned early above).
         if len(near_tie_set) >= 2:
             scores_dict = {(p, f): s for p, f, s in near_tie_candidates}
             self._update_tied_frontier(var, cycle, near_tie_set,
-                                       scores_dict, near_tie_context_key)
+                                       scores_dict, near_tie_context_key, fit_diag)
         elif n.tied_frontier is not None:
             winning = next(iter(near_tie_set)) if near_tie_set else None
             self._collapse_tied_frontier(var, winning, cycle)
@@ -1434,7 +1608,8 @@ class ChainedAgent:
         return semantic_changed
 
     def _certify_route_certs(
-        self, var: int, parents: Tuple[int, ...], available: Set[int], cycle: int
+        self, var: int, parents: Tuple[int, ...], available: Set[int], cycle: int,
+        fit_diag: Optional[FitDiagnostic] = None,
     ) -> None:
         """Issue per-candidate route certs for target `var` at promotion time.
 
@@ -1453,19 +1628,14 @@ class ChainedAgent:
 
         Target-owned: cert is stored in n.route_certs[P], not on P.
         """
-        if (self._last_fit_diag is None
-                or self._last_fit_diag.var != var
-                or self._last_fit_diag.cycle != cycle):
-            return
-        diag = self._last_fit_diag
-        if not diag.near_tie_candidates:
+        if fit_diag is None or not fit_diag.near_tie_candidates:
             return  # clean fit, no competition → invariant 2, nothing earned
 
         # Build candidate pool: vars in near-tie parents that aren't in winner.
         parents_set = set(parents)
         competing = {
             p
-            for cand_parents, _, _ in diag.near_tie_candidates
+            for cand_parents, _, _ in fit_diag.near_tie_candidates
             for p in cand_parents
             if p not in parents_set and p in available
         }
@@ -1497,10 +1667,8 @@ class ChainedAgent:
             )
             same_winner = (base_parents == excl_parents and base_func == excl_func)
             role: Role = "trass" if same_winner else "tareth"
-            n.route_certs[p] = NethraCertificate(
-                operation="route",
-                role=role,
-                authority="none" if role == "tareth" else "guarded_reuse",
+            self.ledger.issue_route_cert(
+                var, p, role,
                 context_parents=tuple(parents),
                 context_visible=self.world.visible_count,
                 context_cycle=cycle,
@@ -1512,7 +1680,8 @@ class ChainedAgent:
             )
 
     def _derive_separating_probes(
-        self, var: int, frontier: "TiedFrontier"
+        self, frontier: "TiedFrontier",
+        fit_diag: Optional[FitDiagnostic] = None,
     ) -> Tuple[Tuple[int, float], ...]:
         """Derive separating probes from the last FitDiagnostic for `var`.
 
@@ -1523,11 +1692,9 @@ class ChainedAgent:
 
         Returns a tuple of (iv_var, iv_val) pairs (at most 3).
         """
-        if (self._last_fit_diag is None
-                or self._last_fit_diag.var != var
-                or not self._last_fit_diag.probes):
+        if fit_diag is None or not fit_diag.probes:
             return ()
-        probes = self._last_fit_diag.probes  # Tuple[Tuple[int, float], ...]
+        probes = fit_diag.probes  # Tuple[Tuple[int, float], ...]
         candidates = list(frontier.candidates)  # List[(parents, func)]
         if len(candidates) < 2:
             return ()
@@ -1561,6 +1728,7 @@ class ChainedAgent:
         near_tie_set: FrozenSet[Tuple[Tuple[int, ...], str]],
         scores_dict: Dict[Tuple[Tuple[int, ...], str], int],
         context_key: int,
+        fit_diag: Optional[FitDiagnostic] = None,
     ) -> None:
         """Maintain the TiedFrontier on VarNethra `var`.
 
@@ -1586,7 +1754,7 @@ class ChainedAgent:
             )
             # P1-B: derive separating probes from the just-completed audit so the
             # next audit can use them as forced inclusions.
-            new_frontier.separating_probes = self._derive_separating_probes(var, new_frontier)
+            new_frontier.separating_probes = self._derive_separating_probes(new_frontier, fit_diag)
             n.tied_frontier = new_frontier
         elif near_tie_set == existing.candidates:
             existing.scores = {h: scores_dict.get(h, 0) for h in near_tie_set}
@@ -1599,7 +1767,7 @@ class ChainedAgent:
                 existing.distinct_contexts_seen += 1
             # Refresh separating probes from latest audit — the last-used probe
             # set may discriminate better than the one derived at frontier creation.
-            existing.separating_probes = self._derive_separating_probes(var, existing)
+            existing.separating_probes = self._derive_separating_probes(existing, fit_diag)
         elif existing.context_key != context_key:
             # Context changed AND candidate set differs — fresh frontier.
             # Archive dropped candidates from old frontier.
@@ -1623,7 +1791,7 @@ class ChainedAgent:
                 stable_count=1,
                 distinct_contexts_seen=1,
             )
-            new_frontier.separating_probes = self._derive_separating_probes(var, new_frontier)
+            new_frontier.separating_probes = self._derive_separating_probes(new_frontier, fit_diag)
             n.tied_frontier = new_frontier
         else:
             # Same context, different candidate set — archive dropped candidates.
@@ -1647,7 +1815,7 @@ class ChainedAgent:
                 stable_count=1,
                 distinct_contexts_seen=existing.distinct_contexts_seen,
             )
-            new_frontier.separating_probes = self._derive_separating_probes(var, new_frontier)
+            new_frontier.separating_probes = self._derive_separating_probes(new_frontier, fit_diag)
             n.tied_frontier = new_frontier
 
     def _collapse_tied_frontier(
@@ -2051,8 +2219,8 @@ class ChainedAgent:
         frontier = self._pick_initial_frontier(salient, self.frontier_k)
         first_pass_order = self._audit_priority_order(list(frontier))
         for var in first_pass_order:
-            parents, func, score, second = self._full_audit_var(var, 0)
-            self._install_var(var, parents, func, score, second, 0)
+            parents, func, score, second, fd = self._full_audit_var(var, 0)
+            self._install_var(var, parents, func, score, second, 0, fd)
         self._live_set = set(frontier)
 
     def on_variable_revealed(self, new_var: int, cycle: int) -> None:
@@ -2065,18 +2233,16 @@ class ChainedAgent:
         self._invalidate_topo_cache()
         if self._live_set is not None:
             self._live_set.add(new_var)
-        parents, func, score, second = self._full_audit_var(new_var, cycle)
-        self._install_var(new_var, parents, func, score, second, cycle)
+        parents, func, score, second, fd = self._full_audit_var(new_var, cycle)
+        self._install_var(new_var, parents, func, score, second, cycle, fd)
         self.ledger.event_log.append(
             f"c{cycle}: x{new_var} REVEALED — first audit complete; "
             f"available parents at reveal time: "
             f"{sorted(other for other, n in self.ledger.vars.items() if other != new_var and n.status in ('certified', 'trass', 'proposed'))}"
         )
 
-    def run_cycle(self, mutation: HiddenMutation) -> None:
-        """Process one cycle of agent operation. Inputs: the world's mutation
-        (purely informational — agent never reads structural fields, only
-        cycle index). Steps:
+    def run_cycle(self, cycle: int) -> None:
+        """Process one cycle of agent operation. Steps:
 
           1. First pass over all visible vars in TOPOLOGICAL order:
              - if trass: count as skip, no work
@@ -2097,14 +2263,7 @@ class ChainedAgent:
           4. Append a CycleRecord with skipped/audited/deferred lists for
              offline diagnostic comparison.
         """
-        cycle = mutation.cycle
         self._uncertain_this_cycle.clear()
-
-
-        truth_novelty = any(
-            self.world.funcs[i] == "SIN"
-            for i in range(self.world.visible_count)
-        )
 
         skipped: List[int] = []
         audited: List[int] = []
@@ -2131,10 +2290,14 @@ class ChainedAgent:
         topo_order = self._topological_order(self.world.visible_count)
 
         # Composite nethra check: replay each composite's joint probe. Returns
-        # the set of vars whose composite is still live. Failing composites are
-        # revoked here — their members' certs are reset before the first-pass
-        # loop so those vars fall through to the audit queue this cycle.
-        composite_passing = self._check_composites(cycle)
+        # Component sentinels first (one probe per component regardless of size).
+        # Covered vars are excluded from pairwise _check_composites below.
+        _hyper_covered = self._check_hyper_composites(cycle)
+
+        # Pairwise composite check for vars not already covered by a component.
+        # Failing composites are revoked here — their members' certs are reset
+        # before the first-pass loop so those vars fall through to the audit queue.
+        composite_passing = _hyper_covered | self._check_composites(cycle)
 
         # Update stability horizons for display. Diagnostic only — no behavioral
         # consequence. Dormant wakeup is failure-driven (sentinel fail → cascade).
@@ -2323,10 +2486,8 @@ class ChainedAgent:
                                 # why it failed (gate boundary wrong? simplified_value
                                 # drifted?) is only earned if failure recurs.
                                 if "compress" not in n.certificates:
-                                    n.certificates["compress"] = NethraCertificate(
-                                        operation="compress",
-                                        role="trass",
-                                        authority="guarded_reuse",
+                                    self.ledger.issue_cert(
+                                        var, "compress", "trass", "guarded_reuse",
                                         context_parents=tuple(n.parents) if n.parents else (),
                                         context_visible=self.world.visible_count,
                                         context_cycle=cycle,
@@ -2597,8 +2758,8 @@ class ChainedAgent:
                 continue
             _pre_parents = tuple(self.ledger.vars[var].parents)
             _pre_func = self.ledger.vars[var].func
-            parents, func, score, second = self._full_audit_var(var, cycle)
-            sig_changed = self._install_var(var, parents, func, score, second, cycle)
+            parents, func, score, second, fd = self._full_audit_var(var, cycle)
+            sig_changed = self._install_var(var, parents, func, score, second, cycle, fd)
             audited.append(var)
             if var in _sentinel_failed_vars:
                 self.local_reaudit_count += 1
@@ -2702,10 +2863,8 @@ class ChainedAgent:
                             # Carries ε and audit count as evidence; sentinel re-opens
                             # only on deviation > k×ε (genuine change, not tail noise).
                             _prev = _n.certificates.get("skip")
-                            _n.certificates["skip"] = NethraCertificate(
-                                operation="skip",
-                                role="noise_floor",
-                                authority="guarded_reuse",
+                            self.ledger.issue_cert(
+                                var, "skip", "noise_floor", "guarded_reuse",
                                 context_parents=tuple(_n.parents),
                                 context_visible=self.world.visible_count,
                                 context_cycle=cycle,
@@ -2715,10 +2874,12 @@ class ChainedAgent:
                                 trials=_n.full_audits,
                                 earned_by="envelope_stable",
                             )
-                            self.ledger.event_log.append(
-                                f"c{cycle}: x{var} noise_floor certified "
-                                f"(ε={_n.envelope.certified_eps:.3f} audits={_n.full_audits})"
-                            )
+                            self.ledger.emit(LedgerEvent(
+                                type="cert_issued", var=var, cycle=cycle,
+                                payload={"role": "noise_floor",
+                                         "eps": _n.envelope.certified_eps,
+                                         "audits": _n.full_audits},
+                            ))
                     else:
                         _n.audit_stable_count = 0
             if self._maybe_novelty(var, score, second, cycle, sig_changed=sig_changed):
@@ -2791,6 +2952,9 @@ class ChainedAgent:
         if cycle % _JOINT_SCAN_INTERVAL == 0:
             self._proactive_joint_scan(cycle)
 
+        if cycle % _COMPONENT_PROMOTE_INTERVAL == 0:
+            self._promote_dense_components(cycle)
+
         if _cert_events:
             _n_failed = sum(1 for e in _cert_events if e.event_type == "failed")
             _mean_dev = (sum(e.delta for e in _cert_events) / len(_cert_events))
@@ -2822,10 +2986,7 @@ class ChainedAgent:
             )
 
         self.records.append(CycleRecord(
-            cycle=cycle, truth_kind=mutation.kind,
-            truth_rule_changed=mutation.rule_changed,
-            truth_affected_var=mutation.affected_var,
-            truth_novelty_active=truth_novelty,
+            cycle=cycle,
             detected_drift_vars=tuple(drift),
             skipped_vars=tuple(skipped),
             fully_audited_vars=tuple(audited),
@@ -2834,236 +2995,5 @@ class ChainedAgent:
         ))
 
     def final_summary(self) -> str:
-        """Build the multi-line end-of-run summary string. Covers:
-          - per-variable status counts (cert/quar/trass/uncert/prop)
-          - authoritative count (vars actually running cheap-path)
-          - skip rate and skip breakdown by category
-          - total interventions consumed
-          - rule-drift detection confusion matrix (TP/FN/FP/TN) at three
-            granularities: any-drift, localized, op-relevant
-          - novelty-attention confusion matrix
-          - per-fit-diagnostic failure-class counts
-          - the per-variable display lines
-
-        Truth fields in CycleRecord are used here for offline scoring;
-        they were not used by the agent during operation."""
-        lines: List[str] = []
-        n_cycles = len(self.records)
-        n_var = self.world.visible_count
-        visible = [self.ledger.vars[i] for i in range(self.world.visible_count)]
-        cert = sum(1 for n in visible if n.status == "certified")
-        quar = sum(1 for n in visible if n.status == "quarantined")
-        uncert = sum(1 for n in visible if n.status == "uncertain")
-        prop = sum(1 for n in visible if n.status == "proposed")
-        trass = sum(1 for n in visible if n.status == "trass" or n.role_for("skip") == "trass")
-        authoritative = sum(1 for n in visible if n.authoritative)
-
-        total_deferred = sum(len(r.deferred_vars) for r in self.records)
-        total_var_decisions = self.skip_count + self.full_audit_count + total_deferred
-        var_skip_rate = self.skip_count / max(1, total_var_decisions) * 100
-
-        latencies = []
-        for i, r in enumerate(self.records):
-            if r.truth_rule_changed and r.truth_affected_var >= 0:
-                lat = -1
-                for j in range(i, len(self.records)):
-                    if r.truth_affected_var in self.records[j].detected_drift_vars:
-                        lat = j - i
-                        break
-                latencies.append(lat)
-        det = [l for l in latencies if l >= 0]
-        mean_lat = sum(det) / max(1, len(det))
-        max_lat = max(latencies, default=0)
-        undet = sum(1 for l in latencies if l < 0)
-
-        # HYGIENE FIX 3 (v24): split drift metrics into three distinct measures.
-        # Old single confusion matrix conflated "any var drifted" with
-        # "the actually-affected var was identified."
-
-        # 3a) ANY drift detected (loose — anything changed signature)
-        any_tp = any_fn = any_fp = any_tn = 0
-        for r in self.records:
-            d = bool(r.detected_drift_vars)
-            if r.truth_rule_changed and d: any_tp += 1
-            elif r.truth_rule_changed and not d: any_fn += 1
-            elif not r.truth_rule_changed and d: any_fp += 1
-            else: any_tn += 1
-
-        # 3b) LOCALIZED drift — the affected variable was specifically detected
-        loc_tp = loc_fn = loc_fp = loc_tn = 0
-        for r in self.records:
-            localized = (r.truth_rule_changed and r.truth_affected_var >= 0
-                         and r.truth_affected_var in r.detected_drift_vars)
-            if r.truth_rule_changed and localized: loc_tp += 1
-            elif r.truth_rule_changed and not localized: loc_fn += 1
-            elif not r.truth_rule_changed and bool(r.detected_drift_vars): loc_fp += 1
-            else: loc_tn += 1
-
-        # 3c) OPERATIONALLY-RELEVANT drift — affected var was in tareth set
-        # (drift on trass variables doesn't matter for the operation)
-        op_tp = op_fn = op_fp = op_tn = 0
-        for r in self.records:
-            affected_role = (self.ledger.vars[r.truth_affected_var].role_for("skip")
-                             if r.truth_affected_var >= 0 else "trass")
-            relevant = r.truth_rule_changed and affected_role == "tareth"
-            localized = relevant and r.truth_affected_var in r.detected_drift_vars
-            if relevant and localized: op_tp += 1
-            elif relevant and not localized: op_fn += 1
-            elif not relevant and bool(r.detected_drift_vars): op_fp += 1
-            else: op_tn += 1
-
-        ntp = nfn = nfp = ntn = 0
-        for r in self.records:
-            if r.truth_novelty_active and r.novelty_attention: ntp += 1
-            elif r.truth_novelty_active and not r.novelty_attention: nfn += 1
-            elif not r.truth_novelty_active and r.novelty_attention: nfp += 1
-            else: ntn += 1
-
-        nov_open = sum(1 for n in self.ledger.novelty if n.status == "open")
-        nov_resolved = sum(1 for n in self.ledger.novelty if n.status == "resolved")
-        #nov_voc = sum(1 for n in self.ledger.novelty if n.kind == "vocabulary") - never used
-
-        # compression metrics — both live and lifetime per HYGIENE FIX 2
-        total_comps = sum(len(n.compressions) for n in self.ledger.vars.values())
-        total_comp_hits = sum(n.compression_hits for n in self.ledger.vars.values())
-        total_comp_misses = sum(n.compression_misses for n in self.ledger.vars.values())
-        total_comp_hits_lifetime = sum(n.compression_hits_lifetime for n in self.ledger.vars.values())
-        total_comp_misses_lifetime = sum(n.compression_misses_lifetime for n in self.ledger.vars.values())
-
-        # envelope metrics
-        certified_envs = sum(1 for n in self.ledger.vars.values() if n.envelope.certified_eps > 0)
-        total_oob = sum(n.envelope.out_of_band_count for n in self.ledger.vars.values())
-
-        # temporal trass: how often did cost-based muting fire
-        total_muted = sum(len(n.temporal_trass_log) for n in self.ledger.vars.values())
-        muted_low = sum(1 for n in self.ledger.vars.values()
-                        for e in n.temporal_trass_log if e.reason == "low_cost_dismissed")
-        muted_outlier = sum(1 for n in self.ledger.vars.values()
-                            for e in n.temporal_trass_log if e.reason == "outlier_within_tolerance")
-
-        lines.append("\n── summary ────────────────────────────────────────────")
-        lines.append(f"  cyc={n_cycles} vars={n_var} | "
-                     f"st: cert={cert} prop={prop} unc={uncert} quar={quar} trass={trass} | "
-                     f"auth={authoritative}/{n_var}")
-        lines.append(f"  nov: {len(self.ledger.novelty)} (open={nov_open} res={nov_resolved})")
-        lines.append(f"  comp: stored={total_comps} hit/miss live={total_comp_hits}/{total_comp_misses} "
-                     f"life={total_comp_hits_lifetime}/{total_comp_misses_lifetime}")
-        lines.append(f"  env: cert={certified_envs}/{n_var} oob={total_oob}")
-        lines.append(f"  mute: total={total_muted} low={muted_low} outlier={muted_outlier}")
-        lines.append(f"  audit: full={self.full_audit_count} skip={self.skip_count}/{total_var_decisions} "
-                     f"({var_skip_rate:.1f}%) | trass={self.trass_skip_count} "
-                     f"comp={self.compression_skip_count} sent={self.sentinel_skip_count}")
-        lines.append(f"  iv={self.total_interventions}")
-        lines.append(f"  drift any:    TP={any_tp} FN={any_fn} FP={any_fp} TN={any_tn} | "
-                     f"latency mean={mean_lat:.2f} max={max_lat} undet={undet}/{len(latencies)}")
-        lines.append(f"  drift loc:    TP={loc_tp} FN={loc_fn} FP={loc_fp} TN={loc_tn}")
-        lines.append(f"  drift op:     TP={op_tp} FN={op_fn} FP={op_fp} TN={op_tn}")
-        lines.append(f"  novelty att:  TP={ntp} FN={nfn} FP={nfp} TN={ntn}")
-
-        total_deferred = sum(len(r.deferred_vars) for r in self.records)
-        truth_deferred = sum(
-            1 for r in self.records
-            if r.truth_rule_changed and r.truth_affected_var >= 0 and r.truth_affected_var in r.deferred_vars
-        )
-        op_truth_deferred = sum(
-            1 for r in self.records
-            if r.truth_rule_changed and r.truth_affected_var >= 0
-            and self.ledger.vars[r.truth_affected_var].role_for("skip") == "tareth"
-            and r.truth_affected_var in r.deferred_vars
-        )
-        worst_deferred = sorted(self.defer_count.items(), key=lambda kv: kv[1], reverse=True)[:5]
-        worst_def_str = ", ".join(
-            f"x{v}:n={c},max={self.max_defer_streak[v]}" for v, c in worst_deferred if c > 0
-        ) or "none"
-        lines.append(f"  defer: total={total_deferred} truth={truth_deferred} op={op_truth_deferred} "
-                     f"worst={worst_def_str}")
-
-        watch_count = sum(1 for n in visible if n.in_watch_state)
-        lambda_vals = [n.poisson_rate for n in visible
-                       if n.role_for("skip") != "trass" and n.poisson_rate > 0
-                       and n.first_audited_cycle > 0]
-        avg_lam = sum(lambda_vals) / len(lambda_vals) if lambda_vals else 0.0
-        watch_queued = sum(1 for e in self.ledger.event_log if "in watch state)" in e)
-        lines.append(f"  predict: watch={watch_count}/{n_var} λ_tracked={len(lambda_vals)} "
-                     f"avg_λ={avg_lam:.3f} queued={watch_queued}")
-
-        cert_cycles = sorted(
-            n.first_certified_cycle for n in visible
-            if n.first_certified_cycle > 0 and n.role_for("skip") != "trass"
-        )
-        if cert_cycles:
-            p50 = cert_cycles[len(cert_cycles) // 2]
-            lines.append(f"  coverage: n={len(cert_cycles)} "
-                         f"first={cert_cycles[0]} p50={p50} last={cert_cycles[-1]}")
-
-        from collections import Counter, defaultdict
-        fit_class_counts = Counter(d.failure_class for d in self.fit_diagnostics)
-        class_str = " ".join(f"{k}={v}" for k, v in fit_class_counts.most_common()) or "none"
-        restricted_fits = sum(1 for d in self.fit_diagnostics if d.restricted)
-        lines.append(f"  fit: aud={len(self.fit_diagnostics)} restr={restricted_fits}")
-        lines.append(f"    classes: {class_str}")
-
-        by_var = defaultdict(list)
-        for d in self.fit_diagnostics:
-            by_var[d.var].append(d)
-        rows = []
-        for v, ds in by_var.items():
-            latest = ds[-1]
-            common_class = Counter(d.failure_class for d in ds).most_common(1)[0][0]
-            rows.append((len(ds), v, common_class, latest.status_after, latest.role_after, latest.margin))
-        rows.sort(reverse=True)
-        top_rows = rows[:6]
-        if top_rows:
-            lines.append("    most audited: " + " | ".join(
-                f"x{v}:a={aud} {klass[:10]} {status[:4]}/{role[:4]} lm={margin}"
-                for aud, v, klass, status, role, margin in top_rows
-            ))
-
-        # Tie tracking summary: which vars have stable tie sets vs transient.
-        # A "stable" tie set is one that recurred multiple times — those are
-        # candidates for equivalence-class compression (extension-derived).
-        if self.tie_log:
-            tie_summary = []
-            for v, sets in sorted(self.tie_log.items()):
-                # Most frequent tie set per var
-                top_set, top_count = max(sets.items(), key=lambda kv: kv[1])
-                size = len(top_set)
-                tie_summary.append(f"x{v}:|set|={size} ×{top_count}")
-            lines.append(f"  tie sets (top per var): {' '.join(tie_summary[:8])}"
-                         + (f" ... +{len(tie_summary) - 8} more" if len(tie_summary) > 8 else ""))
-
-        # ── compression amortization assessment ──
-        # Framework intent: compressions cache cheap predictions under gate
-        # conditions, amortizing audit cost over many cycles. The architecture
-        # promises that vars with stable parents/funcs will accrue compressions
-        # and reduce per-cycle work. This block reports whether that promise
-        # is being kept on this run.
-        lines.append("\n── compression amortization ───────────────────────────")
-        eligible = [n for n in visible
-                    if bool(n.parents) and n.role_for("skip") == "tareth"
-                    and n.status in ("certified", "proposed") and n.sentinels]
-        n_elig = len(eligible)
-        n_with_comps = sum(1 for n in eligible if n.compressions)
-        # Cost saved: each compression hit replaced a sentinel check
-        # (sentinel_count interventions). Cost paid: each discovery ran
-        # compression_discovery_budget * 3 anchors * up-to-len(parents) gates.
-        cost_per_hit_saved = self.sentinel_count
-        # Discovery cost upper bound — the actual sample count is internal
-        # to _discover_compressions; we estimate from settings.
-        est_disc_cost = self.compression_discovery_budget * 3
-        total_disc_runs = sum(1 for n in visible if n.compression_hits_lifetime > 0
-                              or n.compression_misses_lifetime > 0)
-        est_disc_total = total_disc_runs * est_disc_cost * max(1, sum(len(n.parents) for n in eligible) // max(1, n_elig))
-        hits_saved = total_comp_hits_lifetime * cost_per_hit_saved
-        amort = "n/a"
-        if est_disc_total > 0:
-            amort = f"{hits_saved / est_disc_total:.2f}x"
-        lines.append(f"  eligible vars (tareth+committed+has-parents): {n_elig}/{n_var}")
-        lines.append(f"  with compressions: {n_with_comps}/{n_elig}")
-        lines.append(f"  hits lifetime: {total_comp_hits_lifetime} | misses lifetime: {total_comp_misses_lifetime}")
-        lines.append(f"  est cost saved by hits: {hits_saved} iv | "
-                     f"est discovery cost: {est_disc_total} iv | amortization: {amort}")
-
-        lines.append("\n── regime register ────────────────────────────────────")
-        lines.append(self.regime_register.summary())
-        return "\n".join(lines)
+        """Build the multi-line end-of-run summary string."""
+        return SummaryRenderer(RunAnalyzer(self)).render()
