@@ -21,6 +21,7 @@ from __future__ import annotations
 # ─────────────────────────────────────────────────────────────────────────────
 
 import dataclasses
+from collections import defaultdict, deque
 from typing import Dict, List, Optional, Protocol, Set, Tuple, runtime_checkable
 
 
@@ -78,6 +79,79 @@ class RepairEvent:
     provider: str    # "residual_predictor" | "parent_ranker" | "probe_proposer" | "expert_router"
     call_count: int
     outcome: str     # "ok" | "stressed" | "proposal_issued" | "ranked" | "routed"
+
+
+@dataclasses.dataclass
+class ParentProposalDiagnostics:
+    """Diagnostic-only quality counters for ParentRanker proposals."""
+    calls: int = 0
+    proposed_total: int = 0
+    proposed_in_final_fit: int = 0
+    proposed_excluded_by_route_cert: int = 0
+    proposed_not_used: int = 0
+    miss_chosen_parent_count: int = 0
+    _rank_sum: int = 0
+    _rank_count: int = 0
+    rank_of_chosen_parent_max: int = 0
+
+    def record_call(self, ranked: Tuple[int, ...], post_route: Tuple[int, ...]) -> None:
+        self.calls += 1
+        self.proposed_total += len(ranked)
+        self.proposed_excluded_by_route_cert += max(0, len(ranked) - len(post_route))
+
+    def record_fit(self, ranked_post_route: Tuple[int, ...], chosen_parents: Tuple[int, ...]) -> None:
+        rank_index = {p: i for i, p in enumerate(ranked_post_route)}
+        chosen = set(chosen_parents)
+        for parent in chosen_parents:
+            rank = rank_index.get(parent)
+            if rank is None:
+                self.miss_chosen_parent_count += 1
+                continue
+            self.proposed_in_final_fit += 1
+            self._rank_sum += rank
+            self._rank_count += 1
+            self.rank_of_chosen_parent_max = max(self.rank_of_chosen_parent_max, rank)
+        self.proposed_not_used += sum(1 for p in ranked_post_route if p not in chosen)
+
+    @property
+    def rank_of_chosen_parent_mean(self) -> float:
+        return self._rank_sum / self._rank_count if self._rank_count else 0.0
+
+    @property
+    def chosen_parent_hit_rate(self) -> float:
+        denom = self.proposed_in_final_fit + self.miss_chosen_parent_count
+        return self.proposed_in_final_fit / denom if denom else 0.0
+
+
+@dataclasses.dataclass
+class ProbeProposalDiagnostics:
+    """Diagnostic-only quality counters for ProbeProposer proposals."""
+    provider_probes_proposed: int = 0
+    provider_probes_valid: int = 0
+    provider_probes_invalid: int = 0
+    provider_probes_used_by_fit: int = 0
+    provider_probe_improved_margin_count: int = 0
+    provider_probe_no_effect_count: int = 0
+
+    def record_proposal(self, proposed: int, valid: int, invalid: int) -> None:
+        self.provider_probes_proposed += proposed
+        self.provider_probes_valid += valid
+        self.provider_probes_invalid += invalid
+
+    def record_fit(
+        self,
+        valid_probes: Tuple[Tuple[int, float], ...],
+        fit_probes: Tuple[Tuple[int, float], ...],
+        margin: int,
+    ) -> None:
+        if not valid_probes:
+            return
+        used = sum(1 for probe in valid_probes if probe in fit_probes)
+        self.provider_probes_used_by_fit += used
+        if used > 0 and margin > 0:
+            self.provider_probe_improved_margin_count += 1
+        else:
+            self.provider_probe_no_effect_count += 1
 
 
 # ── Protocols ─────────────────────────────────────────────────────────────────
@@ -255,6 +329,70 @@ class SensitivityParentRanker:
         return ParentRanking(target=target, ranked=ranked, scores=scores)
 
 
+class HistoryParentRanker:
+    """ParentRanker using only agent-visible audit and residual history.
+
+    It learns from prior Dreth fit results and residual co-stress observations
+    supplied by ChainedAgent. It returns ranked candidates only; route-cert
+    filtering and all certification remain outside the provider.
+    """
+
+    def __init__(self) -> None:
+        self.call_count: int = 0
+        self._fit_parent_counts: Dict[Tuple[int, int], int] = defaultdict(int)
+        self._co_stress_counts: Dict[Tuple[int, int], int] = defaultdict(int)
+        self._route_exclusion_counts: Dict[Tuple[int, int], int] = defaultdict(int)
+        self._cycle: Optional[int] = None
+        self._stressed_this_cycle: Set[int] = set()
+        self._recent_stressed = deque(maxlen=128)
+
+    def observe_residual_event(self, var: int, cycle: int, stressed: bool) -> None:
+        if self._cycle != cycle:
+            self._cycle = cycle
+            self._stressed_this_cycle = set()
+        if not stressed:
+            return
+        for other in self._stressed_this_cycle:
+            if other == var:
+                continue
+            self._co_stress_counts[(var, other)] += 1
+            self._co_stress_counts[(other, var)] += 1
+        self._stressed_this_cycle.add(var)
+        self._recent_stressed.append(var)
+
+    def observe_fit_result(self, target: int, parents: Tuple[int, ...], margin: int = 0) -> None:
+        weight = 2 if margin > 0 else 1
+        for parent in parents:
+            self._fit_parent_counts[(target, parent)] += weight
+
+    def observe_route_exclusions(self, target: int, excluded: Tuple[int, ...]) -> None:
+        for parent in excluded:
+            self._route_exclusion_counts[(target, parent)] += 1
+
+    def rank_parents(
+        self,
+        target: int,
+        candidates: Set[int],
+        top_m: int,
+    ) -> ParentRanking:
+        self.call_count += 1
+        eligible = [c for c in candidates if c != target]
+        recent_counts: Dict[int, int] = defaultdict(int)
+        for v in self._recent_stressed:
+            recent_counts[v] += 1
+        scores: Dict[int, float] = {}
+        for cand in eligible:
+            fit_score = 10.0 * self._fit_parent_counts[(target, cand)]
+            co_stress = 2.0 * self._co_stress_counts[(target, cand)]
+            recent = 0.25 * recent_counts[cand]
+            route_penalty = 4.0 * self._route_exclusion_counts[(target, cand)]
+            scores[cand] = fit_score + co_stress + recent - route_penalty
+        ranked = tuple(
+            sorted(eligible, key=lambda c: (-scores[c], c))[:top_m]
+        )
+        return ParentRanking(target=target, ranked=ranked, scores=scores)
+
+
 class DiscriminationProbeProposer:
     """Default ProbeProposer: wraps the current separating-probe logic.
 
@@ -279,6 +417,60 @@ class DiscriminationProbeProposer:
         # Default: empty — ChainedAgent's existing forced_probes path handles
         # TiedFrontier separating probes; this provider adds nothing new.
         return ProbeProposal(var=var, probes=())
+
+
+class HistoryProbeProposer:
+    """ProbeProposer using agent-visible ambiguity, stress, and ranking history."""
+
+    def __init__(self, max_probes: int = 3) -> None:
+        self.call_count: int = 0
+        self.max_probes = max(0, max_probes)
+        self._frontier_probes: Dict[int, Tuple[Tuple[int, float], ...]] = {}
+        self._parent_rankings: Dict[int, Tuple[int, ...]] = {}
+        self._cycle: Optional[int] = None
+        self._stressed_this_cycle: Set[int] = set()
+        self._recent_stressed = deque(maxlen=128)
+
+    def observe_frontier_probes(self, var: int, probes: Tuple[Tuple[int, float], ...]) -> None:
+        if probes:
+            self._frontier_probes[var] = probes
+
+    def observe_parent_ranking(self, var: int, ranked: Tuple[int, ...]) -> None:
+        self._parent_rankings[var] = ranked
+
+    def observe_residual_event(self, var: int, cycle: int, stressed: bool) -> None:
+        if self._cycle != cycle:
+            self._cycle = cycle
+            self._stressed_this_cycle = set()
+        if stressed:
+            self._stressed_this_cycle.add(var)
+            self._recent_stressed.append(var)
+
+    def propose_probes(
+        self,
+        var: int,
+        available_parents: Set[int],
+        budget: int,
+    ) -> ProbeProposal:
+        self.call_count += 1
+        limit = min(self.max_probes, max(0, budget))
+        out: List[Tuple[int, float]] = []
+
+        def add(probe: Tuple[int, float]) -> None:
+            if len(out) < limit and probe not in out:
+                out.append(probe)
+
+        for probe in self._frontier_probes.get(var, ()):
+            add(probe)
+        values = (0.1, 0.9)
+        for i, parent in enumerate(self._parent_rankings.get(var, ())):
+            if parent in available_parents:
+                add((parent, values[i % len(values)]))
+        for i, stressed_var in enumerate(reversed(self._recent_stressed)):
+            if stressed_var in available_parents:
+                add((stressed_var, values[(i + 1) % len(values)]))
+
+        return ProbeProposal(var=var, probes=tuple(out))
 
 
 class FuncLibraryExpert:

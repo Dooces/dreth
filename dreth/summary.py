@@ -254,6 +254,34 @@ class RunAnalyzer:
         self.hybrid_parent_ranker_calls: int = getattr(agent, "_hybrid_parent_ranker_calls", 0)
         self.hybrid_probe_proposer_calls: int = getattr(agent, "_hybrid_probe_proposer_calls", 0)
         self.hybrid_expert_router_calls: int = getattr(agent, "_hybrid_expert_router_calls", 0)
+        _parent_prop = getattr(agent, "_parent_proposal_diagnostics", None)
+        if _parent_prop is not None:
+            self.parent_proposal_calls = _parent_prop.calls
+            self.parent_proposal_hit_rate = _parent_prop.chosen_parent_hit_rate
+            self.parent_proposal_miss_count = _parent_prop.miss_chosen_parent_count
+            self.parent_proposal_rank_mean = _parent_prop.rank_of_chosen_parent_mean
+            self.parent_proposal_rank_max = _parent_prop.rank_of_chosen_parent_max
+        else:
+            self.parent_proposal_calls = 0
+            self.parent_proposal_hit_rate = 0.0
+            self.parent_proposal_miss_count = 0
+            self.parent_proposal_rank_mean = 0.0
+            self.parent_proposal_rank_max = 0
+        _probe_prop = getattr(agent, "_probe_proposal_diagnostics", None)
+        if _probe_prop is not None:
+            self.provider_probes_proposed = _probe_prop.provider_probes_proposed
+            self.provider_probes_valid = _probe_prop.provider_probes_valid
+            self.provider_probes_invalid = _probe_prop.provider_probes_invalid
+            self.provider_probes_used_by_fit = _probe_prop.provider_probes_used_by_fit
+            self.provider_probe_improved_margin_count = _probe_prop.provider_probe_improved_margin_count
+            self.provider_probe_no_effect_count = _probe_prop.provider_probe_no_effect_count
+        else:
+            self.provider_probes_proposed = 0
+            self.provider_probes_valid = 0
+            self.provider_probes_invalid = 0
+            self.provider_probes_used_by_fit = 0
+            self.provider_probe_improved_margin_count = 0
+            self.provider_probe_no_effect_count = 0
 
         _agenda = getattr(agent, "_repair_agenda", None)
         if _agenda is not None:
@@ -435,6 +463,27 @@ class SummaryRenderer:
             lines.append(f"  parent_ranker:      calls={a.hybrid_parent_ranker_calls}")
             lines.append(f"  probe_proposer:     calls={a.hybrid_probe_proposer_calls}")
             lines.append(f"  expert_router:      calls={a.hybrid_expert_router_calls}")
+            if a.parent_proposal_calls > 0:
+                lines.append("  parent_proposal:")
+                lines.append(
+                    f"    calls={a.parent_proposal_calls} "
+                    f"chosen_parent_hit_rate={a.parent_proposal_hit_rate:.3f} "
+                    f"miss_chosen_parent_count={a.parent_proposal_miss_count} "
+                    f"rank_mean={a.parent_proposal_rank_mean:.2f} "
+                    f"rank_max={a.parent_proposal_rank_max}"
+                )
+            if a.provider_probes_proposed > 0 or a.hybrid_probe_proposer_calls > 0:
+                lines.append("  probe_proposal:")
+                lines.append(
+                    f"    provider_probes_proposed={a.provider_probes_proposed} "
+                    f"provider_probes_valid={a.provider_probes_valid} "
+                    f"provider_probes_invalid={a.provider_probes_invalid} "
+                    f"provider_probes_used_by_fit={a.provider_probes_used_by_fit}"
+                )
+                lines.append(
+                    f"    provider_probe_improved_margin_count={a.provider_probe_improved_margin_count} "
+                    f"provider_probe_no_effect_count={a.provider_probe_no_effect_count}"
+                )
             if a.hybrid_repair_agenda_items > 0:
                 lines.append(
                     f"  repair_agenda: total_pushed={a.hybrid_repair_agenda_items} "

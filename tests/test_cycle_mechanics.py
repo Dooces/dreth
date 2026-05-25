@@ -23,7 +23,11 @@ from dreth.agent import ChainedAgent
 from dreth.ledger import CompositeNethra, NethraCertificate
 from dreth.hybrid import (
     SensitivityParentRanker,
+    HistoryParentRanker,
     DiscriminationProbeProposer,
+    HistoryProbeProposer,
+    ParentProposalDiagnostics,
+    ProbeProposal,
     FuncLibraryRouter,
     SymbolicResidualPredictor,
 )
@@ -511,6 +515,10 @@ def _make_hybrid_agent(**kwargs):
     rng_a = random.Random(_SEED_A)
     world = CausalWorld(5, rng_w, noise_sigma=0.0)
     world.visible_count = 5
+    residual_predictor = kwargs.pop("residual_predictor", SymbolicResidualPredictor())
+    parent_ranker = kwargs.pop("parent_ranker", SensitivityParentRanker(world))
+    probe_proposer = kwargs.pop("probe_proposer", DiscriminationProbeProposer())
+    expert_router = kwargs.pop("expert_router", FuncLibraryRouter())
     agent = ChainedAgent(
         world, rng_a,
         sentinel_count=5, sentinel_pool=20,
@@ -518,10 +526,10 @@ def _make_hybrid_agent(**kwargs):
         compression_promote_after=3,
         priority_audit_budget=5,
         frontier_k=world.n_vars,
-        residual_predictor=SymbolicResidualPredictor(),
-        parent_ranker=SensitivityParentRanker(world),
-        probe_proposer=DiscriminationProbeProposer(),
-        expert_router=FuncLibraryRouter(),
+        residual_predictor=residual_predictor,
+        parent_ranker=parent_ranker,
+        probe_proposer=probe_proposer,
+        expert_router=expert_router,
         **kwargs,
     )
     return agent, world
@@ -669,3 +677,92 @@ def test_10d_off_vs_hybrid_compatible_skip_rate():
         f"(delta={abs(rate_off-rate_hy):.2%} > 20%); "
         "symbolic providers should not significantly alter skip behavior"
     )
+
+
+def test_10e_history_parent_ranker_cannot_issue_certs():
+    """History ranking may alter proposal order, but certs still come from ledger paths."""
+    agent, world = _make_hybrid_agent(
+        parent_ranker=HistoryParentRanker(),
+        probe_proposer=None,
+    )
+    agent.initialize()
+    for c in range(1, 8):
+        agent.run_cycle(c)
+
+    for var in range(world.visible_count):
+        n = agent.ledger.vars[var]
+        for cert in n.certificates.values():
+            assert cert.earned_by
+            assert cert.earned_by != "provider"
+            assert cert.operation in ("skip", "compress", "audit")
+        for cert in n.route_certs.values():
+            assert cert.earned_by
+            assert cert.earned_by != "provider"
+
+
+def test_10f_parent_proposal_diagnostics_increment_with_history_ranker():
+    agent, _ = _make_hybrid_agent(
+        parent_ranker=HistoryParentRanker(),
+        probe_proposer=None,
+    )
+    agent.initialize()
+    for c in range(1, 4):
+        agent.run_cycle(c)
+
+    diag = agent._parent_proposal_diagnostics
+    assert diag.calls > 0
+    assert diag.proposed_total > 0
+
+
+def test_10g_parent_ranking_comparison_counts_rank_zero_hit():
+    diag = ParentProposalDiagnostics()
+    diag.record_call((2, 3, 4), (2, 3, 4))
+    diag.record_fit((2, 3, 4), (2,))
+
+    assert diag.proposed_in_final_fit == 1
+    assert diag.miss_chosen_parent_count == 0
+    assert diag.rank_of_chosen_parent_mean == 0.0
+    assert diag.rank_of_chosen_parent_max == 0
+    assert diag.chosen_parent_hit_rate == 1.0
+
+
+class _InvalidProbeProposer:
+    def propose_probes(self, var, available_parents, budget):
+        return ProbeProposal(var=var, probes=((-1, 0.5), (0, 1.5)))
+
+
+def test_10h_probe_proposer_invalid_probes_are_dropped():
+    agent, _ = _make_hybrid_agent(
+        probe_proposer=_InvalidProbeProposer(),
+    )
+    agent.initialize()
+
+    events = [
+        e for e in agent.ledger.events
+        if e.type == "provider_diagnostic"
+        and e.payload.get("provider") == "probe_proposer"
+    ]
+    assert events
+    assert {e.payload.get("event") for e in events} >= {
+        "invalid_probe_var",
+        "invalid_probe_val",
+    }
+    assert agent._probe_proposal_diagnostics.provider_probes_invalid > 0
+
+
+def test_10i_probe_proposer_has_no_direct_cert_authority():
+    agent, world = _make_hybrid_agent(
+        probe_proposer=HistoryProbeProposer(max_probes=2),
+    )
+    agent.initialize()
+    for c in range(1, 4):
+        agent.run_cycle(c)
+
+    assert agent._probe_proposal_diagnostics.provider_probes_proposed > 0
+    for event in agent.ledger.events:
+        if event.type == "cert_issued":
+            assert event.payload.get("provider") != "probe_proposer"
+    for var in range(world.visible_count):
+        n = agent.ledger.vars[var]
+        for cert in list(n.certificates.values()) + list(n.route_certs.values()):
+            assert cert.earned_by != "provider"

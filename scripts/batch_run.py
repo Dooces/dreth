@@ -52,7 +52,9 @@ from dreth.functions import FUNC_LIBRARY
 from dreth.hybrid import (
     SymbolicResidualPredictor,
     SensitivityParentRanker,
+    HistoryParentRanker,
     DiscriminationProbeProposer,
+    HistoryProbeProposer,
     FuncLibraryRouter,
 )
 from dreth.learned_residual import (
@@ -96,6 +98,8 @@ class RunConfig:
     shadow_key_min_ok: int = 100
     shadow_key_min_clean_streak: int = 100
     shadow_key_symbolic_false_ok_tolerance: int = 0
+    parent_ranker: str = "sensitivity"  # "sensitivity" | "history"
+    probe_proposer: str = "none"        # "none" | "history"
 
 
 # ── per-run result ─────────────────────────────────────────────────────────────
@@ -227,6 +231,17 @@ class ArchMetrics:
     hybrid_repair_agenda_items: int = 0
     hybrid_repair_agenda_scope_mean: float = 0.0
     hybrid_repair_agenda_scope_max: int = 0
+    parent_proposal_calls: int = 0
+    parent_proposal_hit_rate: float = 0.0
+    parent_proposal_miss_count: int = 0
+    parent_proposal_rank_mean: float = 0.0
+    parent_proposal_rank_max: int = 0
+    provider_probes_proposed: int = 0
+    provider_probes_valid: int = 0
+    provider_probes_invalid: int = 0
+    provider_probes_used_by_fit: int = 0
+    provider_probe_improved_margin_count: int = 0
+    provider_probe_no_effect_count: int = 0
 
 
 @dataclass
@@ -519,8 +534,16 @@ def _build_and_run_dreth(
     _expert_router = None
     if cfg.hybrid_control == "interfaces":
         _residual_predictor = SymbolicResidualPredictor()
-        _parent_ranker = SensitivityParentRanker(world)
-        _probe_proposer = DiscriminationProbeProposer()
+        if cfg.parent_ranker == "history":
+            _parent_ranker = HistoryParentRanker()
+        else:
+            _parent_ranker = SensitivityParentRanker(world)
+        if cfg.probe_proposer == "history":
+            _probe_proposer = HistoryProbeProposer()
+        elif cfg.probe_proposer == "none":
+            _probe_proposer = None
+        else:
+            _probe_proposer = DiscriminationProbeProposer()
         _expert_router = FuncLibraryRouter()
 
     _shadow_predictor = None
@@ -827,6 +850,21 @@ def _extract_arch_metrics(agent: ChainedAgent, world: CausalWorld) -> ArchMetric
     m.hybrid_parent_ranker_calls = getattr(agent, "_hybrid_parent_ranker_calls", 0)
     m.hybrid_probe_proposer_calls = getattr(agent, "_hybrid_probe_proposer_calls", 0)
     m.hybrid_expert_router_calls = getattr(agent, "_hybrid_expert_router_calls", 0)
+    _ppd = getattr(agent, "_parent_proposal_diagnostics", None)
+    if _ppd is not None:
+        m.parent_proposal_calls = _ppd.calls
+        m.parent_proposal_hit_rate = _ppd.chosen_parent_hit_rate
+        m.parent_proposal_miss_count = _ppd.miss_chosen_parent_count
+        m.parent_proposal_rank_mean = _ppd.rank_of_chosen_parent_mean
+        m.parent_proposal_rank_max = _ppd.rank_of_chosen_parent_max
+    _prd = getattr(agent, "_probe_proposal_diagnostics", None)
+    if _prd is not None:
+        m.provider_probes_proposed = _prd.provider_probes_proposed
+        m.provider_probes_valid = _prd.provider_probes_valid
+        m.provider_probes_invalid = _prd.provider_probes_invalid
+        m.provider_probes_used_by_fit = _prd.provider_probes_used_by_fit
+        m.provider_probe_improved_margin_count = _prd.provider_probe_improved_margin_count
+        m.provider_probe_no_effect_count = _prd.provider_probe_no_effect_count
     _agenda = getattr(agent, "_repair_agenda", None)
     if _agenda is not None:
         _as = _agenda.summary()
@@ -1452,11 +1490,14 @@ def _print_aggregate(results: List[RunResult]) -> None:
                 ),
             )[:10]
             print("top candidate safe keys by would_save_iv:")
-            for rec in _top_candidate:
-                print(
-                    f"  key_type={rec['key_type']} key={rec['key']} "
-                    f"ok_count={rec['ok_count']} would_save_iv={rec['would_save_iv']}"
-                )
+            if not _top_candidate:
+                print("  (none)")
+            else:
+                for rec in _top_candidate:
+                    print(
+                        f"  key_type={rec['key_type']} key={rec['key']} "
+                        f"ok_count={rec['ok_count']} would_save_iv={rec['would_save_iv']}"
+                    )
 
     # Print hybrid metrics whenever any provider was active, even if some counts
     # are zero — zero counts expose wiring gaps immediately.
@@ -1477,6 +1518,41 @@ def _print_aggregate(results: List[RunResult]) -> None:
             f"  probe_proposer: calls={_hybrid_pp_calls}"
             f"  expert_router: calls={_hybrid_er_calls}"
         )
+        _parent_prop_calls = sum(r.arch.parent_proposal_calls for r in ok_runs)
+        if _parent_prop_calls > 0:
+            _parent_hit_rate = (
+                sum(r.arch.parent_proposal_hit_rate * r.arch.parent_proposal_calls for r in ok_runs)
+                / max(1, _parent_prop_calls)
+            )
+            _parent_rank_mean = (
+                sum(r.arch.parent_proposal_rank_mean * r.arch.parent_proposal_calls for r in ok_runs)
+                / max(1, _parent_prop_calls)
+            )
+            _parent_rank_max = max(r.arch.parent_proposal_rank_max for r in ok_runs)
+            _parent_misses = sum(r.arch.parent_proposal_miss_count for r in ok_runs)
+            print("  parent_proposal:")
+            print(
+                f"    calls={_parent_prop_calls} "
+                f"chosen_parent_hit_rate={_parent_hit_rate:.3f} "
+                f"miss_chosen_parent_count={_parent_misses} "
+                f"rank_mean={_parent_rank_mean:.2f} "
+                f"rank_max={_parent_rank_max}"
+            )
+        _probe_prop_total = sum(r.arch.provider_probes_proposed for r in ok_runs)
+        if _probe_prop_total > 0 or _hybrid_pp_calls > 0:
+            print("  probe_proposal:")
+            print(
+                f"    provider_probes_proposed={_probe_prop_total} "
+                f"provider_probes_valid={sum(r.arch.provider_probes_valid for r in ok_runs)} "
+                f"provider_probes_invalid={sum(r.arch.provider_probes_invalid for r in ok_runs)} "
+                f"provider_probes_used_by_fit={sum(r.arch.provider_probes_used_by_fit for r in ok_runs)}"
+            )
+            print(
+                f"    provider_probe_improved_margin_count="
+                f"{sum(r.arch.provider_probe_improved_margin_count for r in ok_runs)} "
+                f"provider_probe_no_effect_count="
+                f"{sum(r.arch.provider_probe_no_effect_count for r in ok_runs)}"
+            )
         _agenda_tot = sum(r.arch.hybrid_repair_agenda_items for r in ok_runs)
         if _agenda_tot > 0:
             _scope_max  = max(r.arch.hybrid_repair_agenda_scope_max for r in ok_runs)
@@ -1579,6 +1655,12 @@ def main():
     p.add_argument("--hybrid-control", default="off",
                    choices=["off", "interfaces"],
                    help="hybrid control mode: off=current behavior; interfaces=symbolic provider wrappers (default: off)")
+    p.add_argument("--parent-ranker", default="sensitivity",
+                   choices=["sensitivity", "history"],
+                   help="parent ranker provider for --hybrid-control interfaces (default: sensitivity)")
+    p.add_argument("--probe-proposer", default="none",
+                   choices=["none", "history"],
+                   help="probe proposer provider for --hybrid-control interfaces (default: none)")
     p.add_argument("--repair-agenda", action="store_true",
                    help="enable RepairAgenda: annotate needs_audit entries with scope/authority metadata")
     p.add_argument("--shadow-residual", default="off",
@@ -1648,7 +1730,9 @@ def main():
                   shadow_key_authority=args.shadow_key_authority,
                   shadow_key_min_ok=args.shadow_key_min_ok,
                   shadow_key_min_clean_streak=args.shadow_key_min_clean_streak,
-                  shadow_key_symbolic_false_ok_tolerance=args.shadow_key_symbolic_false_ok_tolerance)
+                  shadow_key_symbolic_false_ok_tolerance=args.shadow_key_symbolic_false_ok_tolerance,
+                  parent_ranker=args.parent_ranker,
+                  probe_proposer=args.probe_proposer)
         for v in var_list
         for c in cycle_list
         for s in seed_list
@@ -1662,7 +1746,11 @@ def main():
     if args.progress:
         mode += f" +progress({args.progress})"
     if args.hybrid_control != "off":
-        mode += f" +hybrid({args.hybrid_control})"
+        mode += (
+            f" +hybrid({args.hybrid_control})"
+            f" +parent-ranker({args.parent_ranker})"
+            f" +probe-proposer({args.probe_proposer})"
+        )
     if args.repair_agenda:
         mode += " +repair-agenda"
     if shadow_sweep:
@@ -1734,6 +1822,19 @@ def main():
                     "shadow_key_revoked_would_miss_active_failure": (
                         r.arch.shadow_key_revoked_would_miss_active_failure
                     ),
+                    "parent_proposal_calls": r.arch.parent_proposal_calls,
+                    "parent_proposal_hit_rate": round(r.arch.parent_proposal_hit_rate, 6),
+                    "parent_proposal_miss_count": r.arch.parent_proposal_miss_count,
+                    "parent_proposal_rank_mean": round(r.arch.parent_proposal_rank_mean, 6),
+                    "parent_proposal_rank_max": r.arch.parent_proposal_rank_max,
+                    "provider_probes_proposed": r.arch.provider_probes_proposed,
+                    "provider_probes_valid": r.arch.provider_probes_valid,
+                    "provider_probes_invalid": r.arch.provider_probes_invalid,
+                    "provider_probes_used_by_fit": r.arch.provider_probes_used_by_fit,
+                    "provider_probe_improved_margin_count": (
+                        r.arch.provider_probe_improved_margin_count
+                    ),
+                    "provider_probe_no_effect_count": r.arch.provider_probe_no_effect_count,
                     "earned_by_dist": r.arch.earned_by_dist,
                     "revoked_by_dist": r.arch.revoked_by_dist,
                     "violations": r.violations,

@@ -90,6 +90,7 @@ from .summary import RunAnalyzer, SummaryRenderer
 from .hybrid import (
     ResidualPredictor, ParentRanker, ProbeProposer, ExpertRouter,
     SymbolicResidualPredictor, SensitivityParentRanker,
+    ParentProposalDiagnostics, ProbeProposalDiagnostics,
 )
 from .repair_agenda import RepairAgenda, RepairAgendaItem
 from .learned_residual import (
@@ -418,6 +419,9 @@ class ChainedAgent:
         self._hybrid_parent_ranker_calls: int = 0
         self._hybrid_probe_proposer_calls: int = 0
         self._hybrid_expert_router_calls: int = 0
+        self._parent_proposal_diagnostics = ParentProposalDiagnostics()
+        self._probe_proposal_diagnostics = ProbeProposalDiagnostics()
+        self._pending_parent_rankings: Dict[int, Tuple[int, ...]] = {}
 
         # Repair agenda: structural planning surface for pending repairs.
         # When disabled (default), needs_audit drives repair as before.
@@ -556,6 +560,8 @@ class ChainedAgent:
             if n.tied_frontier is not None and n.tied_frontier.separating_probes
             else ()
         )
+        if self._probe_proposer is not None and hasattr(self._probe_proposer, "observe_frontier_probes"):
+            self._probe_proposer.observe_frontier_probes(var, _frontier_probes)  # type: ignore[attr-defined]
 
         # ProbeProposer: provider may suggest additional forced probes.
         # Provider probes are merged with frontier probes; they do NOT certify
@@ -567,8 +573,10 @@ class ChainedAgent:
             _pp = self._probe_proposer.propose_probes(var, available, budget)
             self._hybrid_probe_proposer_calls += 1
             _valid: List[Tuple[int, float]] = []
+            _invalid_count = 0
             for _iv_var, _iv_val in _pp.probes:
                 if not (0 <= _iv_var < self.world.visible_count):
+                    _invalid_count += 1
                     self.ledger.emit(LedgerEvent(
                         type="provider_diagnostic", var=var, cycle=cycle,
                         payload={"provider": "probe_proposer",
@@ -577,6 +585,7 @@ class ChainedAgent:
                     ))
                     continue
                 if not (0.0 <= _iv_val <= 1.0):
+                    _invalid_count += 1
                     self.ledger.emit(LedgerEvent(
                         type="provider_diagnostic", var=var, cycle=cycle,
                         payload={"provider": "probe_proposer",
@@ -586,6 +595,11 @@ class ChainedAgent:
                     continue
                 _valid.append((_iv_var, _iv_val))
             _provider_probes = tuple(_valid)
+            self._probe_proposal_diagnostics.record_proposal(
+                proposed=len(_pp.probes),
+                valid=len(_provider_probes),
+                invalid=_invalid_count,
+            )
 
         # Merge provider probes with frontier probes; pass None when both are empty
         # so fit_var's default discrimination pool is used unchanged.
@@ -638,6 +652,17 @@ class ChainedAgent:
             near_tie_context_key=int(diag_dict.get("near_tie_context_key", 0)),
         )
         self.fit_diagnostics.append(fd)
+        if self._parent_ranker is not None and var in self._pending_parent_rankings:
+            _ranked = self._pending_parent_rankings.pop(var, ())
+            self._parent_proposal_diagnostics.record_fit(_ranked, tuple(result[0]))
+            if hasattr(self._parent_ranker, "observe_fit_result"):
+                self._parent_ranker.observe_fit_result(var, tuple(result[0]), int(fd.margin))  # type: ignore[attr-defined]
+        if self._probe_proposer is not None:
+            self._probe_proposal_diagnostics.record_fit(
+                _provider_probes,
+                fd.probes,
+                int(fd.margin),
+            )
         # Tie-tracking: bump count for this var's tie set if size > 1
         if len(fd.tie_set) > 1:
             self.tie_log.setdefault(var, {})
@@ -2285,10 +2310,18 @@ class ChainedAgent:
             if isinstance(self._parent_ranker, SensitivityParentRanker):
                 self.total_interventions += 2 * len(candidates)
             # Route-cert exclusion: providers must not apply cert logic; ChainedAgent does it here.
-            return {
+            post_route = tuple(
                 x for x in ranking.ranked
                 if n.route_certs.get(x) is None or n.route_certs[x].role != "trass"
-            }
+            )
+            excluded = tuple(x for x in ranking.ranked if x not in post_route)
+            self._parent_proposal_diagnostics.record_call(tuple(ranking.ranked), post_route)
+            self._pending_parent_rankings[target] = post_route
+            if excluded and hasattr(self._parent_ranker, "observe_route_exclusions"):
+                self._parent_ranker.observe_route_exclusions(target, excluded)  # type: ignore[attr-defined]
+            if self._probe_proposer is not None and hasattr(self._probe_proposer, "observe_parent_ranking"):
+                self._probe_proposer.observe_parent_ranking(target, post_route)  # type: ignore[attr-defined]
+            return set(post_route)
         # Inline path: existing behavior unchanged when no provider is set.
         visible = self.world.visible_count
         scored: List[Tuple[float, int]] = []
@@ -2744,6 +2777,11 @@ class ChainedAgent:
                             _passive_stressed = True
                             self._passive_stress_count += 1
                             _passive_stressed_vars.add(var)
+
+            if self._parent_ranker is not None and hasattr(self._parent_ranker, "observe_residual_event"):
+                self._parent_ranker.observe_residual_event(var, cycle, _passive_stressed)  # type: ignore[attr-defined]
+            if self._probe_proposer is not None and hasattr(self._probe_proposer, "observe_residual_event"):
+                self._probe_proposer.observe_residual_event(var, cycle, _passive_stressed)  # type: ignore[attr-defined]
 
             # Shadow residual (Stage 3A): observe actual symbolic residual and
             # predict — NEVER used for gating, certs, skips, or any operative
