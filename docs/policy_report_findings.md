@@ -10,7 +10,7 @@ policies across a factorial grid of schedules, variable counts, and cycle length
 | schedules  | `false_trass`, `regime_switch`                  |
 | n\_vars    | 50, 75, 100                                     |
 | cycles     | 5 000, 7 500, 10 000                            |
-| seeds      | 42, 99, 7 (3 runs per cell, 162 rows total)     |
+| seeds      | 42, 99, 7 (3 runs per policy cell; 162 total runs, 54 policy-report rows) |
 | policies   | `sensitivity/none`, `history/history`, `history_rescue/history_rescue` |
 
 Each cell is the mean of 3 independent seeds. All comparisons are relative to
@@ -24,7 +24,7 @@ All 162 runs passed invariants.
 
 Policy scoring and summarization are **diagnostic only**. The summarizer
 (`scripts/summarize_policy_report.py`) reads the TSV offline and produces no side
-effects on agent behaviour. No runtime policy switching is implemented or planned.
+effects on agent behaviour. No runtime policy switching is implemented in this report.
 
 ---
 
@@ -75,7 +75,7 @@ optimal across both regimes.
 history-aware policies carry. It is safe under all tested conditions.
 
 **history\_rescue is useful for false\_trass-like worlds.** Its advantage comes
-from lower IV (fewer invariant failures accumulate), at the cost of modestly more
+from lower intervention volume, at the cost of modestly more
 audits and revocations. That trade-off is worth it when the world is stable enough
 that trass events are informative rather than noisy.
 
@@ -97,7 +97,9 @@ python scripts/batch_run.py \
   --cycles 5000,7500,10000 \
   --seeds 42,99,7 \
   --policy-report \
-  --policy-report-tsv reports/policy_report.tsv
+  --policy-report-tsv reports/policy_report.tsv \
+  --hybrid-control interfaces \
+  --repair-agenda
 ```
 
 Summarize offline (reads the TSV, no agent code touched):
