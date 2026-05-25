@@ -422,6 +422,7 @@ class ChainedAgent:
         self._parent_proposal_diagnostics = ParentProposalDiagnostics()
         self._probe_proposal_diagnostics = ProbeProposalDiagnostics()
         self._pending_parent_rankings: Dict[int, Tuple[int, ...]] = {}
+        self._pending_parent_sources: Dict[int, Dict[int, str]] = {}
 
         # Repair agenda: structural planning surface for pending repairs.
         # When disabled (default), needs_audit drives repair as before.
@@ -654,7 +655,8 @@ class ChainedAgent:
         self.fit_diagnostics.append(fd)
         if self._parent_ranker is not None and var in self._pending_parent_rankings:
             _ranked = self._pending_parent_rankings.pop(var, ())
-            self._parent_proposal_diagnostics.record_fit(_ranked, tuple(result[0]))
+            _sources = self._pending_parent_sources.pop(var, {})
+            self._parent_proposal_diagnostics.record_fit(_ranked, tuple(result[0]), _sources)
             if hasattr(self._parent_ranker, "observe_fit_result"):
                 self._parent_ranker.observe_fit_result(var, tuple(result[0]), int(fd.margin))  # type: ignore[attr-defined]
         if self._probe_proposer is not None:
@@ -2305,6 +2307,8 @@ class ChainedAgent:
             candidates: Set[int] = {x for x in range(self.world.visible_count) if x != target}
             ranking = self._parent_ranker.rank_parents(target, candidates, m)
             self._hybrid_parent_ranker_calls += 1
+            _ranking_diag = getattr(ranking, "diagnostics", {})
+            self.total_interventions += int(_ranking_diag.get("sensitivity_rescue_interventions", 0))
             # Mirror intervention cost for the default SensitivityParentRanker path,
             # which runs 2 world calls per candidate (same as the inline loop below).
             if isinstance(self._parent_ranker, SensitivityParentRanker):
@@ -2315,11 +2319,24 @@ class ChainedAgent:
                 if n.route_certs.get(x) is None or n.route_certs[x].role != "trass"
             )
             excluded = tuple(x for x in ranking.ranked if x not in post_route)
-            self._parent_proposal_diagnostics.record_call(tuple(ranking.ranked), post_route)
+            source_by_candidate = getattr(ranking, "source_by_candidate", {})
+            post_route_sources = {
+                x: source_by_candidate.get(x, "")
+                for x in post_route
+                if source_by_candidate.get(x, "")
+            }
+            self._parent_proposal_diagnostics.record_call(
+                tuple(ranking.ranked), post_route, _ranking_diag
+            )
             self._pending_parent_rankings[target] = post_route
+            self._pending_parent_sources[target] = post_route_sources
             if excluded and hasattr(self._parent_ranker, "observe_route_exclusions"):
                 self._parent_ranker.observe_route_exclusions(target, excluded)  # type: ignore[attr-defined]
-            if self._probe_proposer is not None and hasattr(self._probe_proposer, "observe_parent_ranking"):
+            if self._probe_proposer is not None and hasattr(self._probe_proposer, "observe_parent_ranking_metadata"):
+                self._probe_proposer.observe_parent_ranking_metadata(  # type: ignore[attr-defined]
+                    target, post_route, post_route_sources
+                )
+            elif self._probe_proposer is not None and hasattr(self._probe_proposer, "observe_parent_ranking"):
                 self._probe_proposer.observe_parent_ranking(target, post_route)  # type: ignore[attr-defined]
             return set(post_route)
         # Inline path: existing behavior unchanged when no provider is set.

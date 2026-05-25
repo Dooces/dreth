@@ -53,8 +53,10 @@ from dreth.hybrid import (
     SymbolicResidualPredictor,
     SensitivityParentRanker,
     HistoryParentRanker,
+    HistoryRescueParentRanker,
     DiscriminationProbeProposer,
     HistoryProbeProposer,
+    HistoryRescueProbeProposer,
     FuncLibraryRouter,
 )
 from dreth.learned_residual import (
@@ -98,8 +100,8 @@ class RunConfig:
     shadow_key_min_ok: int = 100
     shadow_key_min_clean_streak: int = 100
     shadow_key_symbolic_false_ok_tolerance: int = 0
-    parent_ranker: str = "sensitivity"  # "sensitivity" | "history"
-    probe_proposer: str = "none"        # "none" | "history"
+    parent_ranker: str = "sensitivity"  # "sensitivity" | "history" | "history_rescue"
+    probe_proposer: str = "none"        # "none" | "history" | "history_rescue"
 
 
 # ── per-run result ─────────────────────────────────────────────────────────────
@@ -236,6 +238,13 @@ class ArchMetrics:
     parent_proposal_miss_count: int = 0
     parent_proposal_rank_mean: float = 0.0
     parent_proposal_rank_max: int = 0
+    history_ranker_calls: int = 0
+    sensitivity_rescue_calls: int = 0
+    sensitivity_rescue_interventions: int = 0
+    rescue_candidates_added: int = 0
+    rescue_chosen_parent_hits: int = 0
+    chosen_parent_from_history: int = 0
+    chosen_parent_from_rescue: int = 0
     provider_probes_proposed: int = 0
     provider_probes_valid: int = 0
     provider_probes_invalid: int = 0
@@ -534,11 +543,15 @@ def _build_and_run_dreth(
     _expert_router = None
     if cfg.hybrid_control == "interfaces":
         _residual_predictor = SymbolicResidualPredictor()
-        if cfg.parent_ranker == "history":
+        if cfg.parent_ranker == "history_rescue":
+            _parent_ranker = HistoryRescueParentRanker(world)
+        elif cfg.parent_ranker == "history":
             _parent_ranker = HistoryParentRanker()
         else:
             _parent_ranker = SensitivityParentRanker(world)
-        if cfg.probe_proposer == "history":
+        if cfg.probe_proposer == "history_rescue":
+            _probe_proposer = HistoryRescueProbeProposer()
+        elif cfg.probe_proposer == "history":
             _probe_proposer = HistoryProbeProposer()
         elif cfg.probe_proposer == "none":
             _probe_proposer = None
@@ -857,6 +870,13 @@ def _extract_arch_metrics(agent: ChainedAgent, world: CausalWorld) -> ArchMetric
         m.parent_proposal_miss_count = _ppd.miss_chosen_parent_count
         m.parent_proposal_rank_mean = _ppd.rank_of_chosen_parent_mean
         m.parent_proposal_rank_max = _ppd.rank_of_chosen_parent_max
+        m.history_ranker_calls = _ppd.history_ranker_calls
+        m.sensitivity_rescue_calls = _ppd.sensitivity_rescue_calls
+        m.sensitivity_rescue_interventions = _ppd.sensitivity_rescue_interventions
+        m.rescue_candidates_added = _ppd.rescue_candidates_added
+        m.rescue_chosen_parent_hits = _ppd.rescue_chosen_parent_hits
+        m.chosen_parent_from_history = _ppd.chosen_parent_from_history
+        m.chosen_parent_from_rescue = _ppd.chosen_parent_from_rescue
     _prd = getattr(agent, "_probe_proposal_diagnostics", None)
     if _prd is not None:
         m.provider_probes_proposed = _prd.provider_probes_proposed
@@ -1350,6 +1370,13 @@ def _print_aggregate(results: List[RunResult]) -> None:
 
     print(f"  runs ok={n}/{len(results)}")
     print(f"  avg: skip%={avg_skip:.1f}  iv={avg_iv:.0f}")
+    print(
+        f"  diagnostic raw: full_audits={sum(r.full_audits for r in ok_runs)} "
+        f"revocations={sum(sum(r.arch.revoked_by_dist.values()) for r in ok_runs)} "
+        f"unique_fails={sum(r.arch.total_unique_failures for r in ok_runs)} "
+        f"regime_sentinel_fail={sum(r.arch.regime_sentinel_fails for r in ok_runs)} "
+        f"no_sentinel={sum(r.arch.regime_no_sentinel for r in ok_runs)}"
+    )
     print(f"  handle amortization: {amort_pct:.1f}%  "
           f"(composite={avg_comp_sk:.0f} regime={avg_rsk:.0f} park={avg_psk_agg:.0f} of {total_sk_avg:.0f} avg total skips)")
     avg_comp_live = sum(r.arch.active_composites for r in ok_runs) / n
@@ -1538,6 +1565,20 @@ def _print_aggregate(results: List[RunResult]) -> None:
                 f"rank_mean={_parent_rank_mean:.2f} "
                 f"rank_max={_parent_rank_max}"
             )
+            _rescue_calls = sum(r.arch.sensitivity_rescue_calls for r in ok_runs)
+            if _rescue_calls > 0:
+                print(
+                    f"    history_ranker_calls={sum(r.arch.history_ranker_calls for r in ok_runs)} "
+                    f"sensitivity_rescue_calls={_rescue_calls} "
+                    f"sensitivity_rescue_interventions="
+                    f"{sum(r.arch.sensitivity_rescue_interventions for r in ok_runs)}"
+                )
+                print(
+                    f"    rescue_candidates_added={sum(r.arch.rescue_candidates_added for r in ok_runs)} "
+                    f"rescue_chosen_parent_hits={sum(r.arch.rescue_chosen_parent_hits for r in ok_runs)} "
+                    f"chosen_parent_from_history={sum(r.arch.chosen_parent_from_history for r in ok_runs)} "
+                    f"chosen_parent_from_rescue={sum(r.arch.chosen_parent_from_rescue for r in ok_runs)}"
+                )
         _probe_prop_total = sum(r.arch.provider_probes_proposed for r in ok_runs)
         if _probe_prop_total > 0 or _hybrid_pp_calls > 0:
             print("  probe_proposal:")
@@ -1656,10 +1697,10 @@ def main():
                    choices=["off", "interfaces"],
                    help="hybrid control mode: off=current behavior; interfaces=symbolic provider wrappers (default: off)")
     p.add_argument("--parent-ranker", default="sensitivity",
-                   choices=["sensitivity", "history"],
+                   choices=["sensitivity", "history", "history_rescue"],
                    help="parent ranker provider for --hybrid-control interfaces (default: sensitivity)")
     p.add_argument("--probe-proposer", default="none",
-                   choices=["none", "history"],
+                   choices=["none", "history", "history_rescue"],
                    help="probe proposer provider for --hybrid-control interfaces (default: none)")
     p.add_argument("--repair-agenda", action="store_true",
                    help="enable RepairAgenda: annotate needs_audit entries with scope/authority metadata")
@@ -1827,6 +1868,13 @@ def main():
                     "parent_proposal_miss_count": r.arch.parent_proposal_miss_count,
                     "parent_proposal_rank_mean": round(r.arch.parent_proposal_rank_mean, 6),
                     "parent_proposal_rank_max": r.arch.parent_proposal_rank_max,
+                    "history_ranker_calls": r.arch.history_ranker_calls,
+                    "sensitivity_rescue_calls": r.arch.sensitivity_rescue_calls,
+                    "sensitivity_rescue_interventions": r.arch.sensitivity_rescue_interventions,
+                    "rescue_candidates_added": r.arch.rescue_candidates_added,
+                    "rescue_chosen_parent_hits": r.arch.rescue_chosen_parent_hits,
+                    "chosen_parent_from_history": r.arch.chosen_parent_from_history,
+                    "chosen_parent_from_rescue": r.arch.chosen_parent_from_rescue,
                     "provider_probes_proposed": r.arch.provider_probes_proposed,
                     "provider_probes_valid": r.arch.provider_probes_valid,
                     "provider_probes_invalid": r.arch.provider_probes_invalid,

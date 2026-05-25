@@ -24,8 +24,10 @@ from dreth.ledger import CompositeNethra, NethraCertificate
 from dreth.hybrid import (
     SensitivityParentRanker,
     HistoryParentRanker,
+    HistoryRescueParentRanker,
     DiscriminationProbeProposer,
     HistoryProbeProposer,
+    HistoryRescueProbeProposer,
     ParentProposalDiagnostics,
     ProbeProposal,
     FuncLibraryRouter,
@@ -766,3 +768,82 @@ def test_10i_probe_proposer_has_no_direct_cert_authority():
         n = agent.ledger.vars[var]
         for cert in list(n.certificates.values()) + list(n.route_certs.values()):
             assert cert.earned_by != "provider"
+
+
+def test_10j_history_rescue_parent_ranker_preserves_authority_invariants():
+    agent, world = _make_hybrid_agent(
+        parent_ranker=HistoryRescueParentRanker(CausalWorld(5, random.Random(_SEED_W), noise_sigma=0.0)),
+        probe_proposer=HistoryRescueProbeProposer(max_probes=2),
+    )
+    agent._parent_ranker._world = world
+    agent.initialize()
+    for c in range(1, 6):
+        agent.run_cycle(c)
+
+    for var in range(world.visible_count):
+        n = agent.ledger.vars[var]
+        for cert in list(n.certificates.values()) + list(n.route_certs.values()):
+            assert cert.earned_by
+            assert cert.earned_by != "provider"
+
+
+def test_10k_history_rescue_route_cert_exclusion_after_merge():
+    agent, world = _make_hybrid_agent(
+        parent_ranker=HistoryRescueParentRanker(CausalWorld(5, random.Random(_SEED_W), noise_sigma=0.0)),
+        probe_proposer=None,
+    )
+    agent._parent_ranker._world = world
+    target = 2
+    agent._parent_ranker.observe_fit_result(target, (0,), margin=5)
+    agent.ledger.issue_route_cert(
+        target, 0, "trass",
+        context_parents=(),
+        context_visible=world.visible_count,
+        context_cycle=0,
+        targets=(),
+        substitutions_tested=("test",),
+        changes=0,
+        trials=1,
+        earned_by="counterfactual_fit",
+    )
+
+    available = agent._screen_candidate_parents(target, 4)
+
+    assert 0 not in available
+    assert agent._parent_proposal_diagnostics.proposed_excluded_by_route_cert > 0
+
+
+def test_10l_history_rescue_sensitivity_cost_accounted_exactly():
+    agent, world = _make_hybrid_agent(
+        parent_ranker=HistoryRescueParentRanker(CausalWorld(5, random.Random(_SEED_W), noise_sigma=0.0)),
+        probe_proposer=None,
+    )
+    agent._parent_ranker._world = world
+    before = agent.total_interventions
+
+    agent._screen_candidate_parents(2, 4)
+
+    diag = agent._parent_proposal_diagnostics
+    assert diag.sensitivity_rescue_calls == 1
+    assert diag.sensitivity_rescue_interventions > 0
+    assert agent.total_interventions - before == diag.sensitivity_rescue_interventions
+
+
+def test_10m_chosen_parent_source_history_and_rescue_recorded():
+    diag = ParentProposalDiagnostics()
+    diag.record_call(
+        (0, 1),
+        (0, 1),
+        {
+            "history_ranker_calls": 1,
+            "sensitivity_rescue_calls": 1,
+            "sensitivity_rescue_interventions": 4,
+            "rescue_candidates_added": 1,
+        },
+    )
+    diag.record_fit((0, 1), (0, 1), {0: "history", 1: "rescue"})
+
+    assert diag.chosen_parent_from_history == 1
+    assert diag.chosen_parent_from_rescue == 1
+    assert diag.rescue_chosen_parent_hits == 1
+    assert diag.sensitivity_rescue_interventions == 4

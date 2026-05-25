@@ -261,12 +261,26 @@ class RunAnalyzer:
             self.parent_proposal_miss_count = _parent_prop.miss_chosen_parent_count
             self.parent_proposal_rank_mean = _parent_prop.rank_of_chosen_parent_mean
             self.parent_proposal_rank_max = _parent_prop.rank_of_chosen_parent_max
+            self.history_ranker_calls = _parent_prop.history_ranker_calls
+            self.sensitivity_rescue_calls = _parent_prop.sensitivity_rescue_calls
+            self.sensitivity_rescue_interventions = _parent_prop.sensitivity_rescue_interventions
+            self.rescue_candidates_added = _parent_prop.rescue_candidates_added
+            self.rescue_chosen_parent_hits = _parent_prop.rescue_chosen_parent_hits
+            self.chosen_parent_from_history = _parent_prop.chosen_parent_from_history
+            self.chosen_parent_from_rescue = _parent_prop.chosen_parent_from_rescue
         else:
             self.parent_proposal_calls = 0
             self.parent_proposal_hit_rate = 0.0
             self.parent_proposal_miss_count = 0
             self.parent_proposal_rank_mean = 0.0
             self.parent_proposal_rank_max = 0
+            self.history_ranker_calls = 0
+            self.sensitivity_rescue_calls = 0
+            self.sensitivity_rescue_interventions = 0
+            self.rescue_candidates_added = 0
+            self.rescue_chosen_parent_hits = 0
+            self.chosen_parent_from_history = 0
+            self.chosen_parent_from_rescue = 0
         _probe_prop = getattr(agent, "_probe_proposal_diagnostics", None)
         if _probe_prop is not None:
             self.provider_probes_proposed = _probe_prop.provider_probes_proposed
@@ -472,6 +486,18 @@ class SummaryRenderer:
                     f"rank_mean={a.parent_proposal_rank_mean:.2f} "
                     f"rank_max={a.parent_proposal_rank_max}"
                 )
+                if a.sensitivity_rescue_calls > 0:
+                    lines.append(
+                        f"    history_ranker_calls={a.history_ranker_calls} "
+                        f"sensitivity_rescue_calls={a.sensitivity_rescue_calls} "
+                        f"sensitivity_rescue_interventions={a.sensitivity_rescue_interventions}"
+                    )
+                    lines.append(
+                        f"    rescue_candidates_added={a.rescue_candidates_added} "
+                        f"rescue_chosen_parent_hits={a.rescue_chosen_parent_hits} "
+                        f"chosen_parent_from_history={a.chosen_parent_from_history} "
+                        f"chosen_parent_from_rescue={a.chosen_parent_from_rescue}"
+                    )
             if a.provider_probes_proposed > 0 or a.hybrid_probe_proposer_calls > 0:
                 lines.append("  probe_proposal:")
                 lines.append(

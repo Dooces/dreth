@@ -48,6 +48,8 @@ class ParentRanking:
     target: int
     ranked: Tuple[int, ...]      # candidate vars in descending priority order
     scores: Dict[int, float]     # sensitivity score per candidate
+    source_by_candidate: Dict[int, str] = dataclasses.field(default_factory=dict)
+    diagnostics: Dict[str, int] = dataclasses.field(default_factory=dict)
 
 
 @dataclasses.dataclass
@@ -93,13 +95,37 @@ class ParentProposalDiagnostics:
     _rank_sum: int = 0
     _rank_count: int = 0
     rank_of_chosen_parent_max: int = 0
+    history_ranker_calls: int = 0
+    sensitivity_rescue_calls: int = 0
+    sensitivity_rescue_interventions: int = 0
+    rescue_candidates_added: int = 0
+    rescue_chosen_parent_hits: int = 0
+    chosen_parent_from_history: int = 0
+    chosen_parent_from_rescue: int = 0
 
-    def record_call(self, ranked: Tuple[int, ...], post_route: Tuple[int, ...]) -> None:
+    def record_call(
+        self,
+        ranked: Tuple[int, ...],
+        post_route: Tuple[int, ...],
+        diagnostics: Optional[Dict[str, int]] = None,
+    ) -> None:
         self.calls += 1
         self.proposed_total += len(ranked)
         self.proposed_excluded_by_route_cert += max(0, len(ranked) - len(post_route))
+        if diagnostics:
+            self.history_ranker_calls += int(diagnostics.get("history_ranker_calls", 0))
+            self.sensitivity_rescue_calls += int(diagnostics.get("sensitivity_rescue_calls", 0))
+            self.sensitivity_rescue_interventions += int(
+                diagnostics.get("sensitivity_rescue_interventions", 0)
+            )
+            self.rescue_candidates_added += int(diagnostics.get("rescue_candidates_added", 0))
 
-    def record_fit(self, ranked_post_route: Tuple[int, ...], chosen_parents: Tuple[int, ...]) -> None:
+    def record_fit(
+        self,
+        ranked_post_route: Tuple[int, ...],
+        chosen_parents: Tuple[int, ...],
+        source_by_candidate: Optional[Dict[int, str]] = None,
+    ) -> None:
         rank_index = {p: i for i, p in enumerate(ranked_post_route)}
         chosen = set(chosen_parents)
         for parent in chosen_parents:
@@ -108,6 +134,12 @@ class ParentProposalDiagnostics:
                 self.miss_chosen_parent_count += 1
                 continue
             self.proposed_in_final_fit += 1
+            source = (source_by_candidate or {}).get(parent, "")
+            if "history" in source:
+                self.chosen_parent_from_history += 1
+            if "rescue" in source:
+                self.chosen_parent_from_rescue += 1
+                self.rescue_chosen_parent_hits += 1
             self._rank_sum += rank
             self._rank_count += 1
             self.rank_of_chosen_parent_max = max(self.rank_of_chosen_parent_max, rank)
@@ -393,6 +425,168 @@ class HistoryParentRanker:
         return ParentRanking(target=target, ranked=ranked, scores=scores)
 
 
+class HistoryRescueParentRanker(HistoryParentRanker):
+    """History ranker with a small sensitivity rescue pool.
+
+    History proposes the first tranche. Sensitivity probes only a bounded pool
+    built from visible agent-side history: recent stress, prior chosen parents,
+    and round-robin visible candidates. The provider returns candidates only.
+    ChainedAgent still applies route-cert exclusion and owns all authority.
+    """
+
+    def __init__(self, world) -> None:
+        super().__init__()
+        self._world = world
+        self.history_ranker_calls: int = 0
+        self.sensitivity_rescue_calls: int = 0
+        self.sensitivity_rescue_interventions: int = 0
+        self.rescue_candidates_added: int = 0
+        self._rr_cursor: Dict[int, int] = defaultdict(int)
+        self._recent_rescue_tested: Dict[int, deque] = defaultdict(lambda: deque(maxlen=64))
+        self._last_rescue_parent_by_target: Dict[int, Optional[int]] = {}
+
+    def _history_scores(self, target: int, candidates: Set[int]) -> Dict[int, float]:
+        recent_counts: Dict[int, int] = defaultdict(int)
+        for v in self._recent_stressed:
+            recent_counts[v] += 1
+        scores: Dict[int, float] = {}
+        for cand in candidates:
+            if cand == target:
+                continue
+            fit_score = 10.0 * self._fit_parent_counts[(target, cand)]
+            co_stress = 2.0 * self._co_stress_counts[(target, cand)]
+            recent = 0.25 * recent_counts[cand]
+            route_penalty = 4.0 * self._route_exclusion_counts[(target, cand)]
+            scores[cand] = fit_score + co_stress + recent - route_penalty
+        return scores
+
+    def _round_robin_candidates(
+        self,
+        target: int,
+        eligible: List[int],
+        selected: Set[int],
+        limit: int,
+    ) -> List[int]:
+        if not eligible or limit <= 0:
+            return []
+        recent_tested = set(self._recent_rescue_tested[target])
+        out: List[int] = []
+        start = self._rr_cursor[target] % len(eligible)
+        for offset in range(len(eligible)):
+            cand = eligible[(start + offset) % len(eligible)]
+            if cand in selected or cand in recent_tested or cand in out:
+                continue
+            out.append(cand)
+            if len(out) >= limit:
+                break
+        if len(out) < limit:
+            for offset in range(len(eligible)):
+                cand = eligible[(start + offset) % len(eligible)]
+                if cand in selected or cand in out:
+                    continue
+                out.append(cand)
+                if len(out) >= limit:
+                    break
+        self._rr_cursor[target] = (start + max(1, len(out))) % len(eligible)
+        return out
+
+    def rank_parents(
+        self,
+        target: int,
+        candidates: Set[int],
+        top_m: int,
+    ) -> ParentRanking:
+        self.call_count += 1
+        self.history_ranker_calls += 1
+        eligible = [c for c in sorted(candidates) if c != target]
+        if top_m <= 0 or not eligible:
+            return ParentRanking(
+                target=target, ranked=(), scores={},
+                diagnostics={"history_ranker_calls": 1},
+            )
+
+        rescue_r = top_m - (top_m // 2)
+        if top_m >= 4:
+            rescue_r = max(2, rescue_r)
+        rescue_r = min(top_m, rescue_r)
+        history_h = max(0, top_m - rescue_r)
+
+        history_scores = self._history_scores(target, set(eligible))
+        history_ranked = tuple(
+            sorted(eligible, key=lambda c: (-history_scores[c], c))[:history_h]
+        )
+        selected = set(history_ranked)
+
+        recent_counts: Dict[int, int] = defaultdict(int)
+        for v in self._recent_stressed:
+            recent_counts[v] += 1
+        stress_pool = [
+            c for c, _ in sorted(
+                ((c, recent_counts[c]) for c in eligible if c not in selected and recent_counts[c] > 0),
+                key=lambda item: (-item[1], item[0]),
+            )[:rescue_r]
+        ]
+        prior_fit_pool = [
+            c for c, _ in sorted(
+                ((c, self._fit_parent_counts[(target, c)]) for c in eligible
+                 if c not in selected and self._fit_parent_counts[(target, c)] > 0),
+                key=lambda item: (-item[1], item[0]),
+            )[:rescue_r]
+        ]
+        rr_pool = self._round_robin_candidates(target, eligible, selected, rescue_r)
+
+        rescue_pool: List[int] = []
+        for cand in stress_pool + prior_fit_pool + rr_pool:
+            if cand not in selected and cand not in rescue_pool:
+                rescue_pool.append(cand)
+
+        rescue_scores: Dict[int, float] = {}
+        for cand in rescue_pool:
+            lo = self._world.predict_var_under_intervention(target, cand, 0.05)
+            hi = self._world.predict_var_under_intervention(target, cand, 0.95)
+            rescue_scores[cand] = abs(hi - lo)
+            self._recent_rescue_tested[target].append(cand)
+
+        rescue_interventions = 2 * len(rescue_pool)
+        self.sensitivity_rescue_calls += 1
+        self.sensitivity_rescue_interventions += rescue_interventions
+
+        rescue_ranked = tuple(
+            sorted(rescue_scores, key=lambda c: (-rescue_scores[c], c))[:rescue_r]
+        )
+        self._last_rescue_parent_by_target[target] = rescue_ranked[0] if rescue_ranked else None
+
+        ranked: List[int] = []
+        source_by_candidate: Dict[int, str] = {}
+        for cand in history_ranked:
+            ranked.append(cand)
+            source_by_candidate[cand] = "history"
+        added_from_rescue = 0
+        for cand in rescue_ranked:
+            if cand in source_by_candidate:
+                source_by_candidate[cand] = "history_rescue"
+                continue
+            ranked.append(cand)
+            source_by_candidate[cand] = "rescue"
+            added_from_rescue += 1
+
+        self.rescue_candidates_added += added_from_rescue
+        scores = dict(history_scores)
+        scores.update(rescue_scores)
+        return ParentRanking(
+            target=target,
+            ranked=tuple(ranked[:top_m]),
+            scores=scores,
+            source_by_candidate=source_by_candidate,
+            diagnostics={
+                "history_ranker_calls": 1,
+                "sensitivity_rescue_calls": 1,
+                "sensitivity_rescue_interventions": rescue_interventions,
+                "rescue_candidates_added": added_from_rescue,
+            },
+        )
+
+
 class DiscriminationProbeProposer:
     """Default ProbeProposer: wraps the current separating-probe logic.
 
@@ -438,6 +632,14 @@ class HistoryProbeProposer:
     def observe_parent_ranking(self, var: int, ranked: Tuple[int, ...]) -> None:
         self._parent_rankings[var] = ranked
 
+    def observe_parent_ranking_metadata(
+        self,
+        var: int,
+        ranked: Tuple[int, ...],
+        source_by_candidate: Dict[int, str],
+    ) -> None:
+        self.observe_parent_ranking(var, ranked)
+
     def observe_residual_event(self, var: int, cycle: int, stressed: bool) -> None:
         if self._cycle != cycle:
             self._cycle = cycle
@@ -470,6 +672,45 @@ class HistoryProbeProposer:
             if stressed_var in available_parents:
                 add((stressed_var, values[(i + 1) % len(values)]))
 
+        return ProbeProposal(var=var, probes=tuple(out))
+
+
+class HistoryRescueProbeProposer(HistoryProbeProposer):
+    """History probe proposer that appends one probe from a rescue parent."""
+
+    def __init__(self, max_probes: int = 4) -> None:
+        super().__init__(max_probes=max_probes)
+        self._rescue_parent_by_target: Dict[int, int] = {}
+
+    def observe_parent_ranking_metadata(
+        self,
+        var: int,
+        ranked: Tuple[int, ...],
+        source_by_candidate: Dict[int, str],
+    ) -> None:
+        super().observe_parent_ranking_metadata(var, ranked, source_by_candidate)
+        for cand in ranked:
+            if "rescue" in source_by_candidate.get(cand, ""):
+                self._rescue_parent_by_target[var] = cand
+                break
+
+    def propose_probes(
+        self,
+        var: int,
+        available_parents: Set[int],
+        budget: int,
+    ) -> ProbeProposal:
+        base = super().propose_probes(var, available_parents, budget)
+        out = list(base.probes)
+        rescue_parent = self._rescue_parent_by_target.get(var)
+        if (
+            rescue_parent is not None
+            and rescue_parent in available_parents
+            and len(out) < min(self.max_probes, max(0, budget))
+        ):
+            probe = (rescue_parent, 0.9)
+            if probe not in out:
+                out.append(probe)
         return ProbeProposal(var=var, probes=tuple(out))
 
 
