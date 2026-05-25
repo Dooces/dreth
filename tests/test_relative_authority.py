@@ -3,7 +3,12 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-from dreth.relative_authority import NethraNodeRef, RelativeAuthorityRecord
+from dreth.relative_authority import (
+    NethraGraphSnapshot,
+    NethraNodeRef,
+    NethraRelation,
+    RelativeAuthorityRecord,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -45,6 +50,29 @@ def test_should_localize_failure_below_broad_failure_threshold() -> None:
 
     assert local.should_localize_failure(global_failure_count_threshold=3)
     assert not broad.should_localize_failure(global_failure_count_threshold=3)
+
+
+def test_graph_snapshot_query_helpers_are_pure_data() -> None:
+    a = NethraNodeRef(node_id="var:0", kind="nethra_var", var=0)
+    b = NethraNodeRef(node_id="var:1", kind="nethra_var", var=1)
+    c = NethraNodeRef(node_id="dormant:0", kind="dormant_alternative", var=0)
+    snapshot = NethraGraphSnapshot(
+        nodes=(a, b, c),
+        relations=(
+            NethraRelation(a, b, "depends_on", "ctx", reuse_count=2),
+            NethraRelation(c, a, "substitutes_for", "ctx", wins=1),
+        ),
+        authority_records=(
+            RelativeAuthorityRecord(a, "ctx", wins=1),
+            RelativeAuthorityRecord(b, "ctx", wins=3),
+        ),
+    )
+
+    assert snapshot.node_count == 3
+    assert snapshot.relation_count == 2
+    assert snapshot.top_authority(limit=1)[0].node.node_id == "var:1"
+    assert snapshot.neighboring_nodes("var:0", "depends_on") == (b,)
+    assert snapshot.local_competitors("var:0", "ctx") == (c,)
 
 
 def test_relative_authority_has_no_runtime_imports() -> None:

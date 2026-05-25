@@ -186,6 +186,7 @@ class RunConfig:
     shadow_key_symbolic_false_ok_tolerance: int = 0
     parent_ranker: str = "sensitivity"  # "sensitivity" | "history" | "history_rescue"
     probe_proposer: str = "none"        # "none" | "history" | "history_rescue"
+    relative_authority_report: bool = False
 
 
 # ── per-run result ─────────────────────────────────────────────────────────────
@@ -335,6 +336,14 @@ class ArchMetrics:
     provider_probes_used_by_fit: int = 0
     provider_probe_improved_margin_count: int = 0
     provider_probe_no_effect_count: int = 0
+
+    # Relative authority graph observer metrics (diagnostic only; populated only
+    # when --relative-authority-report is enabled).
+    relative_authority_nodes: int = 0
+    relative_authority_relations: int = 0
+    relative_authority_records: int = 0
+    relative_authority_relation_types: Dict[str, int] = field(default_factory=dict)
+    relative_authority_top_examples: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -996,6 +1005,27 @@ def _check_invariants(arch: ArchMetrics) -> List[str]:
     return violations
 
 
+def _attach_relative_authority_metrics(arch: ArchMetrics, agent: ChainedAgent) -> None:
+    """Populate post-run NethraGraph observer counts.
+
+    Diagnostic only — does not affect ChainedAgent, fit_var, sentinels, certs,
+    route certs, providers, policy selection, or defaults.
+    """
+    from dreth.relative_authority_observer import build_snapshot_from_agent
+
+    snapshot = build_snapshot_from_agent(agent)
+    arch.relative_authority_nodes = snapshot.node_count
+    arch.relative_authority_relations = snapshot.relation_count
+    arch.relative_authority_records = len(snapshot.authority_records)
+    arch.relative_authority_relation_types = dict(
+        Counter(relation.relation_type for relation in snapshot.relations)
+    )
+    arch.relative_authority_top_examples = [
+        f"{record.node.node_id}:{record.authority_score():.1f}"
+        for record in snapshot.top_authority(limit=5)
+    ]
+
+
 def _run_one(cfg: RunConfig) -> RunResult:
     t0 = time.monotonic()
     try:
@@ -1022,6 +1052,8 @@ def _run_one(cfg: RunConfig) -> RunResult:
                            if n.status == "trass" or n.role_for("skip") == "trass")
 
         arch = _extract_arch_metrics(agent, world)
+        if cfg.relative_authority_report:
+            _attach_relative_authority_metrics(arch, agent)
         violations = _check_invariants(arch)
         regime_summary = agent.regime_register.summary()
 
@@ -2043,6 +2075,37 @@ def _print_aggregate(results: List[RunResult], weights: QualityWeights = Quality
         dist = "  ".join(f"{k}={v}" for k, v in sorted(revoked_agg.items()))
         print(f"  revoked_by: {dist}")
 
+    if any(r.arch.relative_authority_nodes for r in ok_runs):
+        relation_type_counts: Counter = Counter()
+        top_examples = []
+        for r in ok_runs:
+            relation_type_counts.update(r.arch.relative_authority_relation_types)
+            top_examples.extend(r.arch.relative_authority_top_examples)
+        avg_nodes = sum(r.arch.relative_authority_nodes for r in ok_runs) / n
+        avg_relations = sum(r.arch.relative_authority_relations for r in ok_runs) / n
+        avg_records = sum(r.arch.relative_authority_records for r in ok_runs) / n
+        print()
+        print("relative_authority:")
+        print(f"  avg_nodes={avg_nodes:.1f}")
+        print(f"  avg_relations={avg_relations:.1f}")
+        print(f"  avg_authority_records={avg_records:.1f}")
+        if relation_type_counts:
+            dist = "  ".join(
+                f"{k}={v}" for k, v in relation_type_counts.most_common(8)
+            )
+            print(f"  top_relation_types: {dist}")
+        if top_examples:
+            compact = []
+            seen_examples = set()
+            for example in top_examples:
+                if example in seen_examples:
+                    continue
+                compact.append(example)
+                seen_examples.add(example)
+                if len(compact) >= 5:
+                    break
+            print(f"  top_authority_examples: {', '.join(compact)}")
+
     if total_viols == 0:
         print(f"  invariants: ALL PASS ({n} runs)")
     else:
@@ -2171,6 +2234,8 @@ def main():
                    help="minimum clean OK streak required for candidate_safe (default: 100)")
     p.add_argument("--shadow-key-symbolic-false-ok-tolerance", type=int, default=0,
                    help="symbolic false-OK tolerance before diagnostic key revocation (default: 0)")
+    p.add_argument("--relative-authority-report", action="store_true",
+                   help="print diagnostic-only post-run relative authority graph summary")
     args = p.parse_args()
     quality_weights = QualityWeights(
         audit_weight=args.quality_audit_weight,
@@ -2248,7 +2313,8 @@ def main():
                   shadow_key_min_clean_streak=args.shadow_key_min_clean_streak,
                   shadow_key_symbolic_false_ok_tolerance=args.shadow_key_symbolic_false_ok_tolerance,
                   parent_ranker=parent_ranker,
-                  probe_proposer=probe_proposer)
+                  probe_proposer=probe_proposer,
+                  relative_authority_report=args.relative_authority_report)
         for schedule in schedule_list
         for v in var_list
         for c in cycle_list
@@ -2278,6 +2344,8 @@ def main():
         mode += f" +shadow-residual({args.shadow_residual})"
     if args.shadow_key_authority == "on":
         mode += " +shadow-key-authority"
+    if args.relative_authority_report:
+        mode += " +relative-authority-report"
     print(f"dreth arch-test{mode}: {total} runs | "
           f"vars={var_list} cycles={cycle_list} seeds={seed_list} "
           f"schedule={schedule_list}", flush=True)
@@ -2369,6 +2437,18 @@ def main():
                     "revoked_by_dist": r.arch.revoked_by_dist,
                     "violations": r.violations,
                 }
+                if args.relative_authority_report:
+                    rec.update({
+                        "relative_authority_nodes": r.arch.relative_authority_nodes,
+                        "relative_authority_relations": r.arch.relative_authority_relations,
+                        "relative_authority_records": r.arch.relative_authority_records,
+                        "relative_authority_relation_types": (
+                            r.arch.relative_authority_relation_types
+                        ),
+                        "relative_authority_top_examples": (
+                            r.arch.relative_authority_top_examples
+                        ),
+                    })
                 if r.baseline and r.baseline.ok:
                     rec["baseline"] = {
                         "elapsed": round(r.baseline.elapsed, 3),
