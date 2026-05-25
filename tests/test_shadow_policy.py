@@ -415,6 +415,61 @@ def test_log_summary_accuracy_value():
 
 
 # ---------------------------------------------------------------------------
+# observe: history_history_wins_missed
+# ---------------------------------------------------------------------------
+
+def test_observe_history_history_wins_missed_when_actual_is_hh():
+    sel = ShadowPolicySelector()
+    f = _feats(regime_sentinel_fails=0, cycles=5000)
+    # Selector predicts history_rescue; actual is history/history → miss
+    p = sel.observe(f, actual_best_policy="history/history")
+    assert p.history_history_wins_missed is True
+    assert p.predicted_policy == "history_rescue/history_rescue"
+
+
+def test_observe_history_history_wins_missed_false_when_actual_not_hh():
+    sel = ShadowPolicySelector()
+    f = _feats(regime_sentinel_fails=0, cycles=5000)
+    p = sel.observe(f, actual_best_policy="history_rescue/history_rescue")
+    assert p.history_history_wins_missed is False
+
+
+def test_observe_history_history_wins_missed_false_when_sensitivity_actual():
+    sel = ShadowPolicySelector()
+    f = _feats(regime_sentinel_fails=500, cycles=5000)
+    # Predicts sensitivity/none; actual is sensitivity/none
+    p = sel.observe(f, actual_best_policy="sensitivity/none")
+    assert p.history_history_wins_missed is False
+
+
+def test_summary_history_history_wins_missed_count():
+    sel = ShadowPolicySelector()
+    f = _feats(regime_sentinel_fails=0, cycles=5000)
+    sel.observe(f, actual_best_policy="history/history")
+    sel.observe(f, actual_best_policy="history/history")
+    sel.observe(f, actual_best_policy="history_rescue/history_rescue")
+    s = sel.summary()
+    assert s["history_history_wins_missed"] == 2
+
+
+def test_summary_history_history_wins_missed_zero_when_none():
+    sel = ShadowPolicySelector()
+    f = _feats(regime_sentinel_fails=0, cycles=5000)
+    sel.observe(f, actual_best_policy="history_rescue/history_rescue")
+    s = sel.summary()
+    assert s["history_history_wins_missed"] == 0
+
+
+def test_log_summary_contains_history_history_wins_missed():
+    sel = ShadowPolicySelector()
+    f = _feats(regime_sentinel_fails=0, cycles=5000)
+    sel.observe(f, actual_best_policy="history/history")
+    buf = io.StringIO()
+    sel.log_summary(file=buf)
+    assert "history_history_wins_missed" in buf.getvalue()
+
+
+# ---------------------------------------------------------------------------
 # observe: invalid actual_best_policy
 # ---------------------------------------------------------------------------
 

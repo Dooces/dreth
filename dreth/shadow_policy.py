@@ -18,9 +18,19 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Sequence, TextIO
+from typing import Any, Dict, List, Optional, Sequence, TextIO, Tuple
 
 logger = logging.getLogger(__name__)
+
+# Fields written to policy-report rows (and TSV) by the shadow selector.
+SHADOW_ROW_FIELDS: Tuple[str, ...] = (
+    "shadow_predicted_policy",
+    "shadow_actual_best_policy",
+    "shadow_policy_correct",
+    "shadow_false_switch_to_history_rescue_under_regime_switch",
+    "shadow_missed_history_rescue_under_false_trass",
+    "shadow_history_history_wins_missed",
+)
 
 POLICIES = (
     "sensitivity/none",
@@ -99,6 +109,7 @@ class ShadowPrediction:
     correct: bool
     false_switch_to_history_rescue_under_regime_switch: bool
     missed_history_rescue_under_false_trass: bool
+    history_history_wins_missed: bool
     features: DiagnosticFeatures
 
 
@@ -198,6 +209,11 @@ class ShadowPolicySelector:
             and predicted != "history_rescue/history_rescue"
             and actual_best_policy == "history_rescue/history_rescue"
         )
+        # Selector never predicts history/history; count every group it won as a miss.
+        history_history_miss = (
+            actual_best_policy == "history/history"
+            and predicted != "history/history"
+        )
 
         pred = ShadowPrediction(
             predicted_policy=predicted,
@@ -205,6 +221,7 @@ class ShadowPolicySelector:
             correct=correct,
             false_switch_to_history_rescue_under_regime_switch=false_switch,
             missed_history_rescue_under_false_trass=missed_rescue,
+            history_history_wins_missed=history_history_miss,
             features=features,
         )
         self._predictions.append(pred)
@@ -233,6 +250,9 @@ class ShadowPolicySelector:
             p.missed_history_rescue_under_false_trass
             for p in self._predictions
         )
+        history_history_wins_missed = sum(
+            p.history_history_wins_missed for p in self._predictions
+        )
 
         predicted_counts: Dict[str, int] = {}
         actual_counts: Dict[str, int] = {}
@@ -249,6 +269,7 @@ class ShadowPolicySelector:
             "accuracy": n_correct / n,
             "false_switch_to_history_rescue_under_regime_switch": false_switches,
             "missed_history_rescue_under_false_trass": missed_rescues,
+            "history_history_wins_missed": history_history_wins_missed,
             "predicted_policy": predicted_counts,
             "actual_best_policy": actual_counts,
         }
@@ -272,6 +293,11 @@ class ShadowPolicySelector:
             f"{s['missed_history_rescue_under_false_trass']}",
             file,
         )
+        _p(
+            f"  history_history_wins_missed                        : "
+            f"{s['history_history_wins_missed']}",
+            file,
+        )
         _p("  predicted_policy counts:", file)
         for policy, count in sorted(s["predicted_policy"].items()):
             _p(f"    {policy:<36} {count}", file)
@@ -292,12 +318,7 @@ def _p(msg: str, file: Optional[TextIO]) -> None:
 # ---------------------------------------------------------------------------
 
 def features_from_run_result(run_result: Any) -> DiagnosticFeatures:
-    """Extract DiagnosticFeatures from a RunResult (duck-typed to avoid circular import).
-
-    This is the integration glue between batch_run.py's RunResult and
-    ShadowPolicySelector. It does not import batch_run; RunResult fields are
-    accessed by attribute name.
-    """
+    """Extract DiagnosticFeatures from a single RunResult (duck-typed)."""
     arch = run_result.arch
     return DiagnosticFeatures(
         revocations=sum(arch.revoked_by_dist.values()),
@@ -314,3 +335,86 @@ def features_from_run_result(run_result: Any) -> DiagnosticFeatures:
         cycles=run_result.recorded_cycles,
         n_vars=run_result.config.n_vars,
     )
+
+
+def features_from_run_results(runs: List[Any]) -> DiagnosticFeatures:
+    """Aggregate DiagnosticFeatures across multiple RunResult objects (same policy/config).
+
+    Integer fields are summed; cycle count accumulates so rates remain correct.
+    parent_rank_mean is averaged because it is already a mean per run.
+    """
+    n = len(runs)
+    return DiagnosticFeatures(
+        revocations=sum(sum(r.arch.revoked_by_dist.values()) for r in runs),
+        full_audits=sum(r.full_audits for r in runs),
+        unique_fails=sum(r.arch.total_unique_failures for r in runs),
+        regime_sentinel_fails=sum(r.arch.regime_sentinel_fails for r in runs),
+        regime_no_sentinel=sum(r.arch.regime_no_sentinel for r in runs),
+        parent_rank_mean=sum(r.arch.parent_proposal_rank_mean for r in runs) / n,
+        probe_no_effect=sum(r.arch.provider_probe_no_effect_count for r in runs),
+        probe_improved=sum(r.arch.provider_probe_improved_margin_count for r in runs),
+        passive_stress_count=sum(r.arch.passive_stress_count for r in runs),
+        active_composites=sum(r.arch.active_composites for r in runs),
+        composite_components=sum(r.arch.composite_components for r in runs),
+        cycles=sum(r.recorded_cycles for r in runs),
+        n_vars=runs[0].config.n_vars,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Pure-function annotation helpers (called by batch_run and by tests)
+# ---------------------------------------------------------------------------
+
+def best_policy_by_scope(
+    rows: List[Dict[str, Any]],
+) -> Dict[Tuple[str, int, int], str]:
+    """Return the best policy per (schedule, n_vars, cycles) by lowest avg_quality_cost."""
+    scope_to_rows: Dict[Tuple[str, int, int], List[Dict[str, Any]]] = {}
+    for row in rows:
+        scope: Tuple[str, int, int] = (row["schedule"], row["n_vars"], row["cycles"])
+        scope_to_rows.setdefault(scope, []).append(row)
+    return {
+        scope: min(group, key=lambda r: r["avg_quality_cost"])["policy"]
+        for scope, group in scope_to_rows.items()
+    }
+
+
+def annotate_rows(
+    rows: List[Dict[str, Any]],
+    run_groups: Dict[Tuple[str, int, int, str], List[Any]],
+    selector: ShadowPolicySelector,
+) -> None:
+    """Annotate policy-report rows with shadow predictions in place.
+
+    Prediction is made from observable features with no schedule label.
+    The schedule is passed to selector.observe() only after prediction, solely
+    to classify error modes. No agent or provider state is touched.
+    """
+    best_by_scope = best_policy_by_scope(rows)
+
+    for row in rows:
+        scope: Tuple[str, int, int] = (row["schedule"], row["n_vars"], row["cycles"])
+        group_key: Tuple[str, int, int, str] = (
+            row["schedule"], row["n_vars"], row["cycles"], row["policy"]
+        )
+        actual_best = best_by_scope.get(scope)
+        runs = run_groups.get(group_key, [])
+
+        if not runs or actual_best is None:
+            for f in SHADOW_ROW_FIELDS:
+                row[f] = None
+            continue
+
+        features = features_from_run_results(runs)
+        pred = selector.observe(features, actual_best, schedule=row["schedule"])
+
+        row["shadow_predicted_policy"] = pred.predicted_policy
+        row["shadow_actual_best_policy"] = pred.actual_best_policy
+        row["shadow_policy_correct"] = pred.correct
+        row["shadow_false_switch_to_history_rescue_under_regime_switch"] = (
+            pred.false_switch_to_history_rescue_under_regime_switch
+        )
+        row["shadow_missed_history_rescue_under_false_trass"] = (
+            pred.missed_history_rescue_under_false_trass
+        )
+        row["shadow_history_history_wins_missed"] = pred.history_history_wins_missed

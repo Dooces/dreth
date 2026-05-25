@@ -67,6 +67,11 @@ from dreth.learned_residual import (
     FeatureConditionedResidualCalibrator,
 )
 from dreth.quality import QualityWeights, RunQualityScore, make_quality_score
+from dreth.shadow_policy import (
+    ShadowPolicySelector,
+    SHADOW_ROW_FIELDS,
+    annotate_rows as _shadow_annotate_rows,
+)
 
 
 _ALLOWED_SCHEDULES = (
@@ -83,6 +88,8 @@ _DEFAULT_PROBE_PROPOSER = "none"
 _POLICY_REPORT_PARENT_RANKERS = "sensitivity,history,history_rescue"
 _POLICY_REPORT_PROBE_PROPOSERS = "none,history,history_rescue"
 _POLICY_REPORT_BASELINE = "sensitivity/none"
+# Shadow selector fields appended to TSV only (not to the printed table).
+_POLICY_REPORT_SHADOW_FIELDS: List[str] = list(SHADOW_ROW_FIELDS)
 _POLICY_REPORT_FIELDS = [
     "schedule",
     "n_vars",
@@ -1622,16 +1629,66 @@ def _print_policy_report(rows: List[Dict[str, Any]]) -> None:
 
 
 def _write_policy_report_tsv(path: str, rows: List[Dict[str, Any]]) -> None:
+    all_fields = _POLICY_REPORT_FIELDS + _POLICY_REPORT_SHADOW_FIELDS
     with open(path, "w", newline="") as fh:
         writer = csv.DictWriter(
             fh,
-            fieldnames=_POLICY_REPORT_FIELDS,
+            fieldnames=all_fields,
             delimiter="\t",
             extrasaction="ignore",
         )
         writer.writeheader()
         for row in rows:
             writer.writerow(row)
+
+
+def _annotate_shadow_policy_rows(
+    rows: List[Dict[str, Any]],
+    results: List[RunResult],
+) -> ShadowPolicySelector:
+    """Build shadow selector predictions for all policy-report rows.
+
+    Diagnostic only — does not affect ChainedAgent, fit_var, sentinels, certs,
+    route certs, provider choice, defaults, or runtime policy selection.
+    """
+    ok_runs = [r for r in results if r.ok]
+    run_groups: Dict[Tuple[str, int, int, str], List[RunResult]] = {}
+    for r in ok_runs:
+        run_groups.setdefault(_policy_report_group_key(r), []).append(r)
+
+    selector = ShadowPolicySelector()
+    _shadow_annotate_rows(rows, run_groups, selector)
+    return selector
+
+
+def _print_shadow_policy_selector_summary(selector: ShadowPolicySelector) -> None:
+    """Print shadow selector accuracy. Diagnostic only — no policy is activated."""
+    s = selector.summary()
+    if not s:
+        return
+    print()
+    print("── shadow policy selector ─────────────────────────────────────────")
+    print("  diagnostic only — no runtime policy switching")
+    print(f"  n_predictions={s['n_predictions']}")
+    print(f"  accuracy={s['accuracy']:.3f}")
+    print(
+        f"  false_switch_to_history_rescue_under_regime_switch="
+        f"{s['false_switch_to_history_rescue_under_regime_switch']}"
+    )
+    print(
+        f"  missed_history_rescue_under_false_trass="
+        f"{s['missed_history_rescue_under_false_trass']}"
+    )
+    print(
+        f"  history_history_wins_missed="
+        f"{s['history_history_wins_missed']}"
+    )
+    print("  predicted_policy counts:")
+    for policy, count in sorted(s["predicted_policy"].items()):
+        print(f"    {policy:<36} {count}")
+    print("  actual_best_policy counts:")
+    for policy, count in sorted(s["actual_best_policy"].items()):
+        print(f"    {policy:<36} {count}")
 
 
 def _print_aggregate(results: List[RunResult], weights: QualityWeights = QualityWeights()) -> None:
@@ -2268,6 +2325,9 @@ def main():
         if args.policy_report
         else []
     )
+    shadow_selector = None
+    if policy_report_rows:
+        shadow_selector = _annotate_shadow_policy_rows(policy_report_rows, results)
     if out_fh and policy_report_rows:
         for row in policy_report_rows:
             rec = {"record_type": "policy_report", **row}
@@ -2283,6 +2343,8 @@ def main():
     _print_aggregate(results, quality_weights)
     if args.policy_report:
         _print_policy_report(policy_report_rows)
+        if shadow_selector is not None:
+            _print_shadow_policy_selector_summary(shadow_selector)
     else:
         _print_provider_policy_comparison(results, quality_weights)
 

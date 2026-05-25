@@ -56,6 +56,14 @@ class Row(NamedTuple):
     delta_revocations_vs_sensitivity: float
     delta_unique_fails_vs_sensitivity: float
     pareto_status: str
+    # Shadow selector fields — present only in TSVs produced with shadow annotation.
+    # Defaults keep load_tsv backward-compatible with older reports.
+    shadow_predicted_policy: str = ""
+    shadow_actual_best_policy: str = ""
+    shadow_policy_correct: str = ""
+    shadow_false_switch_to_history_rescue_under_regime_switch: str = ""
+    shadow_missed_history_rescue_under_false_trass: str = ""
+    shadow_history_history_wins_missed: str = ""
 
 
 def load_tsv(path: str) -> list[Row]:
@@ -85,6 +93,18 @@ def load_tsv(path: str) -> list[Row]:
                 delta_revocations_vs_sensitivity=float(r["delta_revocations_vs_sensitivity"]),
                 delta_unique_fails_vs_sensitivity=float(r["delta_unique_fails_vs_sensitivity"]),
                 pareto_status=r["pareto_status"].strip(),
+                shadow_predicted_policy=r.get("shadow_predicted_policy", "") or "",
+                shadow_actual_best_policy=r.get("shadow_actual_best_policy", "") or "",
+                shadow_policy_correct=r.get("shadow_policy_correct", "") or "",
+                shadow_false_switch_to_history_rescue_under_regime_switch=(
+                    r.get("shadow_false_switch_to_history_rescue_under_regime_switch", "") or ""
+                ),
+                shadow_missed_history_rescue_under_false_trass=(
+                    r.get("shadow_missed_history_rescue_under_false_trass", "") or ""
+                ),
+                shadow_history_history_wins_missed=(
+                    r.get("shadow_history_history_wins_missed", "") or ""
+                ),
             ))
     return rows
 
@@ -302,6 +322,81 @@ def print_recommendations(recs: dict[str, str]) -> None:
 
 
 # ---------------------------------------------------------------------------
+# 7. Shadow selector summary (from per-row shadow fields in TSV)
+# ---------------------------------------------------------------------------
+
+def compute_shadow_selector_summary(rows: list[Row]) -> dict:
+    """Compute shadow selector accuracy from per-row shadow fields.
+
+    Returns an empty dict if the TSV was produced without shadow annotation.
+    """
+    annotated = [r for r in rows if r.shadow_predicted_policy]
+    if not annotated:
+        return {}
+
+    n = len(annotated)
+    n_correct = sum(
+        1 for r in annotated if r.shadow_policy_correct.strip().lower() == "true"
+    )
+    false_switches = sum(
+        1 for r in annotated
+        if r.shadow_false_switch_to_history_rescue_under_regime_switch.strip().lower() == "true"
+    )
+    missed_rescues = sum(
+        1 for r in annotated
+        if r.shadow_missed_history_rescue_under_false_trass.strip().lower() == "true"
+    )
+    history_history_wins_missed = sum(
+        1 for r in annotated
+        if r.shadow_history_history_wins_missed.strip().lower() == "true"
+    )
+
+    predicted_counts: dict[str, int] = defaultdict(int)
+    actual_counts: dict[str, int] = defaultdict(int)
+    for r in annotated:
+        predicted_counts[r.shadow_predicted_policy] += 1
+        actual_counts[r.shadow_actual_best_policy] += 1
+
+    return {
+        "n_predictions": n,
+        "accuracy": n_correct / n,
+        "false_switch_to_history_rescue_under_regime_switch": false_switches,
+        "missed_history_rescue_under_false_trass": missed_rescues,
+        "history_history_wins_missed": history_history_wins_missed,
+        "predicted_policy": dict(predicted_counts),
+        "actual_best_policy": dict(actual_counts),
+    }
+
+
+def print_shadow_selector_summary(summary: dict) -> None:
+    print("\n=== 7. Shadow Policy Selector Summary ===")
+    if not summary:
+        print("  (no shadow annotation in TSV — re-run with current batch_run.py)")
+        return
+    print("  diagnostic only — no runtime policy switching")
+    print(f"  n_predictions : {summary['n_predictions']}")
+    print(f"  accuracy      : {summary['accuracy']:.3f}")
+    print(
+        f"  false_switch_to_history_rescue_under_regime_switch : "
+        f"{summary['false_switch_to_history_rescue_under_regime_switch']}"
+    )
+    print(
+        f"  missed_history_rescue_under_false_trass            : "
+        f"{summary['missed_history_rescue_under_false_trass']}"
+    )
+    print(
+        f"  history_history_wins_missed                        : "
+        f"{summary['history_history_wins_missed']}"
+    )
+    print("  predicted_policy counts:")
+    for policy, count in sorted(summary["predicted_policy"].items()):
+        print(f"    {policy:<36} {count}")
+    print("  actual_best_policy counts:")
+    for policy, count in sorted(summary["actual_best_policy"].items()):
+        print(f"    {policy:<36} {count}")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -314,6 +409,7 @@ def summarize(path: str) -> None:
     dominated = compute_dominated_counts(rows)
     tradeoff = compute_iv_tradeoff(rows)
     recs = compute_recommendations(rows)
+    shadow_summary = compute_shadow_selector_summary(rows)
 
     print_winner_table(winners)
     print_winner_counts(counts)
@@ -321,6 +417,7 @@ def summarize(path: str) -> None:
     print_dominated_summary(dominated)
     print_iv_tradeoff(tradeoff)
     print_recommendations(recs)
+    print_shadow_selector_summary(shadow_summary)
 
 
 def main() -> None:
