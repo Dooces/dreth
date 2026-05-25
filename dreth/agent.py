@@ -2730,16 +2730,26 @@ class ChainedAgent:
                 _sf = FUNC_LIBRARY.get(n.func)
                 if _sf is not None:
                     _shadow_pv = [self.world.state[p] for p in n.parents]
-                    _shadow_residual_val = abs(self.world.state[var] - _sf(_shadow_pv))
+                    # Symbolic reference: always computed from FUNC_LIBRARY, never from the
+                    # active residual provider. When _residual_predictor is set (hybrid mode),
+                    # _passive_ok/_passive_stressed are provider-derived; comparing shadow
+                    # against those would make false_ok_vs_symbolic meaningless in learned
+                    # provider stages. The symbolic reference stays invariant across stages.
+                    _symbolic_residual_value = abs(self.world.state[var] - _sf(_shadow_pv))
+                    _symbolic_passive_ok = _symbolic_residual_value <= n.current_tolerance
+                    _symbolic_passive_stressed = not _symbolic_passive_ok
 
-                    # Predict before observing (honest cold evaluation)
+                    # predict_shadow BEFORE observe — shadow must not train on the
+                    # current sample before predicting it. This order is the core
+                    # honesty guarantee: the predictor sees only history, not the future.
                     _sp = self._shadow_residual_predictor.predict_shadow(  # type: ignore[union-attr]
                         var, n.func, n.current_tolerance
                     )
                     _sp_insufficient = self._shadow_residual_predictor._last_call_insufficient  # type: ignore[union-attr]
 
-                    # Update calibrator with actual symbolic residual
-                    self._shadow_residual_predictor.observe(n.func, _shadow_residual_val)  # type: ignore[union-attr]
+                    # observe AFTER predicting — calibrator learns from the actual
+                    # symbolic residual using FUNC_LIBRARY (never from provider output).
+                    self._shadow_residual_predictor.observe(n.func, _symbolic_residual_value)  # type: ignore[union-attr]
 
                     # Track per-call counters
                     self._shadow_residual_calls += 1
@@ -2752,16 +2762,17 @@ class ChainedAgent:
                     else:
                         self._shadow_residual_stressed += 1
 
-                    # Compare shadow prediction with actual symbolic decision
-                    if _sp.ok == _passive_ok:
+                    # Compare shadow against FUNC_LIBRARY symbolic decision, not provider.
+                    # false_ok_vs_symbolic = shadow predicted ok when FUNC_LIBRARY said stressed.
+                    if _sp.ok == _symbolic_passive_ok:
                         self._shadow_agree_symbolic += 1
-                    if _sp.ok and _passive_stressed:
+                    if _sp.ok and _symbolic_passive_stressed:
                         self._shadow_false_ok_vs_symbolic += 1
-                    if _sp.stressed and _passive_ok:
+                    if _sp.stressed and _symbolic_passive_ok:
                         self._shadow_false_stress_vs_symbolic += 1
                     if _sp.ok:
                         self._shadow_would_save_iv += len(n.sentinels)
-                        if _passive_stressed:
+                        if _symbolic_passive_stressed:
                             self._shadow_would_miss_symbolic_stress += len(n.sentinels)
 
             # Parked sentinel skip: leaf cert redundant — higher handle covered

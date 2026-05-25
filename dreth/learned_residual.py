@@ -22,6 +22,7 @@ from __future__ import annotations
 # shadow shadow-accuracy is measured here first.
 # ─────────────────────────────────────────────────────────────────────────────
 
+import collections
 import dataclasses
 import math
 from typing import Dict, List, Optional, Tuple
@@ -57,43 +58,53 @@ class ResidualLabel:
 # ── Online rolling statistics ─────────────────────────────────────────────────
 
 class _RollingStats:
-    """Welford online running mean/variance for residual tracking."""
+    """True sliding-window mean/variance for residual tracking.
+
+    Only the most recent `window` samples contribute to mean, std, and
+    upper_bound. min_samples checks use the current window length (n), not
+    a cumulative count, so drift-adaptive decisions reflect recent history.
+
+    n_total counts all samples ever seen (useful for diagnostics).
+    """
 
     def __init__(self, window: int = 200) -> None:
-        self._n: int = 0
-        self._mean: float = 0.0
-        self._M2: float = 0.0
-        self._window_samples: List[float] = []
+        self._n_total: int = 0
+        self._window_samples: collections.deque = collections.deque(maxlen=window)
         self._window: int = window
 
     def update(self, x: float) -> None:
-        self._n += 1
-        delta = x - self._mean
-        self._mean += delta / self._n
-        delta2 = x - self._mean
-        self._M2 += delta * delta2
-        self._window_samples.append(x)
-        if len(self._window_samples) > self._window:
-            self._window_samples = self._window_samples[-self._window:]
+        self._n_total += 1
+        self._window_samples.append(x)  # deque auto-evicts oldest when full
 
     @property
     def n(self) -> int:
-        return self._n
+        """Current window size — use this for min_samples checks."""
+        return len(self._window_samples)
+
+    @property
+    def n_total(self) -> int:
+        """Total samples seen across all history."""
+        return self._n_total
 
     @property
     def mean(self) -> float:
-        return self._mean
+        n = len(self._window_samples)
+        if n == 0:
+            return 0.0
+        return sum(self._window_samples) / n
 
     @property
     def std(self) -> float:
-        if self._n < 2:
+        n = len(self._window_samples)
+        if n < 2:
             return 0.0
-        return math.sqrt(self._M2 / self._n)
+        m = self.mean
+        return math.sqrt(sum((x - m) ** 2 for x in self._window_samples) / n)
 
     @property
     def upper_bound(self) -> float:
         """Conservative upper estimate: mean + 2 * std."""
-        return self._mean + 2.0 * self.std
+        return self.mean + 2.0 * self.std
 
 
 # ── Calibrator ────────────────────────────────────────────────────────────────
@@ -115,16 +126,18 @@ class OnlineResidualCalibrator:
         self,
         conservative_factor: float = 0.4,
         min_samples: int = 50,
+        window: int = 200,
     ) -> None:
         self.conservative_factor = conservative_factor
         self.min_samples = min_samples
+        self._window = window
         self._per_func: Dict[str, _RollingStats] = {}
-        self._global: _RollingStats = _RollingStats()
+        self._global: _RollingStats = _RollingStats(window=window)
 
     def update(self, func: str, residual: float) -> None:
         """Update stats with an observed symbolic residual for a given func."""
         if func not in self._per_func:
-            self._per_func[func] = _RollingStats()
+            self._per_func[func] = _RollingStats(window=self._window)
         self._per_func[func].update(residual)
         self._global.update(residual)
 
