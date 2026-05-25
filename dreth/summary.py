@@ -245,6 +245,29 @@ class RunAnalyzer:
             ))
         self.component_rows.sort(key=lambda r: r[5], reverse=True)
 
+        # ── Hybrid control metrics ────────────────────────────────────────────
+        # Only populated when hybrid providers are active (non-zero when used).
+        # Counters live on agent; agenda summary comes from the RepairAgenda object.
+        self.hybrid_residual_predictor_calls: int = getattr(agent, "_hybrid_residual_predictor_calls", 0)
+        self.hybrid_residual_ok: int = getattr(agent, "_hybrid_residual_ok", 0)
+        self.hybrid_residual_stressed: int = getattr(agent, "_hybrid_residual_stressed", 0)
+        self.hybrid_parent_ranker_calls: int = getattr(agent, "_hybrid_parent_ranker_calls", 0)
+        self.hybrid_probe_proposer_calls: int = getattr(agent, "_hybrid_probe_proposer_calls", 0)
+        self.hybrid_expert_router_calls: int = getattr(agent, "_hybrid_expert_router_calls", 0)
+
+        _agenda = getattr(agent, "_repair_agenda", None)
+        if _agenda is not None:
+            _agenda_summary = _agenda.summary()
+            self.hybrid_repair_agenda_items: int = _agenda_summary["total_pushed"]
+            self.hybrid_repair_agenda_scope_mean: float = _agenda_summary.get("scope_mean", 0.0)
+            self.hybrid_repair_agenda_scope_max: int = _agenda_summary.get("scope_max", 0)
+        else:
+            self.hybrid_repair_agenda_items = 0
+            self.hybrid_repair_agenda_scope_mean = 0.0
+            self.hybrid_repair_agenda_scope_max = 0
+
+        self.hybrid_active: bool = self.hybrid_residual_predictor_calls > 0
+
 
 class SummaryRenderer:
     """Formats RunAnalyzer metrics as a multi-line human-readable string."""
@@ -394,4 +417,24 @@ class SummaryRenderer:
                         f"  C{cid:<3} {size:>5} {sv:>4} {cert_at:>5} {pairs:>6} "
                         f"{pass_count:>7} {fallbacks:>5} {lifespan:>6} {status_str}"
                     )
+
+        if a.hybrid_active or a.hybrid_repair_agenda_items > 0:
+            lines.append("\n── hybrid control ─────────────────────────────────────")
+            lines.append(
+                f"  residual_predictor: calls={a.hybrid_residual_predictor_calls} "
+                f"ok={a.hybrid_residual_ok} stressed={a.hybrid_residual_stressed}"
+            )
+            if a.hybrid_parent_ranker_calls > 0:
+                lines.append(f"  parent_ranker: calls={a.hybrid_parent_ranker_calls}")
+            if a.hybrid_probe_proposer_calls > 0:
+                lines.append(f"  probe_proposer: calls={a.hybrid_probe_proposer_calls}")
+            if a.hybrid_expert_router_calls > 0:
+                lines.append(f"  expert_router: calls={a.hybrid_expert_router_calls}")
+            if a.hybrid_repair_agenda_items > 0:
+                lines.append(
+                    f"  repair_agenda: total_pushed={a.hybrid_repair_agenda_items} "
+                    f"scope_mean={a.hybrid_repair_agenda_scope_mean:.1f} "
+                    f"scope_max={a.hybrid_repair_agenda_scope_max}"
+                )
+
         return "\n".join(lines)

@@ -87,6 +87,11 @@ from .sentinels import select_var_sentinels, check_var_sentinels_with_envelope
 from .regime import RegimeRegister, CertEvent as RegimeCertEvent
 from .records import CycleRecord, FitDiagnostic
 from .summary import RunAnalyzer, SummaryRenderer
+from .hybrid import (
+    ResidualPredictor, ParentRanker, ProbeProposer, ExpertRouter,
+    SymbolicResidualPredictor,
+)
+from .repair_agenda import RepairAgenda, RepairAgendaItem
 
 # ── Trass authority thresholds ────────────────────────────────────────────────
 # A trass cert suppresses future sentinel monitoring — the strongest authority
@@ -205,6 +210,11 @@ class ChainedAgent:
         consequence_weight: bool = True,
         frontier_k: int = 4,
         parent_screen_m: int = 8,
+        residual_predictor: Optional[ResidualPredictor] = None,
+        parent_ranker: Optional[ParentRanker] = None,
+        probe_proposer: Optional[ProbeProposer] = None,
+        expert_router: Optional[ExpertRouter] = None,
+        repair_agenda_enabled: bool = False,
     ):
         """Construct agent. Initializes empty ledger, zero counters, and
         applies any provided per-var cost weight overrides."""
@@ -376,6 +386,36 @@ class ChainedAgent:
         # feed the regime register as candidate evidence.
         self._passive_saved_iv = 0    # IVs saved by passive-OK skips
         self._passive_stress_count = 0  # vars where passive was stressed (active ran)
+
+        # ── Hybrid control providers ──────────────────────────────────────────
+        # When residual_predictor is None (default / hybrid-off), the passive
+        # residual block runs the inline FUNC_LIBRARY path unchanged.
+        # When set (hybrid-interfaces mode), the block delegates to the provider.
+        # In either case, NO provider may issue certs or mutate ledger state.
+        if residual_predictor is not None:
+            self._residual_predictor: Optional[ResidualPredictor] = residual_predictor
+        else:
+            self._residual_predictor = None
+
+        self._parent_ranker: Optional[ParentRanker] = parent_ranker
+        self._probe_proposer: Optional[ProbeProposer] = probe_proposer
+        self._expert_router: Optional[ExpertRouter] = expert_router
+
+        # Hybrid counters — only incremented when providers are active.
+        # Diagnostic only; never influence cert decisions.
+        self._hybrid_residual_predictor_calls: int = 0
+        self._hybrid_residual_ok: int = 0
+        self._hybrid_residual_stressed: int = 0
+        self._hybrid_parent_ranker_calls: int = 0
+        self._hybrid_probe_proposer_calls: int = 0
+        self._hybrid_expert_router_calls: int = 0
+
+        # Repair agenda: structural planning surface for pending repairs.
+        # When disabled (default), needs_audit drives repair as before.
+        # When enabled, each needs_audit entry also gets a RepairAgendaItem
+        # with scope/authority metadata for later A*-style triage.
+        self._repair_agenda_enabled: bool = repair_agenda_enabled
+        self._repair_agenda: RepairAgenda = RepairAgenda()
 
     def _adaptive_probe_budget(self, n_hypotheses: int) -> int:
         """Return the number of probes to use for a hypothesis space of size
@@ -2541,20 +2581,43 @@ class ChainedAgent:
             # This implements passive-first monitoring: ordinary observation is
             # cheap, intervention is reserved for when authority must be earned
             # or repaired (residual stress OR downstream contradiction).
+            #
+            # When _residual_predictor is set (hybrid-interfaces mode), the
+            # prediction is delegated to the provider. The provider MUST NOT
+            # issue certs — it only returns a ResidualPrediction signal.
+            # When None (default / hybrid-off), the inline FUNC_LIBRARY path
+            # runs as before — identical behavior, zero overhead.
             _passive_ok = False
             _passive_stressed = False
             if n.authoritative:
-                _f = FUNC_LIBRARY.get(n.func)
-                if _f is not None:
+                if self._residual_predictor is not None:
                     _parent_vals = [self.world.state[p] for p in n.parents]
-                    _passive_pred = _f(_parent_vals)
-                    _passive_residual = abs(self.world.state[var] - _passive_pred)
-                    if _passive_residual <= n.current_tolerance:
+                    _rp = self._residual_predictor.predict_residual(
+                        var, n.parents, n.func,
+                        _parent_vals, self.world.state[var], n.current_tolerance,
+                    )
+                    self._hybrid_residual_predictor_calls += 1
+                    if _rp.ok:
                         _passive_ok = True
+                        self._hybrid_residual_ok += 1
                     else:
                         _passive_stressed = True
                         self._passive_stress_count += 1
+                        self._hybrid_residual_stressed += 1
                         _passive_stressed_vars.add(var)
+                else:
+                    # Inline path (hybrid-off / no provider): current behavior unchanged.
+                    _f = FUNC_LIBRARY.get(n.func)
+                    if _f is not None:
+                        _parent_vals = [self.world.state[p] for p in n.parents]
+                        _passive_pred = _f(_parent_vals)
+                        _passive_residual = abs(self.world.state[var] - _passive_pred)
+                        if _passive_residual <= n.current_tolerance:
+                            _passive_ok = True
+                        else:
+                            _passive_stressed = True
+                            self._passive_stress_count += 1
+                            _passive_stressed_vars.add(var)
 
             # Parked sentinel skip: leaf cert redundant — higher handle covered
             # this var for _PARK_W+ cycles with no unique failures.
@@ -2745,6 +2808,46 @@ class ChainedAgent:
         # parent in available_parents. Within the same dependency level,
         # tractability ordering decides priority.
         needs_audit_set = set(needs_audit)
+
+        # Repair agenda: when enabled, represent each needs_audit entry as a
+        # RepairAgendaItem with scope/authority metadata for later A*-style
+        # triage. Audit decisions are unchanged — this pass is structural only.
+        # When repair_agenda_enabled=False (default), no items are created and
+        # behavior is identical to the pre-hybrid path.
+        if self._repair_agenda_enabled:
+            self._repair_agenda.clear()
+            for _ra_var in needs_audit:
+                _ra_n = self.ledger.vars[_ra_var]
+                _ra_scope = tuple(sorted(self.ledger.closure_descendants({_ra_var})))
+                _ra_auth = sum(
+                    len(self.ledger.vars[_v].certificates)
+                    for _v in _ra_scope
+                    if _v in self.ledger.vars
+                )
+                _ra_kind = (
+                    "sentinel_failure" if _ra_var in _sentinel_failed_vars else "unknown"
+                )
+                # #SHORTCUT: priority mirrors consequence-tier ordering; A*-style
+                # cost/benefit priority is reserved for a later stage.
+                _ra_priority = float(self._consequence_tier(_ra_var))
+                self._repair_agenda.push(RepairAgendaItem(
+                    cycle=cycle,
+                    target_var=_ra_var,
+                    failure_kind=_ra_kind,
+                    source="needs_audit",
+                    covering_regime_id=_ra_n.covered_by_regime_id,
+                    covering_composite_id=_ra_n.covered_by_composite_id,
+                    scope_vars=_ra_scope,
+                    authority_at_risk=_ra_auth,
+                    estimated_probe_cost=self.intervention_budget,
+                    priority=_ra_priority,
+                    payload={
+                        "cert_age": _ra_n.full_audits,
+                        "consecutive_sentinel_failures": _ra_n.consecutive_sentinel_failures,
+                        "status": _ra_n.status,
+                    },
+                ))
+
         priority_order = self._cost_biased_topo_audit_order(needs_audit_set)
         budget = self.priority_audit_budget
 

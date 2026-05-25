@@ -48,6 +48,7 @@ from dreth.agent import ChainedAgent
 from dreth.ledger import DormantAlternative
 from dreth.fit import fit_var
 from dreth.functions import FUNC_LIBRARY
+from dreth.hybrid import SymbolicResidualPredictor
 
 
 # ── configuration ─────────────────────────────────────────────────────────────
@@ -62,7 +63,9 @@ class RunConfig:
     noise_sigma: float
     compare: bool = False
     ablate: bool = False
-    log_interval: int = 0   # 0 = disabled; N = print progress every N cycles
+    log_interval: int = 0       # 0 = disabled; N = print progress every N cycles
+    hybrid_control: str = "off" # "off" | "interfaces"
+    repair_agenda_enabled: bool = False
 
 
 # ── per-run result ─────────────────────────────────────────────────────────────
@@ -146,6 +149,17 @@ class ArchMetrics:
     # Passive residual monitoring metrics
     passive_saved_iv: int = 0            # IV calls saved by passive-OK skips
     passive_stress_count: int = 0        # var-cycles where passive was stressed
+
+    # Hybrid control metrics (nonzero only when hybrid-control=interfaces)
+    hybrid_residual_predictor_calls: int = 0
+    hybrid_residual_ok: int = 0
+    hybrid_residual_stressed: int = 0
+    hybrid_parent_ranker_calls: int = 0
+    hybrid_probe_proposer_calls: int = 0
+    hybrid_expert_router_calls: int = 0
+    hybrid_repair_agenda_items: int = 0
+    hybrid_repair_agenda_scope_mean: float = 0.0
+    hybrid_repair_agenda_scope_max: int = 0
 
 
 @dataclass
@@ -412,6 +426,11 @@ def _build_and_run_dreth(
 
     agent_seed_offset shifts rng_a independently of rng_w, so two runs on the
     same world (same rng_w seed) can have independent agent randomness.
+
+    Hybrid control:
+      off        — no providers installed; behavior identical to pre-hybrid.
+      interfaces — symbolic default providers installed; behavior preserved
+                   (SymbolicResidualPredictor reproduces inline path exactly).
     """
     rng_w = random.Random(cfg.seed)
     rng_a = random.Random(cfg.seed + 10_000 + agent_seed_offset)
@@ -422,12 +441,21 @@ def _build_and_run_dreth(
     # Pre-install schedule-specific subgraph so agent.initialize() audits the
     # intended world structure, not the random base.
     world.prepare_schedule(cfg.schedule, cfg.settle_cycles)
+
+    # Hybrid provider setup: only install when hybrid_control != "off".
+    # In "off" mode no providers are created — zero overhead, identical behavior.
+    _residual_predictor = None
+    if cfg.hybrid_control == "interfaces":
+        _residual_predictor = SymbolicResidualPredictor()
+
     agent = ChainedAgent(
         world=world, rng=rng_a,
         sentinel_count=5, sentinel_pool=60,
         promote_after=2,
         priority_audit_budget=max(1, cfg.n_vars // 2),
         consequence_weight=consequence_weight,
+        residual_predictor=_residual_predictor,
+        repair_agenda_enabled=cfg.repair_agenda_enabled,
     )
     agent.initialize()
 
@@ -645,6 +673,20 @@ def _extract_arch_metrics(agent: ChainedAgent, world: CausalWorld) -> ArchMetric
     # Passive residual monitoring metrics
     m.passive_saved_iv = agent._passive_saved_iv
     m.passive_stress_count = agent._passive_stress_count
+
+    # Hybrid control metrics (zero when hybrid-control=off)
+    m.hybrid_residual_predictor_calls = getattr(agent, "_hybrid_residual_predictor_calls", 0)
+    m.hybrid_residual_ok = getattr(agent, "_hybrid_residual_ok", 0)
+    m.hybrid_residual_stressed = getattr(agent, "_hybrid_residual_stressed", 0)
+    m.hybrid_parent_ranker_calls = getattr(agent, "_hybrid_parent_ranker_calls", 0)
+    m.hybrid_probe_proposer_calls = getattr(agent, "_hybrid_probe_proposer_calls", 0)
+    m.hybrid_expert_router_calls = getattr(agent, "_hybrid_expert_router_calls", 0)
+    _agenda = getattr(agent, "_repair_agenda", None)
+    if _agenda is not None:
+        _as = _agenda.summary()
+        m.hybrid_repair_agenda_items = _as["total_pushed"]
+        m.hybrid_repair_agenda_scope_mean = _as.get("scope_mean", 0.0)
+        m.hybrid_repair_agenda_scope_max = _as.get("scope_max", 0)
 
     return m
 
@@ -976,6 +1018,26 @@ def _print_aggregate(results: List[RunResult]) -> None:
     avg_passive_iv = sum(r.arch.passive_saved_iv for r in ok_runs) / n
     avg_passive_stress = sum(r.arch.passive_stress_count for r in ok_runs) / n
     print(f"  passive monitor: saved_iv={avg_passive_iv:.0f}  stressed={avg_passive_stress:.0f}")
+
+    _hybrid_calls = sum(r.arch.hybrid_residual_predictor_calls for r in ok_runs)
+    if _hybrid_calls > 0:
+        _hybrid_ok   = sum(r.arch.hybrid_residual_ok for r in ok_runs)
+        _hybrid_str  = sum(r.arch.hybrid_residual_stressed for r in ok_runs)
+        _agenda_tot  = sum(r.arch.hybrid_repair_agenda_items for r in ok_runs)
+        _scope_max   = max(r.arch.hybrid_repair_agenda_scope_max for r in ok_runs)
+        _scope_mean  = (
+            sum(r.arch.hybrid_repair_agenda_scope_mean * max(r.arch.hybrid_repair_agenda_items, 1)
+                for r in ok_runs if r.arch.hybrid_repair_agenda_items > 0)
+            / max(1, sum(r.arch.hybrid_repair_agenda_items for r in ok_runs if r.arch.hybrid_repair_agenda_items > 0))
+        ) if any(r.arch.hybrid_repair_agenda_items > 0 for r in ok_runs) else 0.0
+        print(
+            f"  hybrid: residual_calls={_hybrid_calls}  ok={_hybrid_ok}  stressed={_hybrid_str}"
+        )
+        if _agenda_tot > 0:
+            print(
+                f"  repair_agenda: total_pushed={_agenda_tot}  "
+                f"scope_mean={_scope_mean:.1f}  scope_max={_scope_max}"
+            )
     print(f"  arch avg: route_certs={avg_rc:.1f}  audit_certs={avg_ac:.1f}  "
           f"dormant={avg_dorm:.1f}  revocations={avg_rev:.1f}")
     print(f"  frontier: collapses={total_fc}  cleared(guard)={total_fclr}  "
@@ -1063,6 +1125,11 @@ def main():
                    help="re-run each config with consequence_weight=False and compare tier metrics")
     p.add_argument("--progress", type=int, default=0, metavar="N",
                    help="print a per-cycle status line every N cycles (forces --workers 1)")
+    p.add_argument("--hybrid-control", default="off",
+                   choices=["off", "interfaces"],
+                   help="hybrid control mode: off=current behavior; interfaces=symbolic provider wrappers (default: off)")
+    p.add_argument("--repair-agenda", action="store_true",
+                   help="enable RepairAgenda: annotate needs_audit entries with scope/authority metadata")
     args = p.parse_args()
 
     var_list   = [int(x) for x in args.vars.split(",")]
@@ -1080,7 +1147,9 @@ def main():
                   noise_sigma=args.noise_sigma,
                   compare=args.compare,
                   ablate=args.ablate_consequence,
-                  log_interval=args.progress)
+                  log_interval=args.progress,
+                  hybrid_control=args.hybrid_control,
+                  repair_agenda_enabled=args.repair_agenda)
         for v in var_list
         for c in cycle_list
         for s in seed_list
@@ -1092,6 +1161,10 @@ def main():
         mode += " +ablate"
     if args.progress:
         mode += f" +progress({args.progress})"
+    if args.hybrid_control != "off":
+        mode += f" +hybrid({args.hybrid_control})"
+    if args.repair_agenda:
+        mode += " +repair-agenda"
     print(f"dreth arch-test{mode}: {total} runs | "
           f"vars={var_list} cycles={cycle_list} seeds={seed_list} "
           f"schedule={args.schedule}", flush=True)
