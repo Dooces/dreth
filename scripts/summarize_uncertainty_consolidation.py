@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -46,6 +47,14 @@ def _runtime_assist_summary(rows: Iterable[dict[str, Any]]) -> dict[str, int]:
         "assist_increase_monitoring",
         "assist_repair_priority_bonus",
         "assist_noops",
+        "giant_clusters_suppressed",
+        "assists_suppressed_by_specificity_gate",
+        "assists_applied_from_local_clusters",
+        "assists_applied_from_giant_clusters",
+        "assist_extra_budget_total",
+        "assist_extra_probe_total",
+        "assist_preserved_alternative_total",
+        "assist_priority_hint_total",
     ]
     out = {field: 0 for field in fields}
     for row in rows:
@@ -73,6 +82,17 @@ def _relation_by_var(rows: Iterable[dict[str, Any]]) -> dict[int, Counter[str]]:
     return rels
 
 
+def _entropy(counter: Counter[str]) -> float:
+    total = sum(counter.values())
+    if total <= 0:
+        return 0.0
+    out = 0.0
+    for count in counter.values():
+        p = count / total
+        out -= p * math.log2(p)
+    return out
+
+
 def print_report(rows: list[dict[str, Any]], out: TextIO) -> None:
     cases = extract_uncertainty_cases_from_rows(rows)
     clusters = cluster_uncertainty_cases(cases)
@@ -94,6 +114,13 @@ def print_report(rows: list[dict[str, Any]], out: TextIO) -> None:
     print(f"  clusters: {summary['uncertainty_clusters']}", file=out)
     print(f"  max_cluster_size: {summary['max_cluster_size']}", file=out)
     print(f"  avg_cluster_size: {summary['avg_cluster_size']:.2f}", file=out)
+    print(f"  cluster_specificity_mean: {summary['cluster_specificity_mean']:.3f}", file=out)
+    print(f"  giant_cluster_count: {summary['giant_cluster_count']}", file=out)
+    size_dist = " ".join(
+        f"{size}:{count}"
+        for size, count in sorted(summary.get("cluster_size_distribution", {}).items())
+    )
+    print(f"  cluster_size_distribution: {size_dist or 'none'}", file=out)
     for kind, count in sorted(summary.get("handle_kinds", {}).items()):
         print(f"  {kind}: {count}", file=out)
     print(file=out)
@@ -105,7 +132,9 @@ def print_report(rows: list[dict[str, Any]], out: TextIO) -> None:
         print(
             f"  {cluster.cluster_id}: vars={list(cluster.vars)} "
             f"kind={cluster.proposed_handle_kind} "
-            f"probe={cluster.proposed_next_probe_family}",
+            f"probe={cluster.proposed_next_probe_family} "
+            f"giant={cluster.is_giant_cluster} "
+            f"specificity={cluster.shared_signal_specificity:.2f}",
             file=out,
         )
         print(f"    evidence: {cluster.evidence_summary}", file=out)
@@ -135,7 +164,11 @@ def print_report(rows: list[dict[str, Any]], out: TextIO) -> None:
         for var in cluster.vars:
             rel_counts.update(rel_by_var.get(var, {}))
         rel_text = " ".join(f"{rel}={count}" for rel, count in rel_counts.most_common())
-        print(f"  {cluster.cluster_id}: {rel_text or 'unknown'}", file=out)
+        print(
+            f"  {cluster.cluster_id}: relation_mix_entropy={_entropy(rel_counts):.3f} "
+            f"{rel_text or 'unknown'}",
+            file=out,
+        )
     print(file=out)
 
     print("G. Hidden-truth warning", file=out)

@@ -88,6 +88,10 @@ def parse_args() -> argparse.Namespace:
                    choices=["off", "shadow", "assist"],
                    help="off=disabled; shadow=diagnostic consolidation only; "
                         "assist=bounded reversible attention/probe/repair hints (default: off)")
+    p.add_argument("--uncertainty-assist-policy", default="all",
+                   choices=["all", "budget_only", "probe_only", "preserve_only",
+                            "priority_only", "local_only"],
+                   help="assist submode used only with --uncertainty-consolidation assist")
     return p.parse_args()
 
 
@@ -386,6 +390,7 @@ def run() -> None:
         role_salience=args.role_salience,
         salience_targets=salience_targets,
         uncertainty_consolidation_mode=args.uncertainty_consolidation,
+        uncertainty_assist_policy=args.uncertainty_assist_policy,
     )
     agent.probe_retention_per_var = args.probe_retention
 

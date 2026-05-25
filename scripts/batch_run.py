@@ -195,6 +195,7 @@ class RunConfig:
     relative_authority_frontier_max_depth: int = 2
     challenge_blind: bool = False
     uncertainty_consolidation: str = "off"  # "off" | "shadow" | "assist"
+    uncertainty_assist_policy: str = "all"
 
 
 # ── per-run result ─────────────────────────────────────────────────────────────
@@ -401,6 +402,7 @@ class ArchMetrics:
 
     # Uncertainty consolidation metrics.
     uncertainty_consolidation_mode: str = "off"
+    uncertainty_assist_policy: str = "all"
     uncertainty_cases_seen: int = 0
     uncertainty_clusters: int = 0
     uncertainty_compression_ratio: float = 0.0
@@ -413,6 +415,16 @@ class ArchMetrics:
     assist_noops: int = 0
     max_cluster_size: int = 0
     avg_cluster_size: float = 0.0
+    cluster_specificity_mean: float = 0.0
+    giant_cluster_count: int = 0
+    giant_clusters_suppressed: int = 0
+    assists_suppressed_by_specificity_gate: int = 0
+    assists_applied_from_local_clusters: int = 0
+    assists_applied_from_giant_clusters: int = 0
+    assist_extra_budget_total: int = 0
+    assist_extra_probe_total: int = 0
+    assist_preserved_alternative_total: int = 0
+    assist_priority_hint_total: int = 0
 
 
 @dataclass
@@ -765,6 +777,7 @@ def _build_and_run_dreth(
         shadow_residual_enabled=_shadow_enabled,
         shadow_key_authority=_shadow_key_authority,
         uncertainty_consolidation_mode=cfg.uncertainty_consolidation,
+        uncertainty_assist_policy=cfg.uncertainty_assist_policy,
     )
     if cfg.relative_authority_frontier_temporal_report:
         from dreth.relative_authority_frontier import TemporalGraphFrontierEvaluator
@@ -1075,6 +1088,7 @@ def _extract_arch_metrics(agent: ChainedAgent, world: CausalWorld) -> ArchMetric
     if hasattr(agent, "uncertainty_consolidation_metrics"):
         _uc = agent.uncertainty_consolidation_metrics()
         m.uncertainty_consolidation_mode = str(_uc.get("uncertainty_consolidation_mode", "off"))
+        m.uncertainty_assist_policy = str(_uc.get("uncertainty_assist_policy", "all"))
         m.uncertainty_cases_seen = int(_uc.get("uncertainty_cases_seen", 0))
         m.uncertainty_clusters = int(_uc.get("uncertainty_clusters", 0))
         m.uncertainty_compression_ratio = float(_uc.get("uncertainty_compression_ratio", 0.0))
@@ -1087,6 +1101,24 @@ def _extract_arch_metrics(agent: ChainedAgent, world: CausalWorld) -> ArchMetric
         m.assist_noops = int(_uc.get("assist_noops", 0))
         m.max_cluster_size = int(_uc.get("max_cluster_size", 0))
         m.avg_cluster_size = float(_uc.get("avg_cluster_size", 0.0))
+        m.cluster_specificity_mean = float(_uc.get("cluster_specificity_mean", 0.0))
+        m.giant_cluster_count = int(_uc.get("giant_cluster_count", 0))
+        m.giant_clusters_suppressed = int(_uc.get("giant_clusters_suppressed", 0))
+        m.assists_suppressed_by_specificity_gate = int(
+            _uc.get("assists_suppressed_by_specificity_gate", 0)
+        )
+        m.assists_applied_from_local_clusters = int(
+            _uc.get("assists_applied_from_local_clusters", 0)
+        )
+        m.assists_applied_from_giant_clusters = int(
+            _uc.get("assists_applied_from_giant_clusters", 0)
+        )
+        m.assist_extra_budget_total = int(_uc.get("assist_extra_budget_total", 0))
+        m.assist_extra_probe_total = int(_uc.get("assist_extra_probe_total", 0))
+        m.assist_preserved_alternative_total = int(
+            _uc.get("assist_preserved_alternative_total", 0)
+        )
+        m.assist_priority_hint_total = int(_uc.get("assist_priority_hint_total", 0))
     _temporal_frontier = getattr(agent, "_diagnostic_audit_observer", None)
     if _temporal_frontier is not None and hasattr(_temporal_frontier, "summary"):
         _tfs = _temporal_frontier.summary()
@@ -2729,6 +2761,10 @@ def main():
                    choices=["off", "shadow", "assist"],
                    help=("off=disabled; shadow=record consolidation only; "
                          "assist=bounded attention/probe/repair/alternative-preservation hints"))
+    p.add_argument("--uncertainty-assist-policy", default="all",
+                   choices=["all", "budget_only", "probe_only", "preserve_only",
+                            "priority_only", "local_only"],
+                   help="assist submode used only with --uncertainty-consolidation assist")
     p.add_argument("--shadow-residual", default="off",
                    choices=["off", "online"],
                    help="shadow residual mode: off=disabled; online=shadow learned predictor (default: off)")
@@ -2856,7 +2892,8 @@ def main():
                   relative_authority_frontier_max_candidates=args.relative_authority_frontier_max_candidates,
                   relative_authority_frontier_max_depth=args.relative_authority_frontier_max_depth,
                   challenge_blind=args.challenge_blind,
-                  uncertainty_consolidation=args.uncertainty_consolidation)
+                  uncertainty_consolidation=args.uncertainty_consolidation,
+                  uncertainty_assist_policy=args.uncertainty_assist_policy)
         for schedule in schedule_list
         for v in var_list
         for c in cycle_list
@@ -3005,6 +3042,7 @@ def main():
                     ),
                     "provider_probe_no_effect_count": r.arch.provider_probe_no_effect_count,
                     "uncertainty_consolidation_mode": r.arch.uncertainty_consolidation_mode,
+                    "uncertainty_assist_policy": r.arch.uncertainty_assist_policy,
                     "uncertainty_cases_seen": r.arch.uncertainty_cases_seen,
                     "uncertainty_clusters": r.arch.uncertainty_clusters,
                     "uncertainty_compression_ratio": round(
@@ -3019,6 +3057,24 @@ def main():
                     "assist_noops": r.arch.assist_noops,
                     "max_cluster_size": r.arch.max_cluster_size,
                     "avg_cluster_size": round(r.arch.avg_cluster_size, 6),
+                    "cluster_specificity_mean": round(r.arch.cluster_specificity_mean, 6),
+                    "giant_cluster_count": r.arch.giant_cluster_count,
+                    "giant_clusters_suppressed": r.arch.giant_clusters_suppressed,
+                    "assists_suppressed_by_specificity_gate": (
+                        r.arch.assists_suppressed_by_specificity_gate
+                    ),
+                    "assists_applied_from_local_clusters": (
+                        r.arch.assists_applied_from_local_clusters
+                    ),
+                    "assists_applied_from_giant_clusters": (
+                        r.arch.assists_applied_from_giant_clusters
+                    ),
+                    "assist_extra_budget_total": r.arch.assist_extra_budget_total,
+                    "assist_extra_probe_total": r.arch.assist_extra_probe_total,
+                    "assist_preserved_alternative_total": (
+                        r.arch.assist_preserved_alternative_total
+                    ),
+                    "assist_priority_hint_total": r.arch.assist_priority_hint_total,
                     "quality_cost": r.quality.quality_cost if r.quality else None,
                     "quality_weights": quality_weights.__dict__,
                     "earned_by_dist": r.arch.earned_by_dist,

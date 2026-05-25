@@ -69,6 +69,14 @@ class UncertaintyCluster:
     proposed_handle_kind: ProposedHandleKind = "unknown"
     evidence_summary: str = ""
     proposed_next_probe_family: ProbeFamily = "no_probe_yet"
+    cluster_size: int = 0
+    cluster_fraction_of_visible: float = 0.0
+    shared_parent_count: int = 0
+    shared_neighbor_count: int = 0
+    shared_near_tie_count: int = 0
+    shared_signal_specificity: float = 0.0
+    temporal_cofailure_count: int = 0
+    is_giant_cluster: bool = False
 
 
 @dataclass(frozen=True)
@@ -306,6 +314,12 @@ def _case_overlap_score(a: UncertaintyCase, b: UncertaintyCase) -> int:
         score += 1
     if signals_a == signals_b and signals_a:
         score += 1
+    if (
+        "sentinel_failures" in signals_a
+        and "sentinel_failures" in signals_b
+        and abs(a.cycle - b.cycle) <= 5
+    ):
+        score += 1
     if set(a.learned_parents) & set(b.learned_parents):
         score += 2
     near_overlap = {
@@ -334,6 +348,45 @@ def _shared_tuple_sets(values: Iterable[Iterable[Any]]) -> tuple[Any, ...]:
         return ()
     shared = set.intersection(*sets)
     return tuple(sorted(shared))
+
+
+def _temporal_cofailure_count(cases: list[UncertaintyCase], *, recent_cycles: int = 5) -> int:
+    failed = [
+        c for c in cases
+        if "sentinel_failures" in {_normalize_signal(sig) for sig in c.active_signals}
+    ]
+    if len(failed) < 2:
+        return 0
+    cycles = [c.cycle for c in failed]
+    if max(cycles) - min(cycles) <= recent_cycles:
+        return len(failed)
+    return 0
+
+
+def _signal_specificity(
+    *,
+    shared_parent_count: int,
+    shared_neighbor_count: int,
+    shared_near_tie_count: int,
+    temporal_cofailure_count: int,
+) -> float:
+    anchors = (
+        int(shared_parent_count > 0)
+        + int(shared_neighbor_count > 0)
+        + int(shared_near_tie_count > 0)
+        + int(temporal_cofailure_count > 0)
+    )
+    return anchors / 4.0
+
+
+def cluster_has_specific_local_anchor(cluster: UncertaintyCluster) -> bool:
+    """Return whether a cluster has a visible local anchor for runtime assist."""
+    return (
+        cluster.shared_parent_count > 0
+        or cluster.shared_near_tie_count > 0
+        or cluster.shared_neighbor_count > 0
+        or cluster.temporal_cofailure_count > 0
+    )
 
 
 def _handle_kind(cases: list[UncertaintyCase]) -> ProposedHandleKind:
@@ -378,9 +431,17 @@ def _probe_family(cases: list[UncertaintyCase], kind: ProposedHandleKind) -> Pro
     return "no_probe_yet"
 
 
-def cluster_uncertainty_cases(cases: list[UncertaintyCase]) -> list[UncertaintyCluster]:
+def cluster_uncertainty_cases(
+    cases: list[UncertaintyCase],
+    *,
+    visible_count: int | None = None,
+) -> list[UncertaintyCluster]:
     if not cases:
         return []
+    visible = int(visible_count or 0)
+    if visible <= 0:
+        visible = max((c.var for c in cases), default=-1) + 1
+    visible = max(1, visible)
     parent = list(range(len(cases)))
 
     def find(i: int) -> int:
@@ -415,6 +476,18 @@ def cluster_uncertainty_cases(cases: list[UncertaintyCase]) -> list[UncertaintyC
         )
         shared_neighbors = _shared_tuple_sets(c.graph_neighbors for c in group)
         temporal = max(c.cycle for c in group) - min(c.cycle for c in group)
+        temporal_cofailure = _temporal_cofailure_count(group)
+        cluster_size = len(vars_)
+        cluster_fraction = cluster_size / visible
+        shared_parent_count = len(shared_parents)
+        shared_neighbor_count = len(shared_neighbors)
+        shared_near_tie_count = len(shared_near)
+        specificity = _signal_specificity(
+            shared_parent_count=shared_parent_count,
+            shared_neighbor_count=shared_neighbor_count,
+            shared_near_tie_count=shared_near_tie_count,
+            temporal_cofailure_count=temporal_cofailure,
+        )
         kind = _handle_kind(group)
         probe = _probe_family(group, kind)
         evidence_bits: list[str] = []
@@ -428,6 +501,8 @@ def cluster_uncertainty_cases(cases: list[UncertaintyCase]) -> list[UncertaintyC
             evidence_bits.append("neighbors=" + ",".join(f"x{p}" for p in shared_neighbors[:5]))
         if temporal:
             evidence_bits.append(f"persistence={temporal}")
+        if temporal_cofailure:
+            evidence_bits.append(f"temporal_cofailure={temporal_cofailure}")
         clusters.append(UncertaintyCluster(
             cluster_id=f"uc{ordinal}",
             vars=vars_,
@@ -439,6 +514,14 @@ def cluster_uncertainty_cases(cases: list[UncertaintyCase]) -> list[UncertaintyC
             proposed_handle_kind=kind,
             evidence_summary="; ".join(evidence_bits) if evidence_bits else "single visible uncertainty case",
             proposed_next_probe_family=probe,
+            cluster_size=cluster_size,
+            cluster_fraction_of_visible=cluster_fraction,
+            shared_parent_count=shared_parent_count,
+            shared_neighbor_count=shared_neighbor_count,
+            shared_near_tie_count=shared_near_tie_count,
+            shared_signal_specificity=specificity,
+            temporal_cofailure_count=temporal_cofailure,
+            is_giant_cluster=cluster_fraction > 0.40,
         ))
     clusters.sort(key=lambda c: (-len(c.vars), c.cluster_id))
     return clusters
@@ -502,6 +585,7 @@ def summarize_clusters(clusters: list[UncertaintyCluster]) -> dict[str, Any]:
     case_count = sum(len(c.vars) for c in clusters)
     cluster_count = len(clusters)
     sizes = [len(c.vars) for c in clusters]
+    specificity_values = [c.shared_signal_specificity for c in clusters]
     return {
         "uncertainty_clusters": cluster_count,
         "uncertainty_cases_seen": case_count,
@@ -510,6 +594,12 @@ def summarize_clusters(clusters: list[UncertaintyCluster]) -> dict[str, Any]:
         ),
         "max_cluster_size": max(sizes) if sizes else 0,
         "avg_cluster_size": (sum(sizes) / len(sizes)) if sizes else 0.0,
+        "cluster_specificity_mean": (
+            sum(specificity_values) / len(specificity_values)
+            if specificity_values else 0.0
+        ),
+        "giant_cluster_count": sum(1 for c in clusters if c.is_giant_cluster),
+        "cluster_size_distribution": dict(Counter(sizes)),
         "handle_kinds": dict(Counter(c.proposed_handle_kind for c in clusters)),
         "probe_families": dict(Counter(c.proposed_next_probe_family for c in clusters)),
     }

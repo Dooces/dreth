@@ -12,16 +12,22 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 
+import dreth.agent as agent_mod
 from dreth.agent import ChainedAgent
 from dreth.ledger import TiedFrontier
 from dreth.uncertainty_consolidation import (
     UncertaintyCase,
+    cluster_has_specific_local_anchor,
     cluster_uncertainty_cases,
     extract_uncertainty_cases_from_rows,
     propose_consolidation_assists,
     summarize_clusters,
 )
 from dreth.world import CausalWorld
+from compare_uncertainty_consolidation_modes import (
+    load_jsonl as load_compare_jsonl,
+    print_report as print_compare_report,
+)
 from summarize_uncertainty_consolidation import load_jsonl, print_report
 
 
@@ -46,7 +52,12 @@ def _case(var: int, **kwargs) -> UncertaintyCase:
     return UncertaintyCase(var=var, **base)
 
 
-def _agent(*, mode: str = "off", repair_agenda: bool = False) -> ChainedAgent:
+def _agent(
+    *,
+    mode: str = "off",
+    repair_agenda: bool = False,
+    assist_policy: str = "all",
+) -> ChainedAgent:
     world = CausalWorld(5, random.Random(3), noise_sigma=0.0)
     world.visible_count = 5
     return ChainedAgent(
@@ -58,7 +69,42 @@ def _agent(*, mode: str = "off", repair_agenda: bool = False) -> ChainedAgent:
         frontier_k=world.n_vars,
         repair_agenda_enabled=repair_agenda,
         uncertainty_consolidation_mode=mode,
+        uncertainty_assist_policy=assist_policy,
     )
+
+
+def _run_with_cases(
+    monkeypatch: pytest.MonkeyPatch,
+    cases: list[UncertaintyCase],
+    *,
+    policy: str = "all",
+    prepare: object = None,
+) -> ChainedAgent:
+    agent = _agent(mode="assist", assist_policy=policy)
+    agent.initialize()
+    if callable(prepare):
+        prepare(agent)
+    monkeypatch.setattr(
+        agent_mod,
+        "extract_uncertainty_cases_from_agent",
+        lambda _agent, _cycle: cases,
+    )
+    agent._run_uncertainty_consolidation(1)
+    return agent
+
+
+def _add_separating_frontier(agent: ChainedAgent, *vars_: int) -> None:
+    for var in vars_:
+        agent.ledger.vars[var].tied_frontier = TiedFrontier(
+            candidates=frozenset({((2,), "FIRST"), ((3,), "FIRST")}),
+            scores={((2,), "FIRST"): 10, ((3,), "FIRST"): 10},
+            margin=4,
+            context_key=1,
+            collapse_sig=None,
+            separating_probes=((2, 0.05),),
+            first_seen_cycle=1,
+            last_seen_cycle=1,
+        )
 
 
 def test_clustering_ignores_hidden_fields_in_rows() -> None:
@@ -167,6 +213,93 @@ def test_summary_reports_compression_ratio() -> None:
     summary = summarize_clusters(clusters)
 
     assert summary["uncertainty_compression_ratio"] == pytest.approx(2.0)
+    assert "cluster_specificity_mean" in summary
+
+
+def test_giant_all_var_cluster_is_suppressed_without_local_anchor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cases = [
+        _case(
+            var,
+            active_signals=("low_margin",),
+            learned_parents=(),
+            near_tie_candidates=(),
+            tied_frontier_info={"active": False},
+            novelty_state="closed",
+            recent_fit_history=(),
+            consequence_tier="skip_tareth",
+            graph_neighbors=(),
+        )
+        for var in range(5)
+    ]
+
+    agent = _run_with_cases(monkeypatch, cases)
+    metrics = agent.uncertainty_consolidation_metrics()
+
+    assert metrics["giant_cluster_count"] == 1
+    assert metrics["giant_clusters_suppressed"] == 1
+    assert metrics["consolidation_assists_total"] == 0
+    assert metrics["assists_suppressed_by_specificity_gate"] > 0
+
+
+def test_local_shared_parent_cluster_is_allowed(monkeypatch: pytest.MonkeyPatch) -> None:
+    agent = _run_with_cases(
+        monkeypatch,
+        [
+            _case(0, learned_parents=(2,), graph_neighbors=()),
+            _case(1, learned_parents=(2,), graph_neighbors=()),
+        ],
+    )
+
+    assert agent._uncertainty_budget_bonus
+    assert agent.uncertainty_consolidation_metrics()["assists_applied_from_local_clusters"] > 0
+
+
+def test_local_shared_near_tie_cluster_is_allowed(monkeypatch: pytest.MonkeyPatch) -> None:
+    cases = [
+        _case(0, learned_parents=(), graph_neighbors=(), near_tie_candidates=((3,),)),
+        _case(1, learned_parents=(), graph_neighbors=(), near_tie_candidates=((3,),)),
+    ]
+    clusters = cluster_uncertainty_cases(cases)
+
+    assert cluster_has_specific_local_anchor(clusters[0])
+    agent = _run_with_cases(monkeypatch, cases)
+
+    assert agent._uncertainty_budget_bonus
+
+
+def test_generic_shared_uncertainty_signals_alone_are_insufficient(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cases = [
+        _case(
+            0,
+            active_signals=("open_novelty", "near_tie_count"),
+            learned_parents=(),
+            near_tie_candidates=(),
+            graph_neighbors=(),
+            tied_frontier_info={"active": False},
+            recent_fit_history=(),
+            consequence_tier="skip_tareth",
+        ),
+        _case(
+            1,
+            active_signals=("open_novelty", "near_tie_count"),
+            learned_parents=(),
+            near_tie_candidates=(),
+            graph_neighbors=(),
+            tied_frontier_info={"active": False},
+            recent_fit_history=(),
+            consequence_tier="skip_tareth",
+        ),
+    ]
+
+    agent = _run_with_cases(monkeypatch, cases)
+
+    assert not agent._uncertainty_budget_bonus
+    assert not agent._uncertainty_forced_probes
+    assert agent.uncertainty_consolidation_metrics()["assists_suppressed_by_specificity_gate"] > 0
 
 
 def test_off_mode_matches_default_behavior() -> None:
@@ -276,6 +409,94 @@ def test_assist_requests_probes_only_through_forced_probe_surface() -> None:
     assert all(probes == ((2, 0.05),) for probes in agent._uncertainty_forced_probes.values())
 
 
+def test_probe_only_applies_probes_but_no_budget_bonus(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cases = [
+        _case(0, learned_parents=(2,), graph_neighbors=()),
+        _case(1, learned_parents=(2,), graph_neighbors=()),
+    ]
+    agent = _run_with_cases(
+        monkeypatch,
+        cases,
+        policy="probe_only",
+        prepare=lambda a: _add_separating_frontier(a, 0, 1),
+    )
+
+    assert agent._uncertainty_forced_probes
+    assert not agent._uncertainty_budget_bonus
+    metrics = agent.uncertainty_consolidation_metrics()
+    assert metrics["assist_extra_probe_total"] > 0
+    assert metrics["assist_extra_budget_total"] == 0
+
+
+def test_budget_only_applies_budget_bonus_but_no_forced_probes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cases = [
+        _case(0, learned_parents=(2,), graph_neighbors=()),
+        _case(1, learned_parents=(2,), graph_neighbors=()),
+    ]
+    agent = _run_with_cases(
+        monkeypatch,
+        cases,
+        policy="budget_only",
+        prepare=lambda a: _add_separating_frontier(a, 0, 1),
+    )
+
+    assert agent._uncertainty_budget_bonus
+    assert not agent._uncertainty_forced_probes
+    metrics = agent.uncertainty_consolidation_metrics()
+    assert metrics["assist_extra_budget_total"] > 0
+    assert metrics["assist_extra_probe_total"] == 0
+
+
+def test_preserve_only_preserves_alternatives_but_does_not_alter_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cases = [
+        _case(0, learned_parents=(2,), graph_neighbors=()),
+        _case(1, learned_parents=(2,), graph_neighbors=()),
+    ]
+    agent = _run_with_cases(monkeypatch, cases, policy="preserve_only")
+
+    assert agent._uncertainty_preserve_vars == {0, 1}
+    assert not agent._uncertainty_budget_bonus
+    assert not agent._uncertainty_forced_probes
+
+
+def test_priority_only_affects_repair_priority_counters_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cases = [
+        _case(
+            0,
+            active_signals=("sentinel_failures", "recent_revocations"),
+            learned_parents=(2,),
+            graph_neighbors=(),
+            near_tie_candidates=(),
+        ),
+        _case(
+            1,
+            active_signals=("sentinel_failures", "recent_revocations"),
+            learned_parents=(2,),
+            graph_neighbors=(),
+            near_tie_candidates=(),
+        ),
+    ]
+    agent = _run_with_cases(monkeypatch, cases, policy="priority_only")
+    metrics = agent.uncertainty_consolidation_metrics()
+
+    assert metrics["assist_priority_hint_total"] > 0
+    assert not agent._uncertainty_budget_bonus
+    assert not agent._uncertainty_forced_probes
+    assert not agent._uncertainty_preserve_vars
+    assert all(
+        assists == {"repair_priority_bonus"}
+        for assists in agent._uncertainty_assist_vars.values()
+    )
+
+
 def test_assist_does_not_hard_suppress_existing_trass_skips() -> None:
     agent = _agent(mode="assist")
     agent.initialize()
@@ -328,3 +549,51 @@ def test_posthoc_relation_type_interpretation_is_separate(tmp_path: Path, capsys
     assert "F. Post-hoc interpretation" in out
     assert "Uses relation_type only after clustering" in out
     assert "Warning: hidden truth is not used" in out
+
+
+def test_compare_script_detects_assist_worse_than_off(tmp_path: Path, capsys) -> None:
+    off = tmp_path / "off.jsonl"
+    shadow = tmp_path / "shadow.jsonl"
+    assist = tmp_path / "assist.jsonl"
+    base_row = {
+        "schedule": "blind_challenge",
+        "n_vars": 50,
+        "cycles": 3000,
+        "seed": 42,
+        "settle_cycles": 25,
+        "noise_sigma": 0.02,
+        "interventions": 100,
+        "full_audits": 10,
+        "revoked_by_dist": {"sentinel": 1},
+        "total_unique_failures": 2,
+        "quality_cost": 1000,
+        "temporal_frontier_chosen_parent_recall": 0.5,
+        "temporal_frontier_recall_lift": 1.2,
+        "dormant_total": 3,
+        "vars_open_novelty": 1,
+    }
+    assist_row = dict(base_row)
+    assist_row.update({
+        "uncertainty_consolidation_mode": "assist",
+        "uncertainty_assist_policy": "all",
+        "interventions": 120,
+        "full_audits": 12,
+        "quality_cost": 1500,
+        "assist_extra_budget_total": 7,
+    })
+    off.write_text(json.dumps(base_row) + "\n")
+    shadow.write_text(json.dumps({**base_row, "uncertainty_consolidation_mode": "shadow"}) + "\n")
+    assist.write_text(json.dumps(assist_row) + "\n")
+
+    print_compare_report(
+        load_compare_jsonl(str(off)),
+        load_compare_jsonl(str(shadow)),
+        load_compare_jsonl(str(assist)),
+        sys.stdout,
+    )
+    out = capsys.readouterr().out
+
+    assert "A. off vs shadow equality" in out
+    assert "equal: True" in out
+    assert "WARNING: quality_cost worsened" in out
+    assert "assist benefit is not attributable" in out

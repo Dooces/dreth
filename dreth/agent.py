@@ -94,6 +94,7 @@ from .hybrid import (
 )
 from .repair_agenda import RepairAgenda, RepairAgendaItem
 from .uncertainty_consolidation import (
+    cluster_has_specific_local_anchor,
     cluster_uncertainty_cases,
     extract_uncertainty_cases_from_agent,
     propose_consolidation_assists,
@@ -232,6 +233,7 @@ class ChainedAgent:
         shadow_residual_enabled: bool = False,
         shadow_key_authority: Optional[ShadowResidualKeyAuthority] = None,
         uncertainty_consolidation_mode: str = "off",
+        uncertainty_assist_policy: str = "all",
         uncertainty_max_preserve_count: int = 3,
     ):
         """Construct agent. Initializes empty ledger, zero counters, and
@@ -489,7 +491,20 @@ class ChainedAgent:
             raise ValueError(
                 "uncertainty_consolidation_mode must be off, shadow, or assist"
             )
+        if uncertainty_assist_policy not in {
+            "all",
+            "budget_only",
+            "probe_only",
+            "preserve_only",
+            "priority_only",
+            "local_only",
+        }:
+            raise ValueError(
+                "uncertainty_assist_policy must be all, budget_only, probe_only, "
+                "preserve_only, priority_only, or local_only"
+            )
         self._uncertainty_consolidation_mode = uncertainty_consolidation_mode
+        self._uncertainty_assist_policy = uncertainty_assist_policy
         self._uncertainty_max_preserve_count = max(0, int(uncertainty_max_preserve_count))
         self._uncertainty_consolidation_interval = 1
         self._uncertainty_latest_cases = []
@@ -519,6 +534,15 @@ class ChainedAgent:
         self._uncertainty_max_cluster_size = 0
         self._uncertainty_cluster_size_sum = 0
         self._uncertainty_cluster_observations = 0
+        self._uncertainty_cluster_specificity_sum = 0.0
+        self._uncertainty_giant_clusters_suppressed = 0
+        self._uncertainty_assists_suppressed_by_specificity_gate = 0
+        self._uncertainty_assists_applied_from_local_clusters = 0
+        self._uncertainty_assists_applied_from_giant_clusters = 0
+        self._uncertainty_assist_extra_budget_total = 0
+        self._uncertainty_assist_extra_probe_total = 0
+        self._uncertainty_assist_preserved_alternative_total = 0
+        self._uncertainty_assist_priority_hint_total = 0
 
     def _reset_uncertainty_assist_surfaces(self) -> None:
         self._uncertainty_assist_vars = {}
@@ -540,7 +564,7 @@ class ChainedAgent:
             return
 
         cases = extract_uncertainty_cases_from_agent(self, cycle)
-        clusters = cluster_uncertainty_cases(cases)
+        clusters = cluster_uncertainty_cases(cases, visible_count=self.world.visible_count)
         assists = propose_consolidation_assists(clusters)
         summary = summarize_clusters(clusters)
 
@@ -554,65 +578,102 @@ class ChainedAgent:
             size = len(cluster.vars)
             self._uncertainty_max_cluster_size = max(self._uncertainty_max_cluster_size, size)
             self._uncertainty_cluster_size_sum += size
+            self._uncertainty_cluster_specificity_sum += cluster.shared_signal_specificity
             self._uncertainty_cluster_observations += 1
 
         if self._uncertainty_consolidation_mode != "assist":
             return
 
         visible = self.world.visible_count
+        clusters_by_id = {cluster.cluster_id: cluster for cluster in clusters}
+        suppressed_giant_clusters: Set[str] = set()
         for assist in assists:
             applied = False
             target_vars = tuple(v for v in assist.target_vars if 0 <= v < visible)
             if not target_vars:
                 self._uncertainty_assist_noops += 1
                 continue
+            cluster = clusters_by_id.get(assist.cluster_id)
+            is_local_cluster = (
+                cluster_has_specific_local_anchor(cluster)
+                if cluster is not None else False
+            )
+            is_giant_cluster = bool(cluster and cluster.is_giant_cluster)
+            if not is_local_cluster or (
+                self._uncertainty_assist_policy == "local_only" and is_giant_cluster
+            ):
+                self._uncertainty_assists_suppressed_by_specificity_gate += 1
+                if is_giant_cluster:
+                    suppressed_giant_clusters.add(assist.cluster_id)
+                continue
             self._uncertainty_assists_total += 1
-            for var in target_vars:
-                self._uncertainty_assist_vars.setdefault(var, set()).add(assist.assist_kind)
 
             if assist.assist_kind == "prioritize_attention":
                 self._uncertainty_assist_prioritize_attention += 1
-                for var in target_vars:
-                    self._uncertainty_budget_bonus[var] = max(
-                        self._uncertainty_budget_bonus.get(var, 0),
-                        min(2, max(1, int(math.ceil(assist.bounded_strength * 4)))),
-                    )
-                applied = True
+                if self._uncertainty_assist_policy in {"all", "budget_only", "local_only"}:
+                    for var in target_vars:
+                        before = self._uncertainty_budget_bonus.get(var, 0)
+                        after = max(
+                            before,
+                            min(2, max(1, int(math.ceil(assist.bounded_strength * 4)))),
+                        )
+                        self._uncertainty_budget_bonus[var] = after
+                        self._uncertainty_assist_extra_budget_total += after - before
+                    applied = True
             elif assist.assist_kind == "preserve_alternatives":
                 self._uncertainty_assist_preserve_alternatives += 1
-                self._uncertainty_preserve_vars.update(target_vars)
-                applied = bool(self._uncertainty_max_preserve_count > 0)
+                if self._uncertainty_assist_policy in {"all", "preserve_only", "local_only"}:
+                    self._uncertainty_preserve_vars.update(target_vars)
+                    applied = bool(self._uncertainty_max_preserve_count > 0)
             elif assist.assist_kind == "request_separating_probe":
                 self._uncertainty_assist_request_probe += 1
-                for var in target_vars:
-                    frontier = self.ledger.vars[var].tied_frontier
-                    probes = frontier.separating_probes if frontier is not None else ()
-                    valid = tuple(
-                        (iv_var, iv_val)
-                        for iv_var, iv_val in probes
-                        if 0 <= iv_var < visible and 0.0 <= iv_val <= 1.0
-                    )[:3]
-                    if valid:
-                        self._uncertainty_forced_probes[var] = valid
-                        applied = True
+                if self._uncertainty_assist_policy in {"all", "probe_only", "local_only"}:
+                    for var in target_vars:
+                        frontier = self.ledger.vars[var].tied_frontier
+                        probes = frontier.separating_probes if frontier is not None else ()
+                        valid = tuple(
+                            (iv_var, iv_val)
+                            for iv_var, iv_val in probes
+                            if 0 <= iv_var < visible and 0.0 <= iv_val <= 1.0
+                        )[:3]
+                        if valid:
+                            self._uncertainty_forced_probes[var] = valid
+                            self._uncertainty_assist_extra_probe_total += len(valid)
+                            applied = True
             elif assist.assist_kind == "increase_monitoring":
                 self._uncertainty_assist_increase_monitoring += 1
-                for var in target_vars:
-                    self._uncertainty_budget_bonus[var] = max(
-                        self._uncertainty_budget_bonus.get(var, 0),
-                        1,
-                    )
-                applied = True
+                if self._uncertainty_assist_policy in {"all", "budget_only", "local_only"}:
+                    for var in target_vars:
+                        before = self._uncertainty_budget_bonus.get(var, 0)
+                        after = max(before, 1)
+                        self._uncertainty_budget_bonus[var] = after
+                        self._uncertainty_assist_extra_budget_total += after - before
+                    applied = True
             elif assist.assist_kind == "repair_priority_bonus":
                 self._uncertainty_assist_repair_priority_bonus += 1
-                applied = True
+                if self._uncertainty_assist_policy in {"all", "priority_only", "local_only"}:
+                    self._uncertainty_assist_priority_hint_total += len(target_vars)
+                    applied = True
+
+            if applied:
+                for var in target_vars:
+                    self._uncertainty_assist_vars.setdefault(var, set()).add(assist.assist_kind)
+                if is_giant_cluster:
+                    self._uncertainty_assists_applied_from_giant_clusters += 1
+                else:
+                    self._uncertainty_assists_applied_from_local_clusters += 1
 
             if not applied:
                 self._uncertainty_assist_noops += 1
+        self._uncertainty_giant_clusters_suppressed += len(suppressed_giant_clusters)
 
     def uncertainty_consolidation_metrics(self) -> Dict[str, Any]:
         avg_cluster = (
             self._uncertainty_cluster_size_sum / self._uncertainty_cluster_observations
+            if self._uncertainty_cluster_observations else 0.0
+        )
+        avg_specificity = (
+            self._uncertainty_cluster_specificity_sum / self._uncertainty_cluster_observations
             if self._uncertainty_cluster_observations else 0.0
         )
         cluster_count = (
@@ -625,6 +686,7 @@ class ChainedAgent:
         )
         return {
             "uncertainty_consolidation_mode": self._uncertainty_consolidation_mode,
+            "uncertainty_assist_policy": self._uncertainty_assist_policy,
             "uncertainty_cases_seen": case_count,
             "uncertainty_clusters": cluster_count,
             "uncertainty_compression_ratio": (
@@ -640,6 +702,24 @@ class ChainedAgent:
             "assist_noops": self._uncertainty_assist_noops,
             "max_cluster_size": self._uncertainty_max_cluster_size,
             "avg_cluster_size": avg_cluster,
+            "cluster_specificity_mean": avg_specificity,
+            "giant_cluster_count": int(self._uncertainty_summary.get("giant_cluster_count", 0)),
+            "giant_clusters_suppressed": self._uncertainty_giant_clusters_suppressed,
+            "assists_suppressed_by_specificity_gate": (
+                self._uncertainty_assists_suppressed_by_specificity_gate
+            ),
+            "assists_applied_from_local_clusters": (
+                self._uncertainty_assists_applied_from_local_clusters
+            ),
+            "assists_applied_from_giant_clusters": (
+                self._uncertainty_assists_applied_from_giant_clusters
+            ),
+            "assist_extra_budget_total": self._uncertainty_assist_extra_budget_total,
+            "assist_extra_probe_total": self._uncertainty_assist_extra_probe_total,
+            "assist_preserved_alternative_total": (
+                self._uncertainty_assist_preserved_alternative_total
+            ),
+            "assist_priority_hint_total": self._uncertainty_assist_priority_hint_total,
         }
 
     def _adaptive_probe_budget(self, n_hypotheses: int) -> int:
@@ -2218,6 +2298,7 @@ class ChainedAgent:
                         )
                     )
                     self._uncertainty_preserve_remaining -= 1
+                    self._uncertainty_assist_preserved_alternative_total += 1
                     archived += 1
                 if archived:
                     self.ledger.event_log.append(
