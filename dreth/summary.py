@@ -266,7 +266,13 @@ class RunAnalyzer:
             self.hybrid_repair_agenda_scope_mean = 0.0
             self.hybrid_repair_agenda_scope_max = 0
 
-        self.hybrid_active: bool = self.hybrid_residual_predictor_calls > 0
+        # Active when ANY provider was used this run; ensures wiring gaps are visible.
+        self.hybrid_active: bool = (
+            self.hybrid_residual_predictor_calls > 0
+            or self.hybrid_parent_ranker_calls > 0
+            or self.hybrid_probe_proposer_calls > 0
+            or self.hybrid_expert_router_calls > 0
+        )
 
 
 class SummaryRenderer:
@@ -420,16 +426,15 @@ class SummaryRenderer:
 
         if a.hybrid_active or a.hybrid_repair_agenda_items > 0:
             lines.append("\n── hybrid control ─────────────────────────────────────")
+            # All four provider counters are printed even when zero so wiring gaps
+            # are immediately visible when --hybrid-control interfaces is active.
             lines.append(
                 f"  residual_predictor: calls={a.hybrid_residual_predictor_calls} "
                 f"ok={a.hybrid_residual_ok} stressed={a.hybrid_residual_stressed}"
             )
-            if a.hybrid_parent_ranker_calls > 0:
-                lines.append(f"  parent_ranker: calls={a.hybrid_parent_ranker_calls}")
-            if a.hybrid_probe_proposer_calls > 0:
-                lines.append(f"  probe_proposer: calls={a.hybrid_probe_proposer_calls}")
-            if a.hybrid_expert_router_calls > 0:
-                lines.append(f"  expert_router: calls={a.hybrid_expert_router_calls}")
+            lines.append(f"  parent_ranker:      calls={a.hybrid_parent_ranker_calls}")
+            lines.append(f"  probe_proposer:     calls={a.hybrid_probe_proposer_calls}")
+            lines.append(f"  expert_router:      calls={a.hybrid_expert_router_calls}")
             if a.hybrid_repair_agenda_items > 0:
                 lines.append(
                     f"  repair_agenda: total_pushed={a.hybrid_repair_agenda_items} "

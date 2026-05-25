@@ -21,6 +21,12 @@ import pytest
 from dreth.world import CausalWorld
 from dreth.agent import ChainedAgent
 from dreth.ledger import CompositeNethra, NethraCertificate
+from dreth.hybrid import (
+    SensitivityParentRanker,
+    DiscriminationProbeProposer,
+    FuncLibraryRouter,
+    SymbolicResidualPredictor,
+)
 
 
 # ── world: seed 3 ──────────────────────────────────────────────────────────────
@@ -491,3 +497,175 @@ def test_09_composite_nethra_install_skip_persist_revoke():
         "x2 must be re-audited or untested after composite revocation"
     assert x3_audited or x3_untested, \
         "x3 must be re-audited or untested after composite revocation"
+
+
+# ── 10  hybrid interface mode ─────────────────────────────────────────────────
+# Tests 10a–10d verify provider seams without changing cert authority.
+# Core invariant enforced: no provider may issue NethraCertificate objects,
+# mutate ledger cert state, mark tareth/trass, or authorize skips.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _make_hybrid_agent(**kwargs):
+    """Agent with all four symbolic default providers installed."""
+    rng_w = random.Random(_SEED_W)
+    rng_a = random.Random(_SEED_A)
+    world = CausalWorld(5, rng_w, noise_sigma=0.0)
+    world.visible_count = 5
+    agent = ChainedAgent(
+        world, rng_a,
+        sentinel_count=5, sentinel_pool=20,
+        compression_discover_after=3,
+        compression_promote_after=3,
+        priority_audit_budget=5,
+        frontier_k=world.n_vars,
+        residual_predictor=SymbolicResidualPredictor(),
+        parent_ranker=SensitivityParentRanker(world),
+        probe_proposer=DiscriminationProbeProposer(),
+        expert_router=FuncLibraryRouter(),
+        **kwargs,
+    )
+    return agent, world
+
+
+def test_10a_hybrid_provider_counters_increment():
+    """After initialize() + a few cycles all four hybrid counters must be > 0."""
+    agent, world = _make_hybrid_agent()
+    agent.initialize()
+
+    N_CYCLES = 5
+    for c in range(1, N_CYCLES + 1):
+        agent.run_cycle(c)
+
+    assert agent._hybrid_residual_predictor_calls > 0, \
+        "residual_predictor must be called at least once"
+    assert agent._hybrid_parent_ranker_calls > 0, \
+        "parent_ranker must be called at least once (parent_screen_m > 0 triggers _screen_candidate_parents)"
+    assert agent._hybrid_probe_proposer_calls > 0, \
+        "probe_proposer must be called at least once (every full audit goes through _full_audit_var)"
+    assert agent._hybrid_expert_router_calls > 0, \
+        "expert_router must be called at least once (every full audit emits a diagnostic route)"
+
+
+def test_10b_providers_do_not_issue_certs():
+    """Providers must not create NethraCertificate objects or alter cert count.
+
+    Compare cert counts from an off-mode run vs a hybrid-mode run on the exact
+    same world+seed. They must match — providers contribute zero new certs.
+    """
+    # Off-mode run
+    rng_w = random.Random(_SEED_W)
+    rng_a = random.Random(_SEED_A)
+    world_off = CausalWorld(5, rng_w, noise_sigma=0.0)
+    world_off.visible_count = 5
+    agent_off = ChainedAgent(
+        world_off, rng_a,
+        sentinel_count=5, sentinel_pool=20,
+        priority_audit_budget=5,
+        frontier_k=world_off.n_vars,
+    )
+    agent_off.initialize()
+    for c in range(1, 6):
+        agent_off.run_cycle(c)
+
+    # Hybrid-mode run (same seeds)
+    agent_hy, _ = _make_hybrid_agent()
+    agent_hy.initialize()
+    for c in range(1, 6):
+        agent_hy.run_cycle(c)
+
+    # Cert count per var must be identical — providers never touch certs
+    for var in range(5):
+        n_off = agent_off.ledger.vars[var]
+        n_hy = agent_hy.ledger.vars[var]
+        assert len(n_off.certificates) == len(n_hy.certificates), (
+            f"x{var}: cert count mismatch off={len(n_off.certificates)} "
+            f"hybrid={len(n_hy.certificates)}"
+        )
+        for key in n_off.certificates:
+            assert key in n_hy.certificates, \
+                f"x{var}: cert key {key!r} present in off-mode but missing in hybrid"
+            assert n_off.certificates[key].role == n_hy.certificates[key].role, (
+                f"x{var} cert[{key!r}]: role mismatch "
+                f"off={n_off.certificates[key].role!r} "
+                f"hybrid={n_hy.certificates[key].role!r}"
+            )
+
+
+def test_10c_hybrid_cert_invariants_match_off_mode():
+    """All cert-quality invariants that hold in off-mode must hold in hybrid mode.
+
+    Checks: every cert has earned_by, trass vars have no sentinels,
+    tareth vars have sentinels, no provider-owned cert is written.
+    """
+    agent, world = _make_hybrid_agent()
+    agent.initialize()
+    for c in range(1, 6):
+        agent.run_cycle(c)
+
+    for var in range(world.visible_count):
+        n = agent.ledger.vars[var]
+        role = n.role_for("skip")
+        cert = n.certificates.get("skip")
+
+        # I1: every cert has earned_by
+        if cert is not None:
+            assert cert.earned_by, \
+                f"x{var} hybrid: cert missing earned_by (provider wrote unevidenced cert?)"
+
+        # Trass: no sentinels; tareth: sentinels present
+        if role == "trass":
+            assert len(n.sentinels) == 0, \
+                f"x{var} trass: sentinels should be empty in hybrid mode too"
+        elif role == "tareth":
+            assert len(n.sentinels) > 0, \
+                f"x{var} tareth: sentinels must be present in hybrid mode too"
+
+        # No route certs in wrong location
+        for key, c2 in n.certificates.items():
+            op = getattr(c2, "operation", None)
+            assert op != "route", \
+                f"x{var}: route cert found in .certificates[{key!r}] (must live in route_certs)"
+
+
+def test_10d_off_vs_hybrid_compatible_skip_rate():
+    """Hybrid symbolic providers must not degrade the skip rate by more than 20%.
+
+    DiscriminationProbeProposer returns empty probes → no change to fit_var.
+    SensitivityParentRanker mirrors the inline screen → same candidates.
+    FuncLibraryRouter is diagnostic-only → no effect.
+    SymbolicResidualPredictor mirrors the inline path → same passive decisions.
+    So the skip rates should be within a small tolerance.
+    """
+    N_CYCLES = 20
+
+    # Off mode
+    rng_w = random.Random(_SEED_W)
+    rng_a = random.Random(_SEED_A)
+    world_off = CausalWorld(5, rng_w, noise_sigma=0.0)
+    world_off.visible_count = 5
+    agent_off = ChainedAgent(
+        world_off, rng_a,
+        sentinel_count=5, sentinel_pool=20,
+        priority_audit_budget=5,
+        frontier_k=world_off.n_vars,
+    )
+    agent_off.initialize()
+    for c in range(1, N_CYCLES + 1):
+        agent_off.run_cycle(c)
+
+    # Hybrid mode (same seeds)
+    agent_hy, _ = _make_hybrid_agent()
+    agent_hy.initialize()
+    for c in range(1, N_CYCLES + 1):
+        agent_hy.run_cycle(c)
+
+    total_off = agent_off.skip_count + agent_off.full_audit_count
+    total_hy  = agent_hy.skip_count  + agent_hy.full_audit_count
+    rate_off = agent_off.skip_count / max(1, total_off)
+    rate_hy  = agent_hy.skip_count  / max(1, total_hy)
+
+    assert abs(rate_off - rate_hy) <= 0.20, (
+        f"skip rate gap too large: off={rate_off:.2%} hybrid={rate_hy:.2%} "
+        f"(delta={abs(rate_off-rate_hy):.2%} > 20%); "
+        "symbolic providers should not significantly alter skip behavior"
+    )

@@ -48,7 +48,12 @@ from dreth.agent import ChainedAgent
 from dreth.ledger import DormantAlternative
 from dreth.fit import fit_var
 from dreth.functions import FUNC_LIBRARY
-from dreth.hybrid import SymbolicResidualPredictor
+from dreth.hybrid import (
+    SymbolicResidualPredictor,
+    SensitivityParentRanker,
+    DiscriminationProbeProposer,
+    FuncLibraryRouter,
+)
 
 
 # ── configuration ─────────────────────────────────────────────────────────────
@@ -444,9 +449,17 @@ def _build_and_run_dreth(
 
     # Hybrid provider setup: only install when hybrid_control != "off".
     # In "off" mode no providers are created — zero overhead, identical behavior.
+    # In "interfaces" mode all four symbolic default providers are installed;
+    # they reproduce existing behavior so metrics remain compatible.
     _residual_predictor = None
+    _parent_ranker = None
+    _probe_proposer = None
+    _expert_router = None
     if cfg.hybrid_control == "interfaces":
         _residual_predictor = SymbolicResidualPredictor()
+        _parent_ranker = SensitivityParentRanker(world)
+        _probe_proposer = DiscriminationProbeProposer()
+        _expert_router = FuncLibraryRouter()
 
     agent = ChainedAgent(
         world=world, rng=rng_a,
@@ -455,6 +468,9 @@ def _build_and_run_dreth(
         priority_audit_budget=max(1, cfg.n_vars // 2),
         consequence_weight=consequence_weight,
         residual_predictor=_residual_predictor,
+        parent_ranker=_parent_ranker,
+        probe_proposer=_probe_proposer,
+        expert_router=_expert_router,
         repair_agenda_enabled=cfg.repair_agenda_enabled,
     )
     agent.initialize()
@@ -1019,24 +1035,36 @@ def _print_aggregate(results: List[RunResult]) -> None:
     avg_passive_stress = sum(r.arch.passive_stress_count for r in ok_runs) / n
     print(f"  passive monitor: saved_iv={avg_passive_iv:.0f}  stressed={avg_passive_stress:.0f}")
 
-    _hybrid_calls = sum(r.arch.hybrid_residual_predictor_calls for r in ok_runs)
-    if _hybrid_calls > 0:
-        _hybrid_ok   = sum(r.arch.hybrid_residual_ok for r in ok_runs)
-        _hybrid_str  = sum(r.arch.hybrid_residual_stressed for r in ok_runs)
-        _agenda_tot  = sum(r.arch.hybrid_repair_agenda_items for r in ok_runs)
-        _scope_max   = max(r.arch.hybrid_repair_agenda_scope_max for r in ok_runs)
-        _scope_mean  = (
-            sum(r.arch.hybrid_repair_agenda_scope_mean * max(r.arch.hybrid_repair_agenda_items, 1)
-                for r in ok_runs if r.arch.hybrid_repair_agenda_items > 0)
-            / max(1, sum(r.arch.hybrid_repair_agenda_items for r in ok_runs if r.arch.hybrid_repair_agenda_items > 0))
-        ) if any(r.arch.hybrid_repair_agenda_items > 0 for r in ok_runs) else 0.0
+    # Print hybrid metrics whenever any provider was active, even if some counts
+    # are zero — zero counts expose wiring gaps immediately.
+    _hybrid_res_calls = sum(r.arch.hybrid_residual_predictor_calls for r in ok_runs)
+    _hybrid_pr_calls  = sum(r.arch.hybrid_parent_ranker_calls for r in ok_runs)
+    _hybrid_pp_calls  = sum(r.arch.hybrid_probe_proposer_calls for r in ok_runs)
+    _hybrid_er_calls  = sum(r.arch.hybrid_expert_router_calls for r in ok_runs)
+    _any_hybrid = _hybrid_res_calls + _hybrid_pr_calls + _hybrid_pp_calls + _hybrid_er_calls
+    if _any_hybrid > 0:
+        _hybrid_ok  = sum(r.arch.hybrid_residual_ok for r in ok_runs)
+        _hybrid_str = sum(r.arch.hybrid_residual_stressed for r in ok_runs)
         print(
-            f"  hybrid: residual_calls={_hybrid_calls}  ok={_hybrid_ok}  stressed={_hybrid_str}"
+            f"  hybrid residual_predictor: calls={_hybrid_res_calls}"
+            f"  ok={_hybrid_ok}  stressed={_hybrid_str}"
         )
+        print(
+            f"  hybrid parent_ranker:      calls={_hybrid_pr_calls}"
+            f"  probe_proposer: calls={_hybrid_pp_calls}"
+            f"  expert_router: calls={_hybrid_er_calls}"
+        )
+        _agenda_tot = sum(r.arch.hybrid_repair_agenda_items for r in ok_runs)
         if _agenda_tot > 0:
+            _scope_max  = max(r.arch.hybrid_repair_agenda_scope_max for r in ok_runs)
+            _scope_mean = (
+                sum(r.arch.hybrid_repair_agenda_scope_mean * max(r.arch.hybrid_repair_agenda_items, 1)
+                    for r in ok_runs if r.arch.hybrid_repair_agenda_items > 0)
+                / max(1, sum(r.arch.hybrid_repair_agenda_items for r in ok_runs if r.arch.hybrid_repair_agenda_items > 0))
+            ) if any(r.arch.hybrid_repair_agenda_items > 0 for r in ok_runs) else 0.0
             print(
-                f"  repair_agenda: total_pushed={_agenda_tot}  "
-                f"scope_mean={_scope_mean:.1f}  scope_max={_scope_max}"
+                f"  repair_agenda: total_pushed={_agenda_tot}"
+                f"  scope_mean={_scope_mean:.1f}  scope_max={_scope_max}"
             )
     print(f"  arch avg: route_certs={avg_rc:.1f}  audit_certs={avg_ac:.1f}  "
           f"dormant={avg_dorm:.1f}  revocations={avg_rev:.1f}")

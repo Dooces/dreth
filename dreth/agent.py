@@ -89,7 +89,7 @@ from .records import CycleRecord, FitDiagnostic
 from .summary import RunAnalyzer, SummaryRenderer
 from .hybrid import (
     ResidualPredictor, ParentRanker, ProbeProposer, ExpertRouter,
-    SymbolicResidualPredictor,
+    SymbolicResidualPredictor, SensitivityParentRanker,
 )
 from .repair_agenda import RepairAgenda, RepairAgendaItem
 
@@ -215,6 +215,7 @@ class ChainedAgent:
         probe_proposer: Optional[ProbeProposer] = None,
         expert_router: Optional[ExpertRouter] = None,
         repair_agenda_enabled: bool = False,
+        repair_agenda_ordering: str = "observe",
     ):
         """Construct agent. Initializes empty ledger, zero counters, and
         applies any provided per-var cost weight overrides."""
@@ -415,6 +416,9 @@ class ChainedAgent:
         # When enabled, each needs_audit entry also gets a RepairAgendaItem
         # with scope/authority metadata for later A*-style triage.
         self._repair_agenda_enabled: bool = repair_agenda_enabled
+        # "observe" = current topo order (default); "priority" = agenda.pop() order.
+        # Priority ordering is consequence-tier only (#SHORTCUT); A* reserved for later.
+        self._repair_agenda_ordering: str = repair_agenda_ordering
         self._repair_agenda: RepairAgenda = RepairAgenda()
 
     def _adaptive_probe_budget(self, n_hypotheses: int) -> int:
@@ -502,16 +506,71 @@ class ChainedAgent:
         }
         # P1-B: if this var has an active TiedFrontier with separating probes,
         # inject them as forced inclusions so the tie has a chance to resolve.
-        _frontier_probes = (
+        _frontier_probes: Tuple[Tuple[int, float], ...] = (
             n.tied_frontier.separating_probes
             if n.tied_frontier is not None and n.tied_frontier.separating_probes
-            else None
+            else ()
         )
+
+        # ProbeProposer: provider may suggest additional forced probes.
+        # Provider probes are merged with frontier probes; they do NOT certify
+        # anything — scoring and cert decisions remain in the standard audit path.
+        # Invalid probes (out-of-range var or value outside [0,1]) are dropped
+        # and logged as structured diagnostic events, not fatal errors.
+        _provider_probes: Tuple[Tuple[int, float], ...] = ()
+        if self._probe_proposer is not None:
+            _pp = self._probe_proposer.propose_probes(var, available, budget)
+            self._hybrid_probe_proposer_calls += 1
+            _valid: List[Tuple[int, float]] = []
+            for _iv_var, _iv_val in _pp.probes:
+                if not (0 <= _iv_var < self.world.visible_count):
+                    self.ledger.emit(LedgerEvent(
+                        type="provider_diagnostic", var=var, cycle=cycle,
+                        payload={"provider": "probe_proposer",
+                                 "event": "invalid_probe_var",
+                                 "iv_var": _iv_var, "iv_val": _iv_val},
+                    ))
+                    continue
+                if not (0.0 <= _iv_val <= 1.0):
+                    self.ledger.emit(LedgerEvent(
+                        type="provider_diagnostic", var=var, cycle=cycle,
+                        payload={"provider": "probe_proposer",
+                                 "event": "invalid_probe_val",
+                                 "iv_var": _iv_var, "iv_val": _iv_val},
+                    ))
+                    continue
+                _valid.append((_iv_var, _iv_val))
+            _provider_probes = tuple(_valid)
+
+        # Merge provider probes with frontier probes; pass None when both are empty
+        # so fit_var's default discrimination pool is used unchanged.
+        _merged_probes: Optional[Tuple[Tuple[int, float], ...]] = None
+        if _provider_probes or _frontier_probes:
+            _merged_probes = _provider_probes + _frontier_probes
+
         result = fit_var(var, self.world, self.rng, budget,
                          n.current_tolerance, available_parents=available, diag=diag_dict,
                          near_tie_margin=self.near_tie_margin,
-                         forced_probes=_frontier_probes)
+                         forced_probes=_merged_probes)
         self.total_interventions += budget
+
+        # ExpertRouter: diagnostic call only. Output is NOT used to choose parents,
+        # choose function, score hypotheses, authorize skips, or issue certs.
+        # Route metadata is stored as a structured LedgerEvent for offline analysis.
+        if self._expert_router is not None:
+            _er_context: Dict = {
+                "cycle": cycle,
+                "budget": budget,
+                "best_parents": tuple(result[0]),
+                "best_func": result[1],
+            }
+            _, _er_meta = self._expert_router.route(var, available, _er_context)
+            self._hybrid_expert_router_calls += 1
+            self.ledger.emit(LedgerEvent(
+                type="provider_diagnostic", var=var, cycle=cycle,
+                payload={"provider": "expert_router", "route_meta": _er_meta},
+            ))
+
         fd = FitDiagnostic(
             cycle=int(diag_dict["cycle"]),
             var=int(diag_dict["var"]),
@@ -2164,8 +2223,28 @@ class ChainedAgent:
         movement at all, the returned set may be smaller than M. Route certs
         (trass role) for this target are respected: positively-excluded vars
         are dropped from the result even if they score highly.
+
+        Provider path (when self._parent_ranker is set):
+          Delegates ranking to the provider. ChainedAgent still applies route-cert
+          exclusion AFTER ranking — providers must not touch certs. Intervention
+          cost is accounted here for SensitivityParentRanker (2 per candidate);
+          other providers are responsible for their own cost outside this counter.
         """
         n = self.ledger.vars[target]
+        if self._parent_ranker is not None:
+            candidates: Set[int] = {x for x in range(self.world.visible_count) if x != target}
+            ranking = self._parent_ranker.rank_parents(target, candidates, m)
+            self._hybrid_parent_ranker_calls += 1
+            # Mirror intervention cost for the default SensitivityParentRanker path,
+            # which runs 2 world calls per candidate (same as the inline loop below).
+            if isinstance(self._parent_ranker, SensitivityParentRanker):
+                self.total_interventions += 2 * len(candidates)
+            # Route-cert exclusion: providers must not apply cert logic; ChainedAgent does it here.
+            return {
+                x for x in ranking.ranked
+                if n.route_certs.get(x) is None or n.route_certs[x].role != "trass"
+            }
+        # Inline path: existing behavior unchanged when no provider is set.
         visible = self.world.visible_count
         scored: List[Tuple[float, int]] = []
         for x in range(visible):
@@ -2848,7 +2927,17 @@ class ChainedAgent:
                     },
                 ))
 
-        priority_order = self._cost_biased_topo_audit_order(needs_audit_set)
+        # Audit order: priority mode uses RepairAgenda item priority (low value = urgent);
+        # observe mode uses topological+tractability order (default, behavior unchanged).
+        # Priority mode is consequence-tier only (#SHORTCUT — not full A* cost/benefit).
+        if self._repair_agenda_enabled and self._repair_agenda_ordering == "priority":
+            priority_order = [
+                _item.target_var
+                for _item in sorted(self._repair_agenda._items, key=lambda i: i.priority)
+                if _item.target_var in needs_audit_set
+            ]
+        else:
+            priority_order = self._cost_biased_topo_audit_order(needs_audit_set)
         budget = self.priority_audit_budget
 
         for i, var in enumerate(priority_order):
