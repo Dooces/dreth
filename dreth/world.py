@@ -26,9 +26,11 @@ from __future__ import annotations
 # weight seeding) is active for cost-dispatch demonstrations.
 # ─────────────────────────────────────────────────────────────────────────────
 
+import copy
+import math
 import random
 from dataclasses import dataclass
-from typing import Dict, List, Mapping, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from .functions import State, FUNC_LIBRARY, HIDDEN_FUNC_LIBRARY
 
@@ -106,6 +108,14 @@ class CausalWorld:
         self.state: State = tuple(rng.random() for _ in range(n_vars))
         self.hidden_log: List[HiddenMutation] = []
         self.visible_count: int = initial_visible if initial_visible is not None else n_vars
+        self._blind_challenge_enabled: bool = False
+        self._blind_challenge_manifest: Optional[Dict[str, Any]] = None
+        self._blind_specs: List[Dict[str, Any]] = []
+        self._blind_side_effects: List[Dict[str, Any]] = []
+        self._blind_latents: List[Dict[str, Any]] = []
+        self._blind_history: List[State] = []
+        self._blind_cycle: int = 0
+        self._blind_max_lag: int = 1
         for _ in range(3):
             self._step_world()
 
@@ -146,6 +156,9 @@ class CausalWorld:
         """Advance state by one time step. Each variable's new value is
         func(parent values from current state) + Gaussian noise, clipped to
         [0,1]. Mutates self.state."""
+        if self._blind_challenge_enabled:
+            self._step_blind_challenge_world()
+            return
         new = []
         for i in range(self.n_vars):
             par_vals = [self.state[p] for p in self.parents[i]]
@@ -161,6 +174,8 @@ class CausalWorld:
         full DAG and adding fresh noise. Does NOT mutate self.state. The
         agent uses this as its only observation channel — every probe is
         an intervention call."""
+        if self._blind_challenge_enabled:
+            return self._predict_blind_challenge({var: val})
         forced = tuple(val if i == var else self.state[i] for i in range(self.n_vars))
         new = []
         for i in range(self.n_vars):
@@ -175,6 +190,8 @@ class CausalWorld:
         """Return the next state with all vars in `forced` simultaneously set.
         Semantics identical to predict_under_intervention but for multiple
         forced vars at once. Used by the joint false-trass test (T4.2)."""
+        if self._blind_challenge_enabled:
+            return self._predict_blind_challenge(forced)
         forced_state = tuple(forced.get(i, self.state[i]) for i in range(self.n_vars))
         new = []
         for i in range(self.n_vars):
@@ -199,6 +216,8 @@ class CausalWorld:
         from a noise/randomness perspective: same single noise draw applied
         to the target's output. Other vars not computed.
         """
+        if self._blind_challenge_enabled:
+            return self._predict_blind_challenge({iv_var: iv_val})[target_var]
         if iv_var == target_var:
             par_vals = [self.state[p] for p in self.parents[target_var]]
         else:
@@ -394,6 +413,283 @@ class CausalWorld:
             self._step_world()
         self._rs_initialized: bool = True
 
+    def _init_blind_challenge(self) -> None:
+        """Generate a seed-driven blind stress world.
+
+        The agent still sees only clipped scalar observations and intervention
+        responses. The generated manifest is diagnostic-only and returned only
+        by debug_blind_challenge_manifest().
+        """
+        if self._blind_challenge_enabled:
+            return
+
+        n = self.n_vars
+        self.visible_count = n
+        self._blind_cycle = 0
+        self._blind_history = [tuple(self.state)]
+        self._blind_latents = []
+        self._blind_specs = []
+        self._blind_side_effects = []
+
+        n_latents = max(2, min(7, 2 + n // 9))
+        for lid in range(n_latents):
+            kind = self.rng.choice(["sine", "saw", "pulse", "drift"])
+            period = self.rng.randint(45, 420)
+            self._blind_latents.append({
+                "id": lid,
+                "kind": kind,
+                "period": period,
+                "phase": round(self.rng.random(), 6),
+                "amplitude": round(0.12 + self.rng.random() * 0.35, 6),
+                "center": round(0.35 + self.rng.random() * 0.3, 6),
+                "drift": round((self.rng.random() - 0.5) * 0.004, 6),
+            })
+
+        symbolic_funcs = ["LOW", "HIGH", "TINY", "FIRST", "MEAN", "MAX", "MIN", "PROD", "DIFF"]
+        relation_types = [
+            "symbolic",
+            "smooth_nonlinear",
+            "latent_additive",
+            "delayed",
+            "proxy_confounded",
+            "dense_mixed",
+            "weak_noisy",
+        ]
+
+        max_lag = 1
+        for i in range(n):
+            lower = list(range(i))
+            if not lower or self.rng.random() < 0.12:
+                rel_type = self.rng.choice(["symbolic", "latent_additive", "weak_noisy"])
+                parent_count = 0
+            else:
+                rel_type = self.rng.choice(relation_types)
+                if rel_type == "dense_mixed" and len(lower) >= 3:
+                    parent_count = self.rng.randint(3, min(6, len(lower)))
+                elif rel_type in {"delayed", "proxy_confounded"}:
+                    parent_count = self.rng.randint(1, min(4, len(lower)))
+                else:
+                    parent_count = self.rng.randint(1, min(3, len(lower)))
+            parents = sorted(self.rng.sample(lower, parent_count)) if parent_count else []
+            latent_count = self.rng.randint(0, min(2, n_latents))
+            if rel_type in {"latent_additive", "proxy_confounded"}:
+                latent_count = max(1, latent_count)
+            latents = sorted(self.rng.sample(range(n_latents), latent_count)) if latent_count else []
+            weights = [round(self.rng.uniform(-1.2, 1.2), 6) for _ in parents]
+            latent_weights = [round(self.rng.uniform(-0.8, 0.8), 6) for _ in latents]
+            bias = round(self.rng.uniform(-0.35, 0.35), 6)
+            gain = round(self.rng.uniform(0.65, 2.4), 6)
+            func = self.rng.choice(symbolic_funcs if parents else ["LOW", "HIGH", "TINY"])
+            delayed_edges = []
+            if parents and (rel_type == "delayed" or self.rng.random() < 0.22):
+                for pidx in self.rng.sample(parents, self.rng.randint(1, min(2, len(parents)))):
+                    lag = self.rng.randint(1, 9)
+                    max_lag = max(max_lag, lag)
+                    delayed_edges.append({
+                        "parent": pidx,
+                        "lag": lag,
+                        "weight": round(self.rng.uniform(-1.0, 1.0), 6),
+                    })
+            phase = None
+            if self.rng.random() < 0.34:
+                phase = {
+                    "latent": self.rng.randrange(n_latents),
+                    "period": self.rng.randint(70, 520),
+                    "flip_weight": round(self.rng.uniform(-1.0, 1.0), 6),
+                    "bias_shift": round(self.rng.uniform(-0.28, 0.28), 6),
+                }
+            noise_scale = round(self.noise_sigma * self.rng.uniform(0.4, 2.8), 6)
+            if rel_type == "weak_noisy":
+                noise_scale = round(max(noise_scale, 0.035 + self.rng.random() * 0.04), 6)
+                gain = round(gain * self.rng.uniform(0.12, 0.35), 6)
+
+            self._blind_specs.append({
+                "var": i,
+                "relation_type": rel_type,
+                "parents": parents,
+                "weights": weights,
+                "func": func,
+                "latents": latents,
+                "latent_weights": latent_weights,
+                "bias": bias,
+                "gain": gain,
+                "delayed_edges": delayed_edges,
+                "phase": phase,
+                "noise_scale": noise_scale,
+                "agent_func_compatible": rel_type == "symbolic" and len(parents) <= 2,
+            })
+
+        side_effect_count = self.rng.randint(max(1, n // 12), max(2, n // 5))
+        for _ in range(side_effect_count):
+            source = self.rng.randrange(n)
+            possible_targets = [v for v in range(n) if v != source]
+            target_count = self.rng.randint(1, min(3, len(possible_targets)))
+            self._blind_side_effects.append({
+                "source": source,
+                "targets": sorted(self.rng.sample(possible_targets, target_count)),
+                "trigger": round(self.rng.uniform(0.15, 0.85), 6),
+                "direction": self.rng.choice(["above", "below"]),
+                "effect": round(self.rng.uniform(-0.22, 0.22), 6),
+                "mode": self.rng.choice(["additive", "damped"]),
+            })
+
+        self.parents = [list(spec["parents"]) for spec in self._blind_specs]
+        self.funcs = [
+            spec["func"] if spec["relation_type"] == "symbolic" else spec["relation_type"].upper()
+            for spec in self._blind_specs
+        ]
+        self._blind_max_lag = max_lag
+        self._blind_challenge_manifest = {
+            "version": 1,
+            "n_vars": n,
+            "interface": "observed_scalar_clipped_0_1",
+            "latents": copy.deepcopy(self._blind_latents),
+            "relations": copy.deepcopy(self._blind_specs),
+            "intervention_side_effects": copy.deepcopy(self._blind_side_effects),
+        }
+        self._blind_challenge_enabled = True
+        for _ in range(max_lag + 3):
+            self._step_blind_challenge_world()
+
+    def _blind_latent_values(self, cycle: int) -> List[float]:
+        values = []
+        for spec in self._blind_latents:
+            period = max(1, int(spec["period"]))
+            t = (cycle / period + float(spec["phase"])) % 1.0
+            amp = float(spec["amplitude"])
+            center = float(spec["center"]) + float(spec["drift"]) * cycle
+            kind = spec["kind"]
+            if kind == "sine":
+                raw = center + amp * math.sin(2.0 * math.pi * t)
+            elif kind == "saw":
+                raw = center + amp * (2.0 * t - 1.0)
+            elif kind == "pulse":
+                raw = center + (amp if t < 0.18 else -0.35 * amp)
+            else:
+                raw = center + amp * math.sin(math.pi * t) + float(spec["drift"]) * cycle
+            values.append(max(0.0, min(1.0, raw)))
+        return values
+
+    def _delayed_value(self, parent: int, lag: int, fallback: State) -> float:
+        if lag <= 0 or len(self._blind_history) < lag:
+            return fallback[parent]
+        return self._blind_history[-lag][parent]
+
+    def _eval_blind_spec(
+        self,
+        spec: Dict[str, Any],
+        forced_state: State,
+        latents: List[float],
+        include_noise: bool,
+    ) -> float:
+        parents = spec["parents"]
+        vals = [forced_state[p] for p in parents]
+        rel_type = spec["relation_type"]
+        bias = float(spec["bias"])
+        gain = float(spec["gain"])
+        latent_term = sum(
+            float(w) * (latents[lid] - 0.5)
+            for lid, w in zip(spec["latents"], spec["latent_weights"])
+        )
+        phase = spec.get("phase")
+        if phase is not None:
+            phase_period = max(1, int(phase["period"]))
+            phase_on = ((self._blind_cycle // phase_period) % 2) == 1
+            if phase_on:
+                bias += float(phase["bias_shift"])
+                gain += float(phase["flip_weight"])
+
+        if rel_type == "symbolic":
+            fn = HIDDEN_FUNC_LIBRARY[spec["func"]]
+            raw = fn(vals)
+        elif rel_type == "smooth_nonlinear":
+            drive = bias + latent_term + sum(float(w) * (v - 0.5) for w, v in zip(spec["weights"], vals))
+            raw = 1.0 / (1.0 + math.exp(-gain * drive))
+        elif rel_type == "latent_additive":
+            base = sum(vals) / len(vals) if vals else 0.5
+            raw = base + bias + latent_term
+        elif rel_type == "delayed":
+            drive = bias + latent_term
+            for edge in spec["delayed_edges"]:
+                drive += float(edge["weight"]) * (
+                    self._delayed_value(edge["parent"], edge["lag"], forced_state) - 0.5
+                )
+            drive += sum(float(w) * (v - 0.5) for w, v in zip(spec["weights"], vals))
+            raw = 0.5 + 0.5 * math.tanh(gain * drive)
+        elif rel_type == "proxy_confounded":
+            parent_term = sum(float(w) * v for w, v in zip(spec["weights"], vals))
+            raw = 0.35 + 0.35 * parent_term + 0.55 * latent_term + bias
+        elif rel_type == "dense_mixed":
+            weighted = sum(float(w) * (v - 0.5) for w, v in zip(spec["weights"], vals))
+            interaction = 0.0
+            if len(vals) >= 2:
+                interaction = (vals[0] - 0.5) * (vals[-1] - 0.5)
+            raw = 0.5 + 0.5 * math.tanh(gain * (weighted + latent_term + bias + interaction))
+        else:  # weak_noisy
+            weak = sum(float(w) * (v - 0.5) for w, v in zip(spec["weights"], vals))
+            raw = 0.5 + gain * weak + 0.35 * latent_term + bias * 0.25
+
+        for edge in spec["delayed_edges"]:
+            if rel_type != "delayed":
+                raw += 0.08 * float(edge["weight"]) * (
+                    self._delayed_value(edge["parent"], edge["lag"], forced_state) - 0.5
+                )
+        if include_noise:
+            raw += self.rng.gauss(0.0, float(spec["noise_scale"]))
+        return max(0.0, min(1.0, raw))
+
+    def _apply_blind_side_effects(
+        self,
+        values: List[float],
+        forced: Mapping[int, float],
+    ) -> None:
+        if not forced:
+            return
+        for rule in self._blind_side_effects:
+            source = int(rule["source"])
+            if source not in forced:
+                continue
+            forced_val = float(forced[source])
+            trigger = float(rule["trigger"])
+            fires = forced_val >= trigger if rule["direction"] == "above" else forced_val <= trigger
+            if not fires:
+                continue
+            effect = float(rule["effect"])
+            for target in rule["targets"]:
+                if rule["mode"] == "damped":
+                    values[target] = values[target] * (1.0 - abs(effect)) + max(0.0, effect)
+                else:
+                    values[target] += effect
+                values[target] = max(0.0, min(1.0, values[target]))
+
+    def _predict_blind_challenge(self, forced: Mapping[int, float]) -> State:
+        forced_state = tuple(
+            max(0.0, min(1.0, float(forced.get(i, self.state[i]))))
+            for i in range(self.n_vars)
+        )
+        latents = self._blind_latent_values(self._blind_cycle)
+        values = [
+            self._eval_blind_spec(spec, forced_state, latents, include_noise=True)
+            for spec in self._blind_specs
+        ]
+        self._apply_blind_side_effects(values, forced)
+        return tuple(max(0.0, min(1.0, v)) for v in values)
+
+    def _step_blind_challenge_world(self) -> None:
+        self._blind_cycle += 1
+        self._blind_history.append(tuple(self.state))
+        if len(self._blind_history) > self._blind_max_lag + 2:
+            self._blind_history = self._blind_history[-(self._blind_max_lag + 2):]
+        self.state = self._predict_blind_challenge({})
+
+    def debug_blind_challenge_manifest(self) -> Dict[str, Any]:
+        """Return generated blind-world facts for post-run analysis only."""
+        if self._blind_challenge_manifest is None:
+            return {}
+        manifest = copy.deepcopy(self._blind_challenge_manifest)
+        manifest["cycles_elapsed"] = self._blind_cycle
+        return manifest
+
     def prepare_schedule(self, schedule: str, settle_cycles: int = 25) -> None:
         """Pre-install schedule-specific subgraph structure BEFORE the agent is
         created. Call this after CausalWorld() but before ChainedAgent.initialize()
@@ -406,6 +702,8 @@ class CausalWorld:
         elif schedule == "regime_switch":
             if not getattr(self, "_rs_initialized", False):
                 self._init_regime_switch(settle_cycles)
+        elif schedule == "blind_challenge":
+            self._init_blind_challenge()
 
     def perturb_by_schedule(self, cycle: int, schedule: str,
                             settle_cycles: int = 25,
@@ -435,7 +733,35 @@ class CausalWorld:
                          rewire all cluster members, producing multi-var co-failure
                          bursts that the regime register can confirm and commission
                          a cluster-level sentinel for.
+          blind_challenge: seed-generated scalar world with hidden latents,
+                           delayed/proxy/dense/weak relations, recurring phases,
+                           and intervention side effects. Debug facts are exposed
+                           only via debug_blind_challenge_manifest().
         """
+        if schedule == "blind_challenge":
+            if not self._blind_challenge_enabled:
+                self._init_blind_challenge()
+            self._step_blind_challenge_world()
+            phase_hits = []
+            for spec in self._blind_specs:
+                phase = spec.get("phase")
+                if phase is None:
+                    continue
+                period = max(1, int(phase["period"]))
+                if self._blind_cycle % period == 0:
+                    phase_hits.append(spec["var"])
+            if phase_hits:
+                m = HiddenMutation(
+                    cycle=cycle,
+                    kind="BLIND_PHASE",
+                    description=f"BLIND_PHASE vars={phase_hits[:8]} count={len(phase_hits)}",
+                    rule_changed=True,
+                    affected_var=phase_hits[0],
+                )
+            else:
+                m = HiddenMutation(cycle, "VALUE", f"blind_step c{cycle}", False, -1)
+            self.hidden_log.append(m)
+            return m
         if schedule == "shaped":
             structural = {2:"edge", 5:"func", 8:"edge", 11:"func", 13:"edge"}
             kind = structural.get(cycle, "value")

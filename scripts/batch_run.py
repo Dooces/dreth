@@ -84,6 +84,7 @@ _ALLOWED_SCHEDULES = (
     "rare_catastrophe",
     "regime_switch",
     "false_trass",
+    "blind_challenge",
 )
 _DEFAULT_PARENT_RANKER = "sensitivity"
 _DEFAULT_PROBE_PROPOSER = "none"
@@ -192,6 +193,7 @@ class RunConfig:
     relative_authority_frontier_warmup_cycles: Optional[int] = None
     relative_authority_frontier_max_candidates: int = 20
     relative_authority_frontier_max_depth: int = 2
+    challenge_blind: bool = False
 
 
 # ── per-run result ─────────────────────────────────────────────────────────────
@@ -456,6 +458,8 @@ class RunResult:
     regime_summary: str = ""
     # Diagnostic-only cost/quality score.
     quality: Optional[RunQualityScore] = None
+    # Blind challenge post-run debug/evaluation payload. Never consulted by the agent.
+    blind_challenge_evaluation: Optional[Dict[str, Any]] = None
 
 
 # ── sparse-cached-refit baseline agent ────────────────────────────────────────
@@ -818,6 +822,7 @@ def _build_and_run_baseline(cfg: RunConfig) -> Tuple[SparseCachedRefitAgent, Cau
     initial_visible = 1 if cfg.schedule == "incremental" else cfg.n_vars
     world = CausalWorld(cfg.n_vars, rng_w, noise_sigma=cfg.noise_sigma,
                         initial_visible=initial_visible)
+    world.prepare_schedule(cfg.schedule, cfg.settle_cycles)
     agent = SparseCachedRefitAgent(world=world, rng=rng_a, intervention_budget=10)
     agent.initialize()
     for cycle in range(1, cfg.cycles + 1):
@@ -1107,6 +1112,81 @@ def _check_invariants(arch: ArchMetrics) -> List[str]:
     return violations
 
 
+def _blind_challenge_evaluation(agent: ChainedAgent, world: CausalWorld) -> Dict[str, Any]:
+    """Build post-run blind-challenge comparison data.
+
+    This is intentionally outside ChainedAgent. It reads the debug manifest only
+    after the run has completed.
+    """
+    manifest = world.debug_blind_challenge_manifest()
+    relations = manifest.get("relations") if isinstance(manifest, dict) else []
+    relation_by_var = {
+        int(rel.get("var")): rel
+        for rel in relations or []
+        if isinstance(rel, dict) and rel.get("var") is not None
+    }
+    per_var: List[Dict[str, Any]] = []
+    learned_overlap = 0
+    over_certified = 0
+    withheld = 0
+    uncertain = 0
+    for var in range(world.visible_count):
+        n = agent.ledger.vars[var]
+        rel = relation_by_var.get(var, {})
+        truth_parents = set(int(p) for p in rel.get("parents", []) or [])
+        delayed_parents = {
+            int(edge.get("parent"))
+            for edge in rel.get("delayed_edges", []) or []
+            if isinstance(edge, dict) and edge.get("parent") is not None
+        }
+        truth_scope = truth_parents | delayed_parents
+        learned_parents = set(int(p) for p in n.parents)
+        overlap = sorted(learned_parents & truth_scope)
+        if overlap:
+            learned_overlap += 1
+        role = n.role_for("skip")
+        certified_like = n.status == "certified" or bool(n.authoritative)
+        non_root = bool(truth_scope or rel.get("latents") or rel.get("relation_type") != "symbolic")
+        if certified_like and non_root and not overlap and learned_parents:
+            over_certified += 1
+        if role == "untested" or n.status in {"uncertain", "proposed"}:
+            uncertain += 1
+        if role in {"untested", "noise_floor"} or not n.authoritative:
+            withheld += 1
+        per_var.append({
+            "var": var,
+            "relation_type": rel.get("relation_type"),
+            "truth_parents": sorted(truth_parents),
+            "truth_delayed_parents": sorted(delayed_parents),
+            "truth_latents": list(rel.get("latents", []) or []),
+            "agent_func_compatible": bool(rel.get("agent_func_compatible")),
+            "learned_parents": sorted(learned_parents),
+            "learned_func": n.func,
+            "learned_parent_overlap": overlap,
+            "status": n.status,
+            "skip_role": role,
+            "authoritative": bool(n.authoritative),
+            "sentinel_count": len(n.sentinels),
+            "full_audits": n.full_audits,
+            "skip_count": n.skip_count,
+            "route_certs": len(n.route_certs),
+            "dormant_alternatives": len(n.dormant_alternatives),
+            "revoked_certs": sum(1 for cert in n.certificates.values() if cert.revoked_by),
+        })
+    return {
+        "blind_challenge_manifest": manifest,
+        "blind_challenge_behavior": {
+            "per_var": per_var,
+            "learned_overlap_vars": learned_overlap,
+            "over_certified_suspect_vars": over_certified,
+            "withheld_or_non_authoritative_vars": withheld,
+            "uncertain_or_proposed_vars": uncertain,
+            "side_effect_rule_count": len(manifest.get("intervention_side_effects", []) or []),
+            "latent_count": len(manifest.get("latents", []) or []),
+        },
+    }
+
+
 def _attach_relative_authority_metrics(
     arch: ArchMetrics,
     agent: ChainedAgent,
@@ -1273,6 +1353,8 @@ def _run_one(cfg: RunConfig) -> RunResult:
             tier=tier,
             regime_summary=regime_summary,
         )
+        if cfg.schedule == "blind_challenge":
+            result.blind_challenge_evaluation = _blind_challenge_evaluation(agent, world)
     except Exception as exc:
         elapsed = time.monotonic() - t0
         return RunResult(
@@ -2541,6 +2623,9 @@ def main():
                    help="maximum candidates in diagnostic temporal graph frontier (default: 20)")
     p.add_argument("--relative-authority-frontier-max-depth", type=int, default=2,
                    help="maximum BFS depth for diagnostic temporal graph frontier (default: 2)")
+    p.add_argument("--challenge-blind", action="store_true",
+                   help=("for blind_challenge, keep generated manifest details out of "
+                         "run output; debug facts are written only to JSONL evaluation fields"))
     args = p.parse_args()
     quality_weights = QualityWeights(
         audit_weight=args.quality_audit_weight,
@@ -2628,7 +2713,8 @@ def main():
                   relative_authority_frontier_temporal_report=args.relative_authority_frontier_temporal_report,
                   relative_authority_frontier_warmup_cycles=args.relative_authority_frontier_warmup_cycles,
                   relative_authority_frontier_max_candidates=args.relative_authority_frontier_max_candidates,
-                  relative_authority_frontier_max_depth=args.relative_authority_frontier_max_depth)
+                  relative_authority_frontier_max_depth=args.relative_authority_frontier_max_depth,
+                  challenge_blind=args.challenge_blind)
         for schedule in schedule_list
         for v in var_list
         for c in cycle_list
@@ -2673,6 +2759,8 @@ def main():
             f"(warmup={_warmup_label},cap={args.relative_authority_frontier_max_candidates},"
             f"depth={args.relative_authority_frontier_max_depth})"
         )
+    if args.challenge_blind:
+        mode += " +challenge-blind"
     print(f"dreth arch-test{mode}: {total} runs | "
           f"vars={var_list} cycles={cycle_list} seeds={seed_list} "
           f"schedule={schedule_list}", flush=True)
@@ -2719,9 +2807,17 @@ def main():
                     "probe_proposer": r.config.probe_proposer,
                     "elapsed": round(r.elapsed, 3),
                     "ok": r.ok,
+                    "recorded_cycles": r.recorded_cycles,
                     "skip_pct": round(r.skip_pct, 2),
+                    "trass_skips": r.trass_skips,
+                    "sentinel_skips": r.sentinel_skips,
+                    "compression_skips": r.compression_skips,
                     "interventions": r.interventions,
                     "full_audits": r.full_audits,
+                    "drift_localized": r.drift_localized,
+                    "drift_total": r.drift_total,
+                    "certified": r.certified,
+                    "trass_status": r.trass_status,
                     "route_certs_total": r.arch.route_certs_total,
                     "route_trass": r.arch.route_trass,
                     "audit_certs": r.arch.vars_with_audit_cert,
@@ -2729,6 +2825,9 @@ def main():
                     "revival_total": r.arch.revival_total,
                     "frontier_collapses": r.arch.frontier_collapses,
                     "frontier_cleared": r.arch.frontier_cleared,
+                    "vars_open_novelty": r.arch.vars_open_novelty,
+                    "vars_in_backoff": r.arch.vars_in_backoff,
+                    "passive_stress_count": r.arch.passive_stress_count,
                     "shadow_key_total": r.arch.shadow_key_total,
                     "shadow_key_candidate_safe": r.arch.shadow_key_candidate_safe,
                     "shadow_key_revoked": r.arch.shadow_key_revoked,
@@ -2855,6 +2954,8 @@ def main():
                         "max_candidates": r.arch.temporal_frontier_max_candidates,
                         "max_depth": r.arch.temporal_frontier_max_depth,
                     })
+                if r.blind_challenge_evaluation is not None:
+                    rec["evaluation"] = r.blind_challenge_evaluation
                 if r.baseline and r.baseline.ok:
                     rec["baseline"] = {
                         "elapsed": round(r.baseline.elapsed, 3),

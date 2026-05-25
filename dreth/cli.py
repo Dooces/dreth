@@ -9,6 +9,7 @@ from __future__ import annotations
 #   periodic_shifts  — regular structural changes at fixed intervals
 #   novelty          — introduces a SIN variable to test library-gap detection
 #   incremental      — reveals one variable at a time with settle_cycles gaps
+#   blind_challenge  — seed-generated blind procedural stress world
 # ─────────────────────────────────────────────────────────────────────────────
 
 import argparse
@@ -36,12 +37,16 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--noise-sigma", type=float, default=0.02)
     p.add_argument("--schedule",
                    choices=["shaped", "periodic_shifts", "novelty", "incremental",
-                            "rare_catastrophe"],
+                            "rare_catastrophe", "blind_challenge"],
                    default="shaped",
                    help="incremental: introduce one variable at a time, "
                         "with `settle_cycles` of value drift between reveals; "
                         "rare_catastrophe: value drift each cycle with rare_prob "
-                        "chance of structural mutation on rare_var")
+                        "chance of structural mutation on rare_var; "
+                        "blind_challenge: seed-generated hidden procedural world")
+    p.add_argument("--challenge-blind", action="store_true",
+                   help=("for blind_challenge, do not print generated manifest "
+                         "details during the run"))
     p.add_argument("--rare-prob", type=float, default=0.02,
                    help="probability per cycle of catastrophic mutation in "
                         "rare_catastrophe schedule (default 0.02)")
@@ -349,6 +354,7 @@ def run() -> None:
     initial_visible = 1 if args.schedule == "incremental" else args.n_vars
     world = CausalWorld(args.n_vars, rng_w, noise_sigma=args.noise_sigma,
                         initial_visible=initial_visible)
+    world.prepare_schedule(args.schedule, args.settle_cycles)
     salience_targets = _parse_salience_targets(args.salience_targets, args.n_vars)
     agent = ChainedAgent(
         world=world, rng=rng_a,
