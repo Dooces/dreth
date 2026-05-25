@@ -496,3 +496,119 @@ def test_active_sentinel_false_ok_accounting():
     fok   = agent._shadow_false_ok_vs_symbolic
     fstr  = agent._shadow_false_stress_vs_symbolic
     assert agree + fok + fstr == calls
+
+
+# ── calibrator params are passed through ─────────────────────────────────────
+
+def test_calibration_params_passthrough():
+    """Construct calibrator with specific params; assert behavior reflects them."""
+    cal = OnlineResidualCalibrator(window=3, min_samples=2, conservative_factor=0.8)
+    pred = ShadowLearnedResidualPredictor(cal)
+
+    # 1 sample < min_samples=2 → insufficient
+    cal.update("MAX", 0.001)
+    result = pred.predict_shadow(var=0, func="MAX", tolerance=0.1)
+    assert pred._last_call_insufficient, "1 sample < min_samples=2 → must be insufficient"
+    assert result.stressed and not result.ok
+
+    # 2nd sample meets min_samples=2 → sufficient; tiny residuals → ok
+    cal.update("MAX", 0.001)
+    pred2 = ShadowLearnedResidualPredictor(cal)
+    result2 = pred2.predict_shadow(var=0, func="MAX", tolerance=0.1)
+    assert not pred2._last_call_insufficient, "2 samples == min_samples=2 → sufficient"
+    assert result2.ok, "upper_bound<<tolerance*0.8 → ok"
+
+    # window=3: feed 4 samples, oldest evicted, large outlier stays in window
+    cal3 = OnlineResidualCalibrator(window=3, min_samples=2, conservative_factor=0.8)
+    for _ in range(3):
+        cal3.update("F", 0.001)
+    cal3.update("F", 1.0)  # 4th sample; oldest 0.001 evicted → window=[0.001, 0.001, 1.0]
+    ok3, stressed3, _ = cal3.predict("F", 0.1)
+    assert stressed3, "large outlier in window=3 → stressed (rolling, not cumulative)"
+
+
+# ── sweep parser ──────────────────────────────────────────────────────────────
+
+def test_sweep_parser():
+    """_parse_float_list and _parse_int_list produce correct typed lists."""
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from scripts.batch_run import _parse_float_list, _parse_int_list
+
+    assert _parse_float_list("0.4,0.8") == [0.4, 0.8]
+    assert _parse_float_list("1.0")     == [1.0]
+    assert _parse_int_list("10,50")     == [10, 50]
+    assert _parse_int_list("100")       == [100]
+
+
+# ── sweep mode does not change authority ──────────────────────────────────────
+
+def test_sweep_no_authority():
+    """Two-setting sweep passes invariants; behavior is identical across shadow params."""
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from scripts.batch_run import (
+        RunConfig, _build_and_run_dreth, _check_invariants, _extract_arch_metrics,
+    )
+
+    base_skips  = None
+    base_audits = None
+
+    for factor, ms, w in [(0.4, 2, 10), (0.8, 2, 10)]:
+        cfg = RunConfig(
+            n_vars=5, cycles=30, seed=42,
+            schedule="incremental",
+            settle_cycles=8,
+            noise_sigma=0.02,
+            shadow_residual="online",
+            shadow_conservative_factor=factor,
+            shadow_min_samples=ms,
+            shadow_window=w,
+        )
+        agent, world = _build_and_run_dreth(cfg)
+        arch = _extract_arch_metrics(agent, world)
+        viols = _check_invariants(arch)
+        assert not viols, f"invariant violations with factor={factor}: {viols}"
+        assert arch.shadow_residual_calls > 0, f"shadow must fire (factor={factor})"
+
+        if base_skips is None:
+            base_skips  = agent.skip_count
+            base_audits = agent.full_audit_count
+        else:
+            assert agent.skip_count == base_skips, (
+                f"skip_count changed across shadow params: {agent.skip_count} vs {base_skips}"
+            )
+            assert agent.full_audit_count == base_audits, (
+                f"full_audit_count changed: {agent.full_audit_count} vs {base_audits}"
+            )
+
+
+# ── ranking prefers zero false-ok before higher coverage ─────────────────────
+
+def test_sweep_ranking_prefers_zero_false_ok():
+    """Ranking puts zero false_ok_vs_active first, even when coverage is lower."""
+    stats = [
+        {
+            "false_ok_vs_active": 1, "false_ok_vs_symbolic": 0,
+            "would_save_iv": 100, "false_stress_vs_symbolic": 0,
+        },
+        {
+            "false_ok_vs_active": 0, "false_ok_vs_symbolic": 5,
+            "would_save_iv": 10, "false_stress_vs_symbolic": 20,
+        },
+    ]
+    ranked = sorted(
+        stats,
+        key=lambda s: (
+            s["false_ok_vs_active"],
+            s["false_ok_vs_symbolic"],
+            -s["would_save_iv"],
+            s["false_stress_vs_symbolic"],
+        ),
+    )
+    assert ranked[0]["false_ok_vs_active"] == 0, (
+        "zero false_ok_vs_active must rank first regardless of higher coverage"
+    )
+    assert ranked[1]["false_ok_vs_active"] == 1

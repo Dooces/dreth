@@ -31,6 +31,7 @@ Usage:
 """
 
 import argparse
+import itertools
 import json
 import random
 import sys
@@ -57,6 +58,15 @@ from dreth.hybrid import (
 from dreth.learned_residual import ShadowLearnedResidualPredictor, OnlineResidualCalibrator
 
 
+# ── sweep parser utilities ─────────────────────────────────────────────────────
+
+def _parse_float_list(s: str) -> List[float]:
+    return [float(x.strip()) for x in s.split(",")]
+
+def _parse_int_list(s: str) -> List[int]:
+    return [int(x.strip()) for x in s.split(",")]
+
+
 # ── configuration ─────────────────────────────────────────────────────────────
 
 @dataclass
@@ -73,6 +83,9 @@ class RunConfig:
     hybrid_control: str = "off" # "off" | "interfaces"
     repair_agenda_enabled: bool = False
     shadow_residual: str = "off"  # "off" | "online"
+    shadow_conservative_factor: float = 0.4
+    shadow_min_samples: int = 50
+    shadow_window: int = 200
 
 
 # ── per-run result ─────────────────────────────────────────────────────────────
@@ -479,7 +492,13 @@ def _build_and_run_dreth(
     _shadow_predictor = None
     _shadow_enabled = False
     if cfg.shadow_residual == "online":
-        _shadow_predictor = ShadowLearnedResidualPredictor(OnlineResidualCalibrator())
+        _shadow_predictor = ShadowLearnedResidualPredictor(
+            OnlineResidualCalibrator(
+                conservative_factor=cfg.shadow_conservative_factor,
+                min_samples=cfg.shadow_min_samples,
+                window=cfg.shadow_window,
+            )
+        )
         _shadow_enabled = True
 
     agent = ChainedAgent(
@@ -991,6 +1010,104 @@ def _print_tier_aggregate(ok_runs: List[RunResult]) -> None:
         print(f"  CW ON  avg promo   {avg_pr0:5.1f}   {avg_pr1:9.1f}  {avg_pr2:8.1f}  ← should be > CW OFF for T1/T2")
 
 
+def _print_shadow_calibration_summary(results: List[RunResult]) -> None:
+    """Print per-parameter-combo shadow metrics and a diagnostic ranking.
+
+    Only called in sweep mode (multiple factor/min_samples/window values).
+    Groups runs by (conservative_factor, min_samples, window), aggregates shadow
+    counters, computes derived rates, then ranks combos.
+    """
+    groups: Dict[Tuple, List[RunResult]] = {}
+    for r in results:
+        if not r.ok or r.config.shadow_residual != "online":
+            continue
+        key = (
+            r.config.shadow_conservative_factor,
+            r.config.shadow_min_samples,
+            r.config.shadow_window,
+        )
+        if key not in groups:
+            groups[key] = []
+        groups[key].append(r)
+
+    if not groups:
+        return
+
+    print()
+    print("── shadow calibration sweep ────────────────────────────────────────")
+
+    combo_stats = []
+    for key in sorted(groups):
+        factor, min_samples, window = key
+        runs = groups[key]
+        calls    = sum(r.arch.shadow_residual_calls for r in runs)
+        ok       = sum(r.arch.shadow_residual_ok for r in runs)
+        stressed = sum(r.arch.shadow_residual_stressed for r in runs)
+        insuf    = sum(r.arch.shadow_residual_insufficient for r in runs)
+        agree    = sum(r.arch.shadow_agree_symbolic for r in runs)
+        fok_sym  = sum(r.arch.shadow_false_ok_vs_symbolic for r in runs)
+        fst_sym  = sum(r.arch.shadow_false_stress_vs_symbolic for r in runs)
+        save_iv  = sum(r.arch.shadow_would_save_iv for r in runs)
+        miss_sym = sum(r.arch.shadow_would_miss_symbolic_stress for r in runs)
+        fok_act  = sum(r.arch.shadow_false_ok_vs_active_sentinel for r in runs)
+        miss_act = sum(r.arch.shadow_would_miss_active_failure for r in runs)
+
+        coverage_rate     = ok / max(1, calls)
+        false_ok_rate_sym = fok_sym / max(1, ok)
+        false_ok_rate_act = fok_act / max(1, ok)
+        miss_iv_rate_sym  = miss_sym / max(1, save_iv)
+        miss_iv_rate_act  = miss_act / max(1, save_iv)
+
+        combo_stats.append({
+            "factor": factor, "min_samples": min_samples, "window": window,
+            "calls": calls, "ok": ok, "stressed": stressed, "insufficient": insuf,
+            "agree_symbolic": agree,
+            "false_ok_vs_symbolic": fok_sym, "false_stress_vs_symbolic": fst_sym,
+            "would_save_iv": save_iv, "would_miss_symbolic_stress": miss_sym,
+            "false_ok_vs_active": fok_act, "would_miss_active_failure": miss_act,
+            "coverage_rate": coverage_rate,
+            "false_ok_rate_symbolic": false_ok_rate_sym,
+            "false_ok_rate_active": false_ok_rate_act,
+            "miss_iv_rate_symbolic": miss_iv_rate_sym,
+            "miss_iv_rate_active": miss_iv_rate_act,
+        })
+
+        print(f"  factor={factor}  min_samples={min_samples}  window={window}")
+        print(f"    calls={calls}  ok={ok}  stressed={stressed}  insufficient={insuf}")
+        print(f"    agree_symbolic={agree}")
+        print(f"    false_ok_vs_symbolic={fok_sym}  false_stress_vs_symbolic={fst_sym}")
+        print(f"    would_save_iv={save_iv}  would_miss_symbolic_stress={miss_sym}")
+        print(f"    false_ok_vs_active={fok_act}  would_miss_active_failure={miss_act}")
+        print(f"    coverage_rate={coverage_rate:.3f}")
+        print(f"    false_ok_rate_symbolic={false_ok_rate_sym:.3f}"
+              f"  false_ok_rate_active={false_ok_rate_act:.3f}")
+        print(f"    miss_iv_rate_symbolic={miss_iv_rate_sym:.3f}"
+              f"  miss_iv_rate_active={miss_iv_rate_act:.3f}")
+
+    print()
+    print("── shadow calibration ranking ──────────────────────────────────────")
+    print("  (zero false_ok_vs_active first, then zero false_ok_vs_symbolic,")
+    print("   then highest would_save_iv, then lowest false_stress_vs_symbolic)")
+    print("  diagnostic only — no winner selected or activated")
+    print()
+    ranked = sorted(
+        combo_stats,
+        key=lambda s: (
+            s["false_ok_vs_active"],
+            s["false_ok_vs_symbolic"],
+            -s["would_save_iv"],
+            s["false_stress_vs_symbolic"],
+        ),
+    )
+    for i, s in enumerate(ranked, 1):
+        print(
+            f"  #{i:2d}  factor={s['factor']}  min_samples={s['min_samples']}"
+            f"  window={s['window']}"
+            f"  fok_act={s['false_ok_vs_active']}  fok_sym={s['false_ok_vs_symbolic']}"
+            f"  save_iv={s['would_save_iv']}  fst_sym={s['false_stress_vs_symbolic']}"
+        )
+
+
 def _print_aggregate(results: List[RunResult]) -> None:
     ok_runs = [r for r in results if r.ok]
     if not ok_runs:
@@ -1218,11 +1335,33 @@ def main():
     p.add_argument("--shadow-residual", default="off",
                    choices=["off", "online"],
                    help="shadow residual mode: off=disabled; online=shadow learned predictor (default: off)")
+    p.add_argument("--shadow-conservative-factors", default="0.4",
+                   help="comma-separated conservative_factor values for sweep (only with --shadow-residual online; default: 0.4)")
+    p.add_argument("--shadow-min-samples", default="50",
+                   help="comma-separated min_samples values for sweep (only with --shadow-residual online; default: 50)")
+    p.add_argument("--shadow-window", default="200",
+                   help="comma-separated window sizes for sweep (only with --shadow-residual online; default: 200)")
     args = p.parse_args()
 
     var_list   = [int(x) for x in args.vars.split(",")]
     cycle_list = [int(x) for x in args.cycles.split(",")]
     seed_list  = [int(x) for x in args.seeds.split(",")]
+
+    factor_list = _parse_float_list(args.shadow_conservative_factors)
+    ms_list     = _parse_int_list(args.shadow_min_samples)
+    window_list = _parse_int_list(args.shadow_window)
+
+    shadow_sweep = (
+        args.shadow_residual == "online"
+        and (len(factor_list) > 1 or len(ms_list) > 1 or len(window_list) > 1)
+    )
+
+    # Shadow combos: single-element lists produce one combo (no expansion).
+    # Multi-element lists only apply when --shadow-residual online.
+    if args.shadow_residual == "online":
+        shadow_combos = list(itertools.product(factor_list, ms_list, window_list))
+    else:
+        shadow_combos = [(0.4, 50, 200)]
 
     n_workers = args.workers
     if args.progress > 0:
@@ -1238,10 +1377,14 @@ def main():
                   log_interval=args.progress,
                   hybrid_control=args.hybrid_control,
                   repair_agenda_enabled=args.repair_agenda,
-                  shadow_residual=args.shadow_residual)
+                  shadow_residual=args.shadow_residual,
+                  shadow_conservative_factor=f,
+                  shadow_min_samples=ms,
+                  shadow_window=w)
         for v in var_list
         for c in cycle_list
         for s in seed_list
+        for f, ms, w in shadow_combos
     ]
 
     total = len(configs)
@@ -1254,7 +1397,9 @@ def main():
         mode += f" +hybrid({args.hybrid_control})"
     if args.repair_agenda:
         mode += " +repair-agenda"
-    if args.shadow_residual != "off":
+    if shadow_sweep:
+        mode += (f" +shadow-sweep(f={factor_list} ms={ms_list} w={window_list})")
+    elif args.shadow_residual != "off":
         mode += f" +shadow-residual({args.shadow_residual})"
     print(f"dreth arch-test{mode}: {total} runs | "
           f"vars={var_list} cycles={cycle_list} seeds={seed_list} "
@@ -1329,6 +1474,9 @@ def main():
     print()
     print("── aggregate ──────────────────────────────────────────────────────")
     _print_aggregate(results)
+
+    if shadow_sweep:
+        _print_shadow_calibration_summary(results)
 
     print()
     print("── column key ─────────────────────────────────────────────────────")
