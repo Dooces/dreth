@@ -187,6 +187,7 @@ class RunConfig:
     parent_ranker: str = "sensitivity"  # "sensitivity" | "history" | "history_rescue"
     probe_proposer: str = "none"        # "none" | "history" | "history_rescue"
     relative_authority_report: bool = False
+    relative_authority_frontier_report: bool = False
 
 
 # ── per-run result ─────────────────────────────────────────────────────────────
@@ -344,6 +345,17 @@ class ArchMetrics:
     relative_authority_records: int = 0
     relative_authority_relation_types: Dict[str, int] = field(default_factory=dict)
     relative_authority_top_examples: List[str] = field(default_factory=list)
+    graph_frontier_evals: int = 0
+    graph_frontier_avg_size: float = 0.0
+    graph_frontier_chosen_parent_recall: float = 0.0
+    graph_frontier_revoked_recall: float = 0.0
+    graph_frontier_dormant_recall: float = 0.0
+    graph_frontier_chosen_parent_hits: int = 0
+    graph_frontier_chosen_parent_total: int = 0
+    graph_frontier_revoked_hits: int = 0
+    graph_frontier_revoked_total: int = 0
+    graph_frontier_dormant_hits: int = 0
+    graph_frontier_dormant_total: int = 0
 
 
 @dataclass
@@ -1005,7 +1017,11 @@ def _check_invariants(arch: ArchMetrics) -> List[str]:
     return violations
 
 
-def _attach_relative_authority_metrics(arch: ArchMetrics, agent: ChainedAgent) -> None:
+def _attach_relative_authority_metrics(
+    arch: ArchMetrics,
+    agent: ChainedAgent,
+    frontier_report: bool = False,
+) -> None:
     """Populate post-run NethraGraph observer counts.
 
     Diagnostic only — does not affect ChainedAgent, fit_var, sentinels, certs,
@@ -1024,6 +1040,36 @@ def _attach_relative_authority_metrics(arch: ArchMetrics, agent: ChainedAgent) -
         f"{record.node.node_id}:{record.authority_score():.1f}"
         for record in snapshot.top_authority(limit=5)
     ]
+    if frontier_report:
+        from dreth.relative_authority_frontier import evaluate_frontier_against_agent
+
+        evaluations = evaluate_frontier_against_agent(snapshot, agent)
+        arch.graph_frontier_evals = len(evaluations)
+        if evaluations:
+            arch.graph_frontier_avg_size = (
+                sum(ev.frontier_size for ev in evaluations) / len(evaluations)
+            )
+            chosen_hits = sum(ev.chosen_parent_hits for ev in evaluations)
+            chosen_total = sum(ev.chosen_parent_total for ev in evaluations)
+            revoked_hits = sum(ev.revoked_neighbor_hits for ev in evaluations)
+            revoked_total = sum(ev.revoked_total for ev in evaluations)
+            dormant_hits = sum(ev.dormant_neighbor_hits for ev in evaluations)
+            dormant_total = sum(ev.dormant_total for ev in evaluations)
+            arch.graph_frontier_chosen_parent_hits = chosen_hits
+            arch.graph_frontier_chosen_parent_total = chosen_total
+            arch.graph_frontier_revoked_hits = revoked_hits
+            arch.graph_frontier_revoked_total = revoked_total
+            arch.graph_frontier_dormant_hits = dormant_hits
+            arch.graph_frontier_dormant_total = dormant_total
+            arch.graph_frontier_chosen_parent_recall = (
+                chosen_hits / chosen_total if chosen_total else 0.0
+            )
+            arch.graph_frontier_revoked_recall = (
+                revoked_hits / revoked_total if revoked_total else 0.0
+            )
+            arch.graph_frontier_dormant_recall = (
+                dormant_hits / dormant_total if dormant_total else 0.0
+            )
 
 
 def _run_one(cfg: RunConfig) -> RunResult:
@@ -1053,7 +1099,11 @@ def _run_one(cfg: RunConfig) -> RunResult:
 
         arch = _extract_arch_metrics(agent, world)
         if cfg.relative_authority_report:
-            _attach_relative_authority_metrics(arch, agent)
+            _attach_relative_authority_metrics(
+                arch,
+                agent,
+                frontier_report=cfg.relative_authority_frontier_report,
+            )
         violations = _check_invariants(arch)
         regime_summary = agent.regime_register.summary()
 
@@ -2106,6 +2156,41 @@ def _print_aggregate(results: List[RunResult], weights: QualityWeights = Quality
                     break
             print(f"  top_authority_examples: {', '.join(compact)}")
 
+    if any(r.config.relative_authority_frontier_report for r in ok_runs):
+        total_evals = sum(r.arch.graph_frontier_evals for r in ok_runs)
+        avg_frontier_size = (
+            sum(r.arch.graph_frontier_avg_size * r.arch.graph_frontier_evals for r in ok_runs)
+            / total_evals
+            if total_evals
+            else 0.0
+        )
+
+        def _label_recall(hit_attr: str, total_attr: str) -> float:
+            hits = sum(getattr(r.arch, hit_attr) for r in ok_runs)
+            total = sum(getattr(r.arch, total_attr) for r in ok_runs)
+            return hits / total if total else 0.0
+
+        chosen_parent_recall = _label_recall(
+            "graph_frontier_chosen_parent_hits",
+            "graph_frontier_chosen_parent_total",
+        )
+        revoked_neighbor_recall = _label_recall(
+            "graph_frontier_revoked_hits",
+            "graph_frontier_revoked_total",
+        )
+        dormant_neighbor_recall = _label_recall(
+            "graph_frontier_dormant_hits",
+            "graph_frontier_dormant_total",
+        )
+
+        print()
+        print("relative_authority_frontier:")
+        print(f"  evals={total_evals}")
+        print(f"  avg_frontier_size={avg_frontier_size:.1f}")
+        print(f"  chosen_parent_recall={chosen_parent_recall:.3f}")
+        print(f"  revoked_neighbor_recall={revoked_neighbor_recall:.3f}")
+        print(f"  dormant_neighbor_recall={dormant_neighbor_recall:.3f}")
+
     if total_viols == 0:
         print(f"  invariants: ALL PASS ({n} runs)")
     else:
@@ -2236,6 +2321,8 @@ def main():
                    help="symbolic false-OK tolerance before diagnostic key revocation (default: 0)")
     p.add_argument("--relative-authority-report", action="store_true",
                    help="print diagnostic-only post-run relative authority graph summary")
+    p.add_argument("--relative-authority-frontier-report", action="store_true",
+                   help="print shadow-only NethraGraph frontier utility summary; requires --relative-authority-report")
     args = p.parse_args()
     quality_weights = QualityWeights(
         audit_weight=args.quality_audit_weight,
@@ -2249,6 +2336,8 @@ def main():
 
     if args.policy_report and args.hybrid_control != "interfaces":
         raise SystemExit("--policy-report requires --hybrid-control interfaces")
+    if args.relative_authority_frontier_report and not args.relative_authority_report:
+        raise SystemExit("--relative-authority-frontier-report requires --relative-authority-report")
 
     parent_ranker_arg = args.parent_ranker
     probe_proposer_arg = args.probe_proposer
@@ -2314,7 +2403,8 @@ def main():
                   shadow_key_symbolic_false_ok_tolerance=args.shadow_key_symbolic_false_ok_tolerance,
                   parent_ranker=parent_ranker,
                   probe_proposer=probe_proposer,
-                  relative_authority_report=args.relative_authority_report)
+                  relative_authority_report=args.relative_authority_report,
+                  relative_authority_frontier_report=args.relative_authority_frontier_report)
         for schedule in schedule_list
         for v in var_list
         for c in cycle_list
@@ -2346,6 +2436,8 @@ def main():
         mode += " +shadow-key-authority"
     if args.relative_authority_report:
         mode += " +relative-authority-report"
+    if args.relative_authority_frontier_report:
+        mode += " +relative-authority-frontier-report"
     print(f"dreth arch-test{mode}: {total} runs | "
           f"vars={var_list} cycles={cycle_list} seeds={seed_list} "
           f"schedule={schedule_list}", flush=True)
@@ -2450,6 +2542,20 @@ def main():
                         ),
                         "relative_authority_top_examples": (
                             r.arch.relative_authority_top_examples
+                        ),
+                    })
+                if args.relative_authority_frontier_report:
+                    rec.update({
+                        "graph_frontier_evals": r.arch.graph_frontier_evals,
+                        "graph_frontier_avg_size": round(r.arch.graph_frontier_avg_size, 6),
+                        "graph_frontier_chosen_parent_recall": round(
+                            r.arch.graph_frontier_chosen_parent_recall, 6
+                        ),
+                        "graph_frontier_revoked_recall": round(
+                            r.arch.graph_frontier_revoked_recall, 6
+                        ),
+                        "graph_frontier_dormant_recall": round(
+                            r.arch.graph_frontier_dormant_recall, 6
                         ),
                     })
                 if r.baseline and r.baseline.ok:
