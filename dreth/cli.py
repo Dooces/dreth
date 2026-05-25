@@ -84,6 +84,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--compression-promote-after", type=int, default=5,
                    help="consecutive correct predictions a compression must accumulate "
                         "before it is trusted for the skip path (default: 5).")
+    p.add_argument("--uncertainty-consolidation", default="off",
+                   choices=["off", "shadow", "assist"],
+                   help="off=disabled; shadow=diagnostic consolidation only; "
+                        "assist=bounded reversible attention/probe/repair hints (default: off)")
     return p.parse_args()
 
 
@@ -381,6 +385,7 @@ def run() -> None:
         priority_audit_budget=args.priority_audit_budget,
         role_salience=args.role_salience,
         salience_targets=salience_targets,
+        uncertainty_consolidation_mode=args.uncertainty_consolidation,
     )
     agent.probe_retention_per_var = args.probe_retention
 

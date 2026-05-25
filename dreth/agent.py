@@ -93,6 +93,12 @@ from .hybrid import (
     ParentProposalDiagnostics, ProbeProposalDiagnostics,
 )
 from .repair_agenda import RepairAgenda, RepairAgendaItem
+from .uncertainty_consolidation import (
+    cluster_uncertainty_cases,
+    extract_uncertainty_cases_from_agent,
+    propose_consolidation_assists,
+    summarize_clusters,
+)
 from .learned_residual import (
     ResidualFeatureVector,
     ShadowLearnedResidualPredictor,
@@ -225,6 +231,8 @@ class ChainedAgent:
         shadow_residual_predictor: Optional[ShadowLearnedResidualPredictor] = None,
         shadow_residual_enabled: bool = False,
         shadow_key_authority: Optional[ShadowResidualKeyAuthority] = None,
+        uncertainty_consolidation_mode: str = "off",
+        uncertainty_max_preserve_count: int = 3,
     ):
         """Construct agent. Initializes empty ledger, zero counters, and
         applies any provided per-var cost weight overrides."""
@@ -474,6 +482,166 @@ class ChainedAgent:
         self._shadow_feature_fok_func: int = 0
         self._shadow_feature_fok_global: int = 0
 
+        # Uncertainty consolidation. Default is off, preserving behavior.
+        # Shadow records only. Assist writes bounded hints for existing
+        # attention/probe/repair surfaces; it never issues or revokes authority.
+        if uncertainty_consolidation_mode not in {"off", "shadow", "assist"}:
+            raise ValueError(
+                "uncertainty_consolidation_mode must be off, shadow, or assist"
+            )
+        self._uncertainty_consolidation_mode = uncertainty_consolidation_mode
+        self._uncertainty_max_preserve_count = max(0, int(uncertainty_max_preserve_count))
+        self._uncertainty_consolidation_interval = 1
+        self._uncertainty_latest_cases = []
+        self._uncertainty_latest_clusters = []
+        self._uncertainty_latest_assists = []
+        self._uncertainty_summary = {
+            "uncertainty_clusters": 0,
+            "uncertainty_cases_seen": 0,
+            "uncertainty_compression_ratio": 0.0,
+            "max_cluster_size": 0,
+            "avg_cluster_size": 0.0,
+        }
+        self._uncertainty_assist_vars: Dict[int, Set[str]] = {}
+        self._uncertainty_forced_probes: Dict[int, Tuple[Tuple[int, float], ...]] = {}
+        self._uncertainty_budget_bonus: Dict[int, int] = {}
+        self._uncertainty_preserve_vars: Set[int] = set()
+        self._uncertainty_preserve_remaining: int = 0
+        self._uncertainty_cases_seen_total = 0
+        self._uncertainty_clusters_total = 0
+        self._uncertainty_assists_total = 0
+        self._uncertainty_assist_prioritize_attention = 0
+        self._uncertainty_assist_preserve_alternatives = 0
+        self._uncertainty_assist_request_probe = 0
+        self._uncertainty_assist_increase_monitoring = 0
+        self._uncertainty_assist_repair_priority_bonus = 0
+        self._uncertainty_assist_noops = 0
+        self._uncertainty_max_cluster_size = 0
+        self._uncertainty_cluster_size_sum = 0
+        self._uncertainty_cluster_observations = 0
+
+    def _reset_uncertainty_assist_surfaces(self) -> None:
+        self._uncertainty_assist_vars = {}
+        self._uncertainty_forced_probes = {}
+        self._uncertainty_budget_bonus = {}
+        self._uncertainty_preserve_vars = set()
+        self._uncertainty_preserve_remaining = self._uncertainty_max_preserve_count
+
+    def _run_uncertainty_consolidation(self, cycle: int) -> None:
+        """Run visible-evidence consolidation for shadow/assist modes.
+
+        Off mode never calls this method. Shadow mode records diagnostics only.
+        Assist mode writes bounded hints consumed by existing repair/probe paths.
+        """
+        self._reset_uncertainty_assist_surfaces()
+        if self._uncertainty_consolidation_mode == "off":
+            return
+        if cycle % self._uncertainty_consolidation_interval != 0:
+            return
+
+        cases = extract_uncertainty_cases_from_agent(self, cycle)
+        clusters = cluster_uncertainty_cases(cases)
+        assists = propose_consolidation_assists(clusters)
+        summary = summarize_clusters(clusters)
+
+        self._uncertainty_latest_cases = cases
+        self._uncertainty_latest_clusters = clusters
+        self._uncertainty_latest_assists = assists
+        self._uncertainty_summary = summary
+        self._uncertainty_cases_seen_total += len(cases)
+        self._uncertainty_clusters_total += len(clusters)
+        for cluster in clusters:
+            size = len(cluster.vars)
+            self._uncertainty_max_cluster_size = max(self._uncertainty_max_cluster_size, size)
+            self._uncertainty_cluster_size_sum += size
+            self._uncertainty_cluster_observations += 1
+
+        if self._uncertainty_consolidation_mode != "assist":
+            return
+
+        visible = self.world.visible_count
+        for assist in assists:
+            applied = False
+            target_vars = tuple(v for v in assist.target_vars if 0 <= v < visible)
+            if not target_vars:
+                self._uncertainty_assist_noops += 1
+                continue
+            self._uncertainty_assists_total += 1
+            for var in target_vars:
+                self._uncertainty_assist_vars.setdefault(var, set()).add(assist.assist_kind)
+
+            if assist.assist_kind == "prioritize_attention":
+                self._uncertainty_assist_prioritize_attention += 1
+                for var in target_vars:
+                    self._uncertainty_budget_bonus[var] = max(
+                        self._uncertainty_budget_bonus.get(var, 0),
+                        min(2, max(1, int(math.ceil(assist.bounded_strength * 4)))),
+                    )
+                applied = True
+            elif assist.assist_kind == "preserve_alternatives":
+                self._uncertainty_assist_preserve_alternatives += 1
+                self._uncertainty_preserve_vars.update(target_vars)
+                applied = bool(self._uncertainty_max_preserve_count > 0)
+            elif assist.assist_kind == "request_separating_probe":
+                self._uncertainty_assist_request_probe += 1
+                for var in target_vars:
+                    frontier = self.ledger.vars[var].tied_frontier
+                    probes = frontier.separating_probes if frontier is not None else ()
+                    valid = tuple(
+                        (iv_var, iv_val)
+                        for iv_var, iv_val in probes
+                        if 0 <= iv_var < visible and 0.0 <= iv_val <= 1.0
+                    )[:3]
+                    if valid:
+                        self._uncertainty_forced_probes[var] = valid
+                        applied = True
+            elif assist.assist_kind == "increase_monitoring":
+                self._uncertainty_assist_increase_monitoring += 1
+                for var in target_vars:
+                    self._uncertainty_budget_bonus[var] = max(
+                        self._uncertainty_budget_bonus.get(var, 0),
+                        1,
+                    )
+                applied = True
+            elif assist.assist_kind == "repair_priority_bonus":
+                self._uncertainty_assist_repair_priority_bonus += 1
+                applied = True
+
+            if not applied:
+                self._uncertainty_assist_noops += 1
+
+    def uncertainty_consolidation_metrics(self) -> Dict[str, Any]:
+        avg_cluster = (
+            self._uncertainty_cluster_size_sum / self._uncertainty_cluster_observations
+            if self._uncertainty_cluster_observations else 0.0
+        )
+        cluster_count = (
+            self._uncertainty_summary.get("uncertainty_clusters", 0)
+            if self._uncertainty_consolidation_mode != "off" else 0
+        )
+        case_count = (
+            self._uncertainty_summary.get("uncertainty_cases_seen", 0)
+            if self._uncertainty_consolidation_mode != "off" else 0
+        )
+        return {
+            "uncertainty_consolidation_mode": self._uncertainty_consolidation_mode,
+            "uncertainty_cases_seen": case_count,
+            "uncertainty_clusters": cluster_count,
+            "uncertainty_compression_ratio": (
+                self._uncertainty_summary.get("uncertainty_compression_ratio", 0.0)
+                if self._uncertainty_consolidation_mode != "off" else 0.0
+            ),
+            "consolidation_assists_total": self._uncertainty_assists_total,
+            "assist_prioritize_attention": self._uncertainty_assist_prioritize_attention,
+            "assist_preserve_alternatives": self._uncertainty_assist_preserve_alternatives,
+            "assist_request_probe": self._uncertainty_assist_request_probe,
+            "assist_increase_monitoring": self._uncertainty_assist_increase_monitoring,
+            "assist_repair_priority_bonus": self._uncertainty_assist_repair_priority_bonus,
+            "assist_noops": self._uncertainty_assist_noops,
+            "max_cluster_size": self._uncertainty_max_cluster_size,
+            "avg_cluster_size": avg_cluster,
+        }
+
     def _adaptive_probe_budget(self, n_hypotheses: int) -> int:
         """Return the number of probes to use for a hypothesis space of size
         n_hypotheses.
@@ -550,6 +718,7 @@ class ChainedAgent:
         # P1-A: activated — was previously computed but discarded.
         _adaptive = self._adaptive_probe_budget(_n_hyp)
         budget = max(self._var_budget_escalation.get(var, 0), _adaptive)
+        budget += self._uncertainty_budget_bonus.get(var, 0)
         diag_dict: Dict[str, object] = {
             "cycle": cycle,
             "var": var,
@@ -608,8 +777,13 @@ class ChainedAgent:
         # Merge provider probes with frontier probes; pass None when both are empty
         # so fit_var's default discrimination pool is used unchanged.
         _merged_probes: Optional[Tuple[Tuple[int, float], ...]] = None
-        if _provider_probes or _frontier_probes:
-            _merged_probes = _provider_probes + _frontier_probes
+        _consolidation_probes: Tuple[Tuple[int, float], ...] = (
+            self._uncertainty_forced_probes.get(var, ())
+            if self._uncertainty_consolidation_mode == "assist"
+            else ()
+        )
+        if _provider_probes or _frontier_probes or _consolidation_probes:
+            _merged_probes = _provider_probes + _frontier_probes + _consolidation_probes
 
         result = fit_var(var, self.world, self.rng, budget,
                          n.current_tolerance, available_parents=available, diag=diag_dict,
@@ -2027,6 +2201,29 @@ class ChainedAgent:
                 )
         else:
             # Threshold not met: ambiguity is unresolved; discard without archiving.
+            if (
+                self._uncertainty_consolidation_mode == "assist"
+                and var in self._uncertainty_preserve_vars
+                and self._uncertainty_preserve_remaining > 0
+            ):
+                archived = 0
+                for h in f.candidates:
+                    if h == winning_hyp or self._uncertainty_preserve_remaining <= 0:
+                        continue
+                    n.dormant_alternatives.append(
+                        DormantAlternative(
+                            parents=h[0], func=h[1],
+                            last_score=f.scores.get(h, 0),
+                            last_seen_cycle=cycle,
+                        )
+                    )
+                    self._uncertainty_preserve_remaining -= 1
+                    archived += 1
+                if archived:
+                    self.ledger.event_log.append(
+                        f"c{cycle}: x{var} uncertainty consolidation preserved "
+                        f"{archived} alternative(s) within cap"
+                    )
             self.ledger.event_log.append(
                 f"c{cycle}: x{var} frontier cleared (threshold not met: "
                 f"stable={f.stable_count} contexts={f.distinct_contexts_seen})"
@@ -2481,6 +2678,7 @@ class ChainedAgent:
              offline diagnostic comparison.
         """
         self._uncertain_this_cycle.clear()
+        self._run_uncertainty_consolidation(cycle)
 
         skipped: List[int] = []
         audited: List[int] = []
@@ -3160,6 +3358,11 @@ class ChainedAgent:
                 # urgent). T2 → -2.0, T1 → -1.0, T0 → 0.0. A*-style cost/benefit
                 # weighting is reserved for a later stage.
                 _ra_priority = -float(self._consequence_tier(_ra_var))
+                if (
+                    self._uncertainty_consolidation_mode == "assist"
+                    and "repair_priority_bonus" in self._uncertainty_assist_vars.get(_ra_var, set())
+                ):
+                    _ra_priority -= 0.25
                 self._repair_agenda.push(RepairAgendaItem(
                     cycle=cycle,
                     target_var=_ra_var,

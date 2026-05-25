@@ -194,6 +194,7 @@ class RunConfig:
     relative_authority_frontier_max_candidates: int = 20
     relative_authority_frontier_max_depth: int = 2
     challenge_blind: bool = False
+    uncertainty_consolidation: str = "off"  # "off" | "shadow" | "assist"
 
 
 # ── per-run result ─────────────────────────────────────────────────────────────
@@ -397,6 +398,21 @@ class ArchMetrics:
     temporal_frontier_warmup_cycles: int = 0
     temporal_frontier_max_candidates: int = 20
     temporal_frontier_max_depth: int = 2
+
+    # Uncertainty consolidation metrics.
+    uncertainty_consolidation_mode: str = "off"
+    uncertainty_cases_seen: int = 0
+    uncertainty_clusters: int = 0
+    uncertainty_compression_ratio: float = 0.0
+    consolidation_assists_total: int = 0
+    assist_prioritize_attention: int = 0
+    assist_preserve_alternatives: int = 0
+    assist_request_probe: int = 0
+    assist_increase_monitoring: int = 0
+    assist_repair_priority_bonus: int = 0
+    assist_noops: int = 0
+    max_cluster_size: int = 0
+    avg_cluster_size: float = 0.0
 
 
 @dataclass
@@ -748,6 +764,7 @@ def _build_and_run_dreth(
         shadow_residual_predictor=_shadow_predictor,
         shadow_residual_enabled=_shadow_enabled,
         shadow_key_authority=_shadow_key_authority,
+        uncertainty_consolidation_mode=cfg.uncertainty_consolidation,
     )
     if cfg.relative_authority_frontier_temporal_report:
         from dreth.relative_authority_frontier import TemporalGraphFrontierEvaluator
@@ -1055,6 +1072,21 @@ def _extract_arch_metrics(agent: ChainedAgent, world: CausalWorld) -> ArchMetric
         m.hybrid_repair_agenda_items = _as["total_pushed"]
         m.hybrid_repair_agenda_scope_mean = _as.get("scope_mean", 0.0)
         m.hybrid_repair_agenda_scope_max = _as.get("scope_max", 0)
+    if hasattr(agent, "uncertainty_consolidation_metrics"):
+        _uc = agent.uncertainty_consolidation_metrics()
+        m.uncertainty_consolidation_mode = str(_uc.get("uncertainty_consolidation_mode", "off"))
+        m.uncertainty_cases_seen = int(_uc.get("uncertainty_cases_seen", 0))
+        m.uncertainty_clusters = int(_uc.get("uncertainty_clusters", 0))
+        m.uncertainty_compression_ratio = float(_uc.get("uncertainty_compression_ratio", 0.0))
+        m.consolidation_assists_total = int(_uc.get("consolidation_assists_total", 0))
+        m.assist_prioritize_attention = int(_uc.get("assist_prioritize_attention", 0))
+        m.assist_preserve_alternatives = int(_uc.get("assist_preserve_alternatives", 0))
+        m.assist_request_probe = int(_uc.get("assist_request_probe", 0))
+        m.assist_increase_monitoring = int(_uc.get("assist_increase_monitoring", 0))
+        m.assist_repair_priority_bonus = int(_uc.get("assist_repair_priority_bonus", 0))
+        m.assist_noops = int(_uc.get("assist_noops", 0))
+        m.max_cluster_size = int(_uc.get("max_cluster_size", 0))
+        m.avg_cluster_size = float(_uc.get("avg_cluster_size", 0.0))
     _temporal_frontier = getattr(agent, "_diagnostic_audit_observer", None)
     if _temporal_frontier is not None and hasattr(_temporal_frontier, "summary"):
         _tfs = _temporal_frontier.summary()
@@ -2240,6 +2272,27 @@ def _print_aggregate(results: List[RunResult], weights: QualityWeights = Quality
     avg_passive_stress = sum(r.arch.passive_stress_count for r in ok_runs) / n
     print(f"  passive monitor: saved_iv={avg_passive_iv:.0f}  stressed={avg_passive_stress:.0f}")
 
+    if any(r.arch.uncertainty_consolidation_mode != "off" for r in ok_runs):
+        total_cases = sum(r.arch.uncertainty_cases_seen for r in ok_runs)
+        total_clusters = sum(r.arch.uncertainty_clusters for r in ok_runs)
+        ratio = total_cases / max(1, total_clusters)
+        print()
+        print("── uncertainty consolidation ─────────────────────────────────────")
+        print(
+            f"  cases={total_cases} clusters={total_clusters} "
+            f"compression_ratio={ratio:.2f} max_cluster="
+            f"{max(r.arch.max_cluster_size for r in ok_runs)}"
+        )
+        print(
+            f"  assists={sum(r.arch.consolidation_assists_total for r in ok_runs)} "
+            f"attention={sum(r.arch.assist_prioritize_attention for r in ok_runs)} "
+            f"preserve={sum(r.arch.assist_preserve_alternatives for r in ok_runs)} "
+            f"probe={sum(r.arch.assist_request_probe for r in ok_runs)} "
+            f"monitor={sum(r.arch.assist_increase_monitoring for r in ok_runs)} "
+            f"repair={sum(r.arch.assist_repair_priority_bonus for r in ok_runs)} "
+            f"noops={sum(r.arch.assist_noops for r in ok_runs)}"
+        )
+
     _total_shadow_calls = sum(r.arch.shadow_residual_calls for r in ok_runs)
     if _total_shadow_calls > 0:
         _shadow_ok_t    = sum(r.arch.shadow_residual_ok for r in ok_runs)
@@ -2672,6 +2725,10 @@ def main():
                    help="diagnostic quality score improved-probe credit (default: -25)")
     p.add_argument("--repair-agenda", action="store_true",
                    help="enable RepairAgenda: annotate needs_audit entries with scope/authority metadata")
+    p.add_argument("--uncertainty-consolidation", default="off",
+                   choices=["off", "shadow", "assist"],
+                   help=("off=disabled; shadow=record consolidation only; "
+                         "assist=bounded attention/probe/repair/alternative-preservation hints"))
     p.add_argument("--shadow-residual", default="off",
                    choices=["off", "online"],
                    help="shadow residual mode: off=disabled; online=shadow learned predictor (default: off)")
@@ -2798,7 +2855,8 @@ def main():
                   relative_authority_frontier_warmup_cycles=args.relative_authority_frontier_warmup_cycles,
                   relative_authority_frontier_max_candidates=args.relative_authority_frontier_max_candidates,
                   relative_authority_frontier_max_depth=args.relative_authority_frontier_max_depth,
-                  challenge_blind=args.challenge_blind)
+                  challenge_blind=args.challenge_blind,
+                  uncertainty_consolidation=args.uncertainty_consolidation)
         for schedule in schedule_list
         for v in var_list
         for c in cycle_list
@@ -2822,6 +2880,8 @@ def main():
         mode += " +policy-report"
     if args.repair_agenda:
         mode += " +repair-agenda"
+    if args.uncertainty_consolidation != "off":
+        mode += f" +uncertainty-consolidation({args.uncertainty_consolidation})"
     if shadow_sweep:
         mode += (f" +shadow-sweep(f={factor_list} ms={ms_list} w={window_list})")
     elif args.shadow_residual != "off":
@@ -2944,6 +3004,21 @@ def main():
                         r.arch.provider_probe_improved_margin_count
                     ),
                     "provider_probe_no_effect_count": r.arch.provider_probe_no_effect_count,
+                    "uncertainty_consolidation_mode": r.arch.uncertainty_consolidation_mode,
+                    "uncertainty_cases_seen": r.arch.uncertainty_cases_seen,
+                    "uncertainty_clusters": r.arch.uncertainty_clusters,
+                    "uncertainty_compression_ratio": round(
+                        r.arch.uncertainty_compression_ratio, 6
+                    ),
+                    "consolidation_assists_total": r.arch.consolidation_assists_total,
+                    "assist_prioritize_attention": r.arch.assist_prioritize_attention,
+                    "assist_preserve_alternatives": r.arch.assist_preserve_alternatives,
+                    "assist_request_probe": r.arch.assist_request_probe,
+                    "assist_increase_monitoring": r.arch.assist_increase_monitoring,
+                    "assist_repair_priority_bonus": r.arch.assist_repair_priority_bonus,
+                    "assist_noops": r.arch.assist_noops,
+                    "max_cluster_size": r.arch.max_cluster_size,
+                    "avg_cluster_size": round(r.arch.avg_cluster_size, 6),
                     "quality_cost": r.quality.quality_cost if r.quality else None,
                     "quality_weights": quality_weights.__dict__,
                     "earned_by_dist": r.arch.earned_by_dist,
