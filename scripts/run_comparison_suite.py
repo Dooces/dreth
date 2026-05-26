@@ -44,6 +44,7 @@ BEHAVIOR_FIELDS = (
 OPERATIONAL_WARN_FIELDS = ("quality_cost", "iv", "full_audits", "revocations", "unique_fails")
 
 BACKGROUND_NETHRA_MODES = ("off", "record")
+SCAFFOLD_MEMORY_MODES = ("off", "record", "assist_feature")
 BACKGROUND_NETHRA_SUMMARY_SPECS = (
     ("background_nethra", "summarize_background_nethra.py", "background_nethra_summary"),
     ("context_role", "summarize_context_role_index.py", "context_role_summary"),
@@ -76,6 +77,30 @@ BN_BACKGROUND_FIELDS = (
     "background_feature_hits",
     "background_feature_noops",
 )
+SCAFFOLD_BEHAVIOR_FIELDS = (
+    "iv",
+    "quality_cost",
+    "full_audits",
+    "revocations",
+    "unique_fails",
+    "regime_sentinel_fail",
+    "passive_stressed",
+)
+SCAFFOLD_MEMORY_FIELDS = (
+    "scaffold_memory_loaded_proposals",
+    "scaffold_memory_match_attempts",
+    "scaffold_memory_matches",
+    "scaffold_memory_useful_matches",
+    "scaffold_memory_broad_generic_debt_matches",
+    "scaffold_memory_ranking_applications",
+    "scaffold_memory_candidates_reordered",
+    "scaffold_memory_top1_supported",
+    "scaffold_memory_topk_supported",
+    "scaffold_memory_broad_generic_noops",
+    "scaffold_memory_no_runtime_hook_available",
+    "scaffold_memory_behavior_effects",
+    "scaffold_memory_authority_allowed_count",
+)
 
 
 @dataclass(frozen=True)
@@ -95,7 +120,7 @@ class RunningJob:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run a Dreth comparison suite.")
-    parser.add_argument("--suite", required=True, choices=["authority_strength", "background_nethra"])
+    parser.add_argument("--suite", required=True, choices=["authority_strength", "background_nethra", "scaffold_memory"])
     parser.add_argument("--out-prefix", required=True)
     parser.add_argument("--suite-workers", type=int, default=3)
     parser.add_argument("--summary-workers", type=int, default=4)
@@ -127,6 +152,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--relative-authority-frontier-max-candidates", type=int, default=None)
     parser.add_argument("--relative-authority-frontier-max-depth", type=int, default=None)
     parser.add_argument("--background-nethra", default=None)
+    parser.add_argument("--scaffold-memory", default=None)
     return parser
 
 
@@ -166,6 +192,18 @@ def batch_passthrough_args(args: argparse.Namespace) -> list[str]:
     ):
         if getattr(args, attr):
             out.append(flag)
+    return out
+
+
+def _common_passthrough_with_authority(args: argparse.Namespace) -> list[str]:
+    out = batch_passthrough_args(args)
+    for flag, attr in (
+        ("--authority-strength", "authority_strength"),
+        ("--authority-strength-controller", "authority_strength_controller"),
+        ("--authority-derivation-policy", "authority_derivation_policy"),
+        ("--background-nethra", "background_nethra"),
+    ):
+        _append_value(out, flag, getattr(args, attr, None))
     return out
 
 
@@ -253,6 +291,7 @@ def _launch_job(
     process = popen_factory(
         job.command,
         cwd=str(ROOT),
+        stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
@@ -990,6 +1029,215 @@ def run_background_nethra_suite(args: argparse.Namespace) -> int:
     return 0
 
 
+def scaffold_memory_suite_paths(out_prefix: str) -> dict[str, dict[str, Path]]:
+    prefix = Path(out_prefix)
+    return {
+        mode: {
+            "jsonl": prefix.with_name(f"{prefix.name}_{mode}.jsonl"),
+            "log": prefix.with_name(f"{prefix.name}_{mode}.log"),
+        }
+        for mode in SCAFFOLD_MEMORY_MODES
+    }
+
+
+def build_scaffold_memory_jobs(args: argparse.Namespace) -> list[CommandJob]:
+    paths = scaffold_memory_suite_paths(args.out_prefix)
+    common = _common_passthrough_with_authority(args)
+    jobs: list[CommandJob] = []
+    for mode in SCAFFOLD_MEMORY_MODES:
+        command = [
+            sys.executable,
+            str(SCRIPTS / "batch_run.py"),
+            *common,
+            "--scaffold-memory-mode",
+            mode,
+            "--out",
+            str(paths[mode]["jsonl"]),
+        ]
+        if args.scaffold_memory:
+            command.extend(["--scaffold-memory", str(args.scaffold_memory)])
+        jobs.append(CommandJob(mode, command, paths[mode]["log"]))
+    return jobs
+
+
+def build_scaffold_memory_summary_jobs(out_prefix: str) -> list[CommandJob]:
+    paths = scaffold_memory_suite_paths(out_prefix)
+    jobs: list[CommandJob] = []
+    for mode in ("record", "assist_feature"):
+        jsonl = paths[mode]["jsonl"]
+        output_path = summary_output_path(out_prefix, mode, "scaffold_memory_summary")
+        command = [sys.executable, str(SCRIPTS / "summarize_scaffold_memory.py"), "--jsonl", str(jsonl)]
+        jobs.append(CommandJob(f"{mode}:scaffold_memory", command, output_path))
+    return jobs
+
+
+def aggregate_scaffold_memory_jsonl_metrics(path: Path) -> dict[str, Any]:
+    rows = load_jsonl(path)
+    if not rows:
+        return {}
+    metrics = aggregate_jsonl_metrics(path)
+    n = len(rows)
+    for field in SCAFFOLD_MEMORY_FIELDS:
+        metrics[field] = sum(_as_float(row.get(field)) for row in rows)
+        if field in {
+            "scaffold_memory_loaded_proposals",
+            "scaffold_memory_authority_allowed_count",
+            "scaffold_memory_behavior_effects",
+        }:
+            metrics[field] = max(_as_float(row.get(field)) for row in rows)
+    metrics["rows"] = n
+    return metrics
+
+
+def collect_scaffold_memory_mode_metrics(out_prefix: str) -> dict[str, dict[str, Any]]:
+    paths = scaffold_memory_suite_paths(out_prefix)
+    result: dict[str, dict[str, Any]] = {}
+    for mode, mode_paths in paths.items():
+        metrics = aggregate_scaffold_memory_jsonl_metrics(mode_paths["jsonl"])
+        if mode_paths["log"].exists():
+            metrics.update(parse_log_metrics(mode_paths["log"].read_text()))
+        result[mode] = metrics
+    return result
+
+
+def scaffold_memory_behavior_equal(off: dict[str, Any], record: dict[str, Any]) -> bool:
+    return all(
+        abs(_as_float(off.get(field)) - _as_float(record.get(field))) <= 1e-9
+        for field in BEHAVIOR_FIELDS
+    )
+
+
+def scaffold_memory_decision_lines(metrics: dict[str, dict[str, Any]]) -> list[str]:
+    off = metrics.get("off", {})
+    record = metrics.get("record", {})
+    assist = metrics.get("assist_feature", {})
+    lines: list[str] = []
+
+    if scaffold_memory_behavior_equal(off, record):
+        lines.append("PASS: off == record on behavior metrics.")
+    else:
+        changed = [
+            field for field in BEHAVIOR_FIELDS
+            if abs(_as_float(off.get(field)) - _as_float(record.get(field))) > 1e-9
+        ]
+        lines.append(f"FAIL: record differs from off on behavior metrics: {', '.join(changed)}.")
+
+    if _as_int(record.get("scaffold_memory_loaded_proposals")) > 0 and _as_int(record.get("scaffold_memory_matches")) > 0:
+        lines.append("PASS: record loads and matches proposals.")
+    else:
+        lines.append("FAIL: record did not load and match proposals.")
+
+    ranking = _as_int(assist.get("scaffold_memory_ranking_applications"))
+    no_hook = _as_int(assist.get("scaffold_memory_no_runtime_hook_available"))
+    if ranking > 0 or no_hook > 0:
+        lines.append("PASS: assist_feature ranking applied or no_runtime_hook_available explains absence.")
+    else:
+        lines.append("FAIL: assist_feature had no ranking applications and no hook explanation.")
+
+    for mode_name, row in (("record", record), ("assist_feature", assist)):
+        if _as_int(row.get("scaffold_memory_authority_allowed_count")) > 0:
+            lines.append(f"FAIL: {mode_name} authority_allowed_count > 0.")
+        if _as_int(row.get("scaffold_memory_behavior_effects")) > 0:
+            lines.append(f"FAIL: {mode_name} behavior_effects > 0.")
+
+    if _as_int(assist.get("scaffold_memory_broad_generic_noops")) > 0:
+        lines.append("PASS: broad_generic_debt matches were counted as noops.")
+
+    worsened = [
+        field
+        for field in SCAFFOLD_BEHAVIOR_FIELDS
+        if _as_float(assist.get(field)) > _as_float(record.get(field))
+    ]
+    if worsened:
+        lines.append(
+            "WARN: assist_feature changes operational metrics adversely vs record: "
+            + ", ".join(worsened)
+        )
+
+    improved_ranking = (
+        _as_float(assist.get("parent_proposal_hit_rate")) > _as_float(record.get("parent_proposal_hit_rate"))
+        or _as_float(assist.get("provider_probe_improved_margin_count"))
+        > _as_float(record.get("provider_probe_improved_margin_count"))
+        or _as_int(assist.get("scaffold_memory_candidates_reordered")) > 0
+    )
+    if improved_ranking and not worsened:
+        lines.append("PASS for future live-use exploration: assist_feature improved ranking/probe signals without operational cost.")
+    return lines
+
+
+def render_scaffold_memory_comparison(metrics: dict[str, dict[str, Any]]) -> str:
+    lines = ["Dreth Comparison Suite: scaffold_memory", ""]
+
+    lines.append("Behavior Metrics")
+    for mode in SCAFFOLD_MEMORY_MODES:
+        row = metrics.get(mode, {})
+        bits = [f"{f}={_fmt(row.get(f))}" for f in BEHAVIOR_FIELDS]
+        lines.append(f"  {mode}: " + " ".join(bits))
+
+    lines.extend(["", "Scaffold Memory Metrics"])
+    for mode in SCAFFOLD_MEMORY_MODES:
+        row = metrics.get(mode, {})
+        bits = [f"{field}={_fmt(row.get(field))}" for field in SCAFFOLD_MEMORY_FIELDS]
+        lines.append(f"  {mode}: " + " ".join(bits))
+
+    lines.extend(["", "Decision Block", *scaffold_memory_decision_lines(metrics)])
+    lines.append("")
+    return "\n".join(lines)
+
+
+def validate_scaffold_memory_outputs_exist(out_prefix: str) -> None:
+    missing = [
+        path
+        for mode_paths in scaffold_memory_suite_paths(out_prefix).values()
+        for path in (mode_paths["jsonl"], mode_paths["log"])
+        if not path.exists()
+    ]
+    if missing:
+        raise FileNotFoundError("missing batch outputs: " + ", ".join(str(p) for p in missing))
+
+
+def write_scaffold_memory_comparison(out_prefix: str) -> tuple[Path, str]:
+    comparison_path = Path(out_prefix).with_name(f"{Path(out_prefix).name}_comparison.txt")
+    comparison_path.parent.mkdir(parents=True, exist_ok=True)
+    text = render_scaffold_memory_comparison(collect_scaffold_memory_mode_metrics(out_prefix))
+    comparison_path.write_text(text)
+    return comparison_path, text
+
+
+def run_scaffold_memory_suite(args: argparse.Namespace) -> int:
+    Path(args.out_prefix).parent.mkdir(parents=True, exist_ok=True)
+    batch_jobs = build_scaffold_memory_jobs(args)
+    code = run_labeled_commands(
+        batch_jobs,
+        max_workers=args.suite_workers,
+        sequential=args.sequential,
+    )
+    if code != 0:
+        return code
+
+    validate_scaffold_memory_outputs_exist(args.out_prefix)
+    summary_jobs = build_scaffold_memory_summary_jobs(args.out_prefix)
+    code = run_labeled_commands(
+        summary_jobs,
+        max_workers=args.summary_workers,
+        sequential=args.sequential,
+    )
+    if code != 0:
+        return code
+
+    comparison_path, text = write_scaffold_memory_comparison(args.out_prefix)
+    print(f"[comparison] wrote {comparison_path}")
+    in_decision = False
+    for line in text.splitlines():
+        if line == "Decision Block":
+            in_decision = True
+            print(line)
+            continue
+        if in_decision and line:
+            print(line)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -1001,6 +1249,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_authority_strength_suite(args)
     if args.suite == "background_nethra":
         return run_background_nethra_suite(args)
+    if args.suite == "scaffold_memory":
+        return run_scaffold_memory_suite(args)
     parser.error(f"unsupported suite: {args.suite}")
     return 2
 

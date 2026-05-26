@@ -126,6 +126,13 @@ class ScaffoldMemoryIndex:
         # Proposals by kind (loaded time)
         self._by_kind: Counter[str] = Counter()
         self._broad_generic_debt_proposals: int = 0
+        self._ranking_applications: int = 0
+        self._candidates_reordered: int = 0
+        self._top1_supported: int = 0
+        self._topk_supported: int = 0
+        self._broad_generic_noops: int = 0
+        self._no_runtime_hook_available: int = 0
+        self._feature_examples: list[dict[str, Any]] = []
 
     # ── Loading ────────────────────────────────────────────────────────────────
 
@@ -148,6 +155,7 @@ class ScaffoldMemoryIndex:
         self._by_var_cr_kind.clear()
         self._by_kind.clear()
         self._broad_generic_debt_proposals = 0
+        self.reset_runtime_metrics()
 
         with open(path) as fh:
             for line in fh:
@@ -186,6 +194,15 @@ class ScaffoldMemoryIndex:
                             self._by_var_cr_kind[(v, rp)].append(p)
 
         return len(self._proposals)
+
+    def reset_runtime_metrics(self) -> None:
+        self._ranking_applications = 0
+        self._candidates_reordered = 0
+        self._top1_supported = 0
+        self._topk_supported = 0
+        self._broad_generic_noops = 0
+        self._no_runtime_hook_available = 0
+        self._feature_examples = []
 
     # ── Matching ───────────────────────────────────────────────────────────────
 
@@ -288,14 +305,139 @@ class ScaffoldMemoryIndex:
         """Return all proposals that include context_key."""
         return list(self._by_context.get(context_key, []))
 
+    def is_broad_generic_debt_match(
+        self,
+        proposal: ScaffoldMemoryProposal,
+        *,
+        var: int | None = None,
+        context_key: str = "",
+    ) -> bool:
+        """Return whether a match is broad debt telemetry only."""
+        if not proposal.broad_generic_debt:
+            return False
+        if var is not None and proposal.vars and int(var) not in proposal.vars:
+            return False
+        if context_key and proposal.contexts and context_key not in proposal.contexts:
+            return False
+        return True
+
+    def useful_local_matches(
+        self,
+        var: int,
+        context_key: str,
+        candidate: Any | None = None,
+    ) -> list[tuple[ScaffoldMemoryProposal, int, tuple[str, ...]]]:
+        """Return useful local proposal support for an existing candidate.
+
+        Scores are familiarity hints only. They are not truth, authority,
+        derivation support, or permission to create work.
+        """
+        if not self._proposals:
+            return []
+        var = int(var)
+        candidate_parents = _candidate_parents(candidate)
+        candidate_signature = _candidate_signature(var, candidate)
+        candidate_nethra_ids = _candidate_nethra_ids(var, candidate)
+        context_key = str(context_key or "")
+        context_family = _context_family(context_key)
+
+        proposals: list[ScaffoldMemoryProposal] = []
+        seen: set[str] = set()
+        for p in self._by_var.get(var, []):
+            if p.proposal_id not in seen:
+                seen.add(p.proposal_id)
+                proposals.append(p)
+        if context_key:
+            for p in self._by_context.get(context_key, []):
+                if p.proposal_id not in seen:
+                    seen.add(p.proposal_id)
+                    proposals.append(p)
+
+        out: list[tuple[ScaffoldMemoryProposal, int, tuple[str, ...]]] = []
+        for p in proposals:
+            if self.is_broad_generic_debt_match(p, var=var, context_key=context_key):
+                continue
+            score, reasons = self._score_local_candidate(
+                p,
+                var=var,
+                context_key=context_key,
+                context_family=context_family,
+                candidate_parents=candidate_parents,
+                candidate_signature=candidate_signature,
+                candidate_nethra_ids=candidate_nethra_ids,
+            )
+            if score > 0:
+                out.append((p, score, tuple(reasons)))
+        out.sort(key=lambda item: (-item[1], item[0].proposal_id))
+        return out
+
+    def rank_candidate_keys(
+        self,
+        var: int,
+        context_key: str,
+        candidates: Any,
+    ) -> Any:
+        """Rank existing parent candidate keys by useful local scaffold support."""
+        return self._rank_existing_candidates(var, context_key, candidates, hook="parent")
+
+    def rank_frontier_candidates(
+        self,
+        var: int,
+        context_key: str,
+        candidates: Any,
+    ) -> Any:
+        """Rank existing tied-frontier candidates by useful local support."""
+        return self._rank_existing_candidates(var, context_key, candidates, hook="frontier")
+
+    def rank_uncertainty_local_anchors(
+        self,
+        var: int,
+        context_key: str,
+        candidates: Any,
+    ) -> Any:
+        """Rank existing uncertainty-local anchors by useful scaffold support."""
+        return self._rank_existing_candidates(var, context_key, candidates, hook="uncertainty")
+
+    def annotate_uncertainty_case(self, case: Any) -> dict[str, Any]:
+        """Return scaffold support annotation for an uncertainty case."""
+        var = int(getattr(case, "var", 0))
+        context_key = _uncertainty_context_key(case)
+        matches = self.useful_local_matches(var, context_key, case)
+        broad = self._broad_generic_matches_for(var=var, context_key=context_key)
+        if broad:
+            self._broad_generic_noops += len(broad)
+        return {
+            "var": var,
+            "context_key": context_key,
+            "score": sum(score for _, score, _ in matches),
+            "matches": len(matches),
+            "broad_generic_noops": len(broad),
+            "reasons": sorted({reason for _, _, reasons in matches for reason in reasons}),
+        }
+
+    def note_no_runtime_hook_available(self) -> None:
+        self._no_runtime_hook_available += 1
+
     def summarize_matches(self) -> dict[str, Any]:
         """Return index-level summary (loaded proposals, by kind, broad_generic_debt count)."""
         return {
             "scaffold_memory_loaded_proposals": len(self._proposals),
             "scaffold_memory_proposals_by_kind": dict(self._by_kind),
             "scaffold_memory_broad_generic_debt_proposals": self._broad_generic_debt_proposals,
+            **self.runtime_metrics(),
             "scaffold_memory_authority_allowed_count": 0,
             "scaffold_memory_behavior_effects": 0,
+        }
+
+    def runtime_metrics(self) -> dict[str, Any]:
+        return {
+            "scaffold_memory_ranking_applications": self._ranking_applications,
+            "scaffold_memory_candidates_reordered": self._candidates_reordered,
+            "scaffold_memory_top1_supported": self._top1_supported,
+            "scaffold_memory_topk_supported": self._topk_supported,
+            "scaffold_memory_broad_generic_noops": self._broad_generic_noops,
+            "scaffold_memory_no_runtime_hook_available": self._no_runtime_hook_available,
+            "scaffold_memory_feature_examples": list(self._feature_examples),
         }
 
     # ── Internal ───────────────────────────────────────────────────────────────
@@ -351,6 +493,236 @@ class ScaffoldMemoryIndex:
 
         return results
 
+    def _proposal_runtime_usable(self, p: ScaffoldMemoryProposal) -> bool:
+        if p.broad_generic_debt:
+            return False
+        if p.suggested_runtime_use == "no_runtime_use":
+            return False
+        if any(str(w) in {"low_specificity", "no_runtime_use"} for w in p.warnings):
+            return False
+        return True
+
+    def _score_local_candidate(
+        self,
+        p: ScaffoldMemoryProposal,
+        *,
+        var: int,
+        context_key: str,
+        context_family: str,
+        candidate_parents: tuple[int, ...],
+        candidate_signature: str,
+        candidate_nethra_ids: set[str],
+    ) -> tuple[int, list[str]]:
+        if not self._proposal_runtime_usable(p):
+            return 0, []
+
+        reasons: list[str] = []
+        score = 0
+        same_var = var in set(int(v) for v in p.vars)
+        if same_var:
+            score += 1
+            reasons.append("same_var")
+
+        p_contexts = set(str(c) for c in p.contexts)
+        same_context = bool(context_key and context_key in p_contexts)
+        same_family = bool(
+            context_family
+            and any(_context_family(ctx) == context_family for ctx in p_contexts)
+        )
+        if same_var and same_context:
+            score += 2
+            reasons.append("same_var_context")
+        elif same_var and same_family:
+            score += 1
+            reasons.append("same_context_family")
+
+        p_parent_sets = [frozenset(int(x) for x in row) for row in p.common_parents]
+        cand_parent_set = frozenset(candidate_parents)
+        if cand_parent_set and p_parent_sets:
+            if any(cand_parent_set == ps for ps in p_parent_sets):
+                score += 2
+                reasons.append("shared_parent_signature")
+            elif any(cand_parent_set & ps for ps in p_parent_sets):
+                score += 1
+                reasons.append("shared_parent")
+
+        p_signatures = set(str(sig) for sig in p.common_signatures)
+        if candidate_signature and candidate_signature in p_signatures:
+            score += 2
+            reasons.append("shared_signature")
+
+        if candidate_nethra_ids and candidate_nethra_ids & set(p.source_record_ids):
+            score += 2
+            reasons.append("repeated_same_nethra_id")
+
+        if (
+            p.kind in {"unresolved_family", "unresolved_pattern"}
+            or any(str(ctx).startswith("tied_frontier|") for ctx in p.contexts)
+            or any(str(nid).startswith("frontier:") for nid in p.source_record_ids)
+        ):
+            if same_var and (same_context or same_family or cand_parent_set):
+                score += 1
+                reasons.append("tied_frontier_family")
+
+        if p.kind == "context_role_recurrence" and same_var and (same_context or same_family):
+            score += 1
+            reasons.append("context_role_recurrence")
+
+        if not reasons:
+            return 0, []
+        return score, reasons
+
+    def _rank_existing_candidates(
+        self,
+        var: int,
+        context_key: str,
+        candidates: Any,
+        *,
+        hook: str,
+    ) -> Any:
+        original_type = type(candidates)
+        original = list(candidates or [])
+        if len(original) < 2:
+            return candidates
+
+        scored: list[tuple[int, int, Any, tuple[str, ...], str]] = []
+        broad_noops = 0
+        for idx, candidate in enumerate(original):
+            candidate_var = int(getattr(candidate, "var", var))
+            matches = self.useful_local_matches(candidate_var, context_key, candidate)
+            score = sum(s for _, s, _ in matches)
+            reasons = tuple(sorted({r for _, _, rs in matches for r in rs}))
+            best_id = matches[0][0].proposal_id if matches else ""
+            broad = self._broad_generic_matches_for(var=candidate_var, context_key=str(context_key or ""))
+            broad_noops += len(broad) if score == 0 else 0
+            scored.append((score, idx, candidate, reasons, best_id))
+
+        if broad_noops:
+            self._broad_generic_noops += broad_noops
+        if not any(score > 0 for score, *_ in scored):
+            return candidates
+
+        ranked = [candidate for score, _, candidate, _, _ in sorted(scored, key=lambda row: (-row[0], row[1]))]
+        self._ranking_applications += 1
+        ranked_scored = sorted(scored, key=lambda row: (-row[0], row[1]))
+        self._top1_supported += int(ranked_scored[0][0] > 0) if ranked_scored else 0
+        self._topk_supported += sum(
+            1 for score, *_ in ranked_scored[: min(3, len(ranked_scored))] if score > 0
+        )
+        if ranked != original:
+            self._candidates_reordered += 1
+        if len(self._feature_examples) < 10:
+            best = max(scored, key=lambda row: (row[0], -row[1]))
+            self._feature_examples.append({
+                "hook": hook,
+                "var": int(var),
+                "context_key": str(context_key or ""),
+                "candidate": _candidate_label(best[2]),
+                "score": best[0],
+                "reasons": list(best[3]),
+                "proposal_id": best[4],
+                "reordered": ranked != original,
+            })
+
+        if original_type is tuple:
+            return tuple(ranked)
+        if original_type is frozenset:
+            return frozenset(ranked)
+        if original_type is set:
+            return set(ranked)
+        return ranked
+
+    def _broad_generic_matches_for(
+        self,
+        *,
+        var: int,
+        context_key: str,
+    ) -> list[ScaffoldMemoryProposal]:
+        return [
+            p for p in self._by_var.get(int(var), [])
+            if self.is_broad_generic_debt_match(p, var=var, context_key=context_key)
+        ]
+
+
+def _context_family(context_key: str) -> str:
+    if not context_key:
+        return ""
+    parts = str(context_key).split("|")
+    if not parts:
+        return ""
+    family = [parts[0]]
+    for part in parts[1:]:
+        if part.startswith("x") or part.startswith("vis="):
+            continue
+        family.append(part)
+    return "|".join(family)
+
+
+def _candidate_parents(candidate: Any | None) -> tuple[int, ...]:
+    if candidate is None:
+        return ()
+    if isinstance(candidate, int):
+        return (int(candidate),)
+    if hasattr(candidate, "parents"):
+        return tuple(int(p) for p in (getattr(candidate, "parents") or ()))
+    if isinstance(candidate, (tuple, list)):
+        if len(candidate) >= 1 and isinstance(candidate[0], (tuple, list, set, frozenset)):
+            return tuple(sorted(int(p) for p in candidate[0]))
+        if all(isinstance(x, int) for x in candidate):
+            return tuple(sorted(int(x) for x in candidate))
+    return ()
+
+
+def _candidate_func(candidate: Any | None) -> str:
+    if candidate is None:
+        return ""
+    if hasattr(candidate, "func"):
+        return str(getattr(candidate, "func") or "")
+    if isinstance(candidate, (tuple, list)) and len(candidate) >= 2:
+        return str(candidate[1])
+    return ""
+
+
+def _candidate_signature(var: int, candidate: Any | None) -> str:
+    parents = _candidate_parents(candidate)
+    func = _candidate_func(candidate)
+    if not func:
+        return ""
+    return f"x{int(var)}:{func}({','.join(str(int(p)) for p in parents)})"
+
+
+def _candidate_nethra_ids(var: int, candidate: Any | None) -> set[str]:
+    parents = _candidate_parents(candidate)
+    func = _candidate_func(candidate)
+    out: set[str] = set()
+    if func:
+        args = ",".join(str(int(p)) for p in parents)
+        out.add(f"frontier:x{int(var)}:{func}({args})")
+        out.add(f"dormant:x{int(var)}:{func}({args})")
+        out.add(f"var_fit:x{int(var)}:{func}({args})")
+    return out
+
+
+def _candidate_label(candidate: Any) -> str:
+    if isinstance(candidate, int):
+        return f"x{candidate}"
+    parents = _candidate_parents(candidate)
+    func = _candidate_func(candidate)
+    if func:
+        return f"{func}({','.join(str(p) for p in parents)})"
+    return str(candidate)
+
+
+def _uncertainty_context_key(case: Any) -> str:
+    signals = tuple(str(s) for s in getattr(case, "active_signals", ()) or ())
+    bits = ["uncertainty_cluster"]
+    action = str(getattr(case, "action", "") or "")
+    if action:
+        bits.append(action)
+    if signals:
+        bits.append("signals=" + ",".join(signals))
+    return "|".join(bits)
+
 
 # ── Per-run match computation (used by batch_run.py) ──────────────────────────
 
@@ -360,6 +732,7 @@ def compute_run_scaffold_metrics(
     context_role_export: dict[str, Any],
     authority_strength_export: dict[str, Any],
     max_examples: int = 5,
+    runtime_metrics: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Compute per-run scaffold memory match metrics.
 
@@ -461,6 +834,11 @@ def compute_run_scaffold_metrics(
 
     match_rate = matched_records / max(1, match_attempts) if match_attempts else 0.0
 
+    runtime = dict(runtime_metrics if runtime_metrics is not None else index.runtime_metrics())
+    runtime["scaffold_memory_broad_generic_noops"] = (
+        int(runtime.get("scaffold_memory_broad_generic_noops", 0) or 0)
+        + broad_generic_debt_matched_records
+    )
     return {
         "scaffold_memory_mode": "record",
         "scaffold_memory_loaded_proposals": index.loaded_proposals_count if index else 0,
@@ -476,6 +854,7 @@ def compute_run_scaffold_metrics(
         "scaffold_memory_authority_allowed_count": 0,
         "scaffold_memory_behavior_effects": 0,
         "scaffold_memory_match_examples": examples,
+        **runtime,
     }
 
 
@@ -496,4 +875,11 @@ def empty_scaffold_metrics() -> dict[str, Any]:
         "scaffold_memory_authority_allowed_count": 0,
         "scaffold_memory_behavior_effects": 0,
         "scaffold_memory_match_examples": [],
+        "scaffold_memory_ranking_applications": 0,
+        "scaffold_memory_candidates_reordered": 0,
+        "scaffold_memory_top1_supported": 0,
+        "scaffold_memory_topk_supported": 0,
+        "scaffold_memory_broad_generic_noops": 0,
+        "scaffold_memory_no_runtime_hook_available": 0,
+        "scaffold_memory_feature_examples": [],
     }

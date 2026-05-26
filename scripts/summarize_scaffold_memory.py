@@ -82,17 +82,20 @@ def _collect_examples(rows: List[Dict[str, Any]], limit: int = 10) -> List[Dict[
     return seen
 
 
-def _record_mode_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    return [r for r in rows if r.get("scaffold_memory_mode") == "record"]
+def _mode_rows(rows: List[Dict[str, Any]], mode: str) -> List[Dict[str, Any]]:
+    return [r for r in rows if r.get("scaffold_memory_mode") == mode]
 
 
 def summarize(rows: List[Dict[str, Any]]) -> str:
     if not rows:
         return "No rows found in JSONL."
 
-    record_rows = _record_mode_rows(rows)
+    record_rows = _mode_rows(rows, "record")
+    assist_rows = _mode_rows(rows, "assist_feature")
+    active_rows = record_rows + assist_rows
     n_total = len(rows)
     n_record = len(record_rows)
+    n_assist = len(assist_rows)
 
     lines: List[str] = []
 
@@ -100,18 +103,21 @@ def summarize(rows: List[Dict[str, Any]]) -> str:
         lines.append("")
         lines.append(f"── {title} {'─' * max(0, 60 - len(title))}")
 
-    lines.append(f"scaffold_memory summary  ({n_record} record-mode rows / {n_total} total rows)")
+    lines.append(
+        f"scaffold_memory summary  ({n_record} record rows / "
+        f"{n_assist} assist_feature rows / {n_total} total rows)"
+    )
 
-    if not record_rows:
-        lines.append("  No record-mode rows found.")
-        lines.append("  Run with --scaffold-memory <path> --scaffold-memory-mode record.")
+    if not active_rows:
+        lines.append("  No record or assist_feature rows found.")
+        lines.append("  Run with --scaffold-memory <path> --scaffold-memory-mode record or assist_feature.")
         return "\n".join(lines)
 
     # ── A. Loaded proposals ───────────────────────────────────────────────────
     h("A. Loaded proposals")
     max_loaded = max(
         int(r.get("scaffold_memory_loaded_proposals", 0) or 0)
-        for r in record_rows
+        for r in active_rows
     )
     lines.append(f"  scaffold_memory_loaded_proposals: {max_loaded}")
     if max_loaded == 0:
@@ -121,11 +127,11 @@ def summarize(rows: List[Dict[str, Any]]) -> str:
 
     # ── B. Match counts and match rate ────────────────────────────────────────
     h("B. Match counts and match rate")
-    total_attempts = _sum_int(record_rows, "scaffold_memory_match_attempts")
-    total_matches = _sum_int(record_rows, "scaffold_memory_matches")
-    total_useful = _sum_int(record_rows, "scaffold_memory_useful_matches")
-    total_broad = _sum_int(record_rows, "scaffold_memory_broad_generic_debt_matches")
-    total_unmatched = _sum_int(record_rows, "scaffold_memory_unmatched_records")
+    total_attempts = _sum_int(active_rows, "scaffold_memory_match_attempts")
+    total_matches = _sum_int(active_rows, "scaffold_memory_matches")
+    total_useful = _sum_int(active_rows, "scaffold_memory_useful_matches")
+    total_broad = _sum_int(active_rows, "scaffold_memory_broad_generic_debt_matches")
+    total_unmatched = _sum_int(active_rows, "scaffold_memory_unmatched_records")
     match_rate = total_matches / max(1, total_attempts)
 
     lines.append(f"  match_attempts:              {total_attempts}")
@@ -157,10 +163,18 @@ def summarize(rows: List[Dict[str, Any]]) -> str:
             f"scaffold assist consideration not yet warranted."
         )
 
-    # ── C. Matches by kind ────────────────────────────────────────────────────
-    h("C. Matches by kind")
-    by_kind = _agg_kind_counts(record_rows, "scaffold_memory_matches_by_kind")
-    useful_by_kind = _agg_kind_counts(record_rows, "scaffold_memory_useful_matches_by_kind")
+    # ── C. Useful vs broad generic ────────────────────────────────────────────
+    h("C. Useful vs broad generic")
+    lines.append(f"  useful_matches:             {total_useful}")
+    lines.append(f"  broad_generic_matches:      {total_broad}")
+    broad_noops = _sum_int(active_rows, "scaffold_memory_broad_generic_noops")
+    lines.append(f"  broad_generic_noops:        {broad_noops}")
+    lines.append("  Broad generic debt is telemetry only and must not reorder candidates.")
+
+    # ── D. Matches by kind ────────────────────────────────────────────────────
+    h("D. Matches by kind")
+    by_kind = _agg_kind_counts(active_rows, "scaffold_memory_matches_by_kind")
+    useful_by_kind = _agg_kind_counts(active_rows, "scaffold_memory_useful_matches_by_kind")
     if not by_kind:
         lines.append("  (no matches)")
     else:
@@ -169,36 +183,29 @@ def summarize(rows: List[Dict[str, Any]]) -> str:
             useful = useful_by_kind.get(kind, 0)
             lines.append(f"  {kind:<40} {count:>8} {useful:>8}")
 
-    # ── D. Unmatched record count ─────────────────────────────────────────────
-    h("D. Unmatched record count")
-    lines.append(f"  scaffold_memory_unmatched_records: {total_unmatched}")
-    if total_attempts > 0:
-        unmatched_rate = total_unmatched / total_attempts
-        lines.append(f"  unmatched_rate: {unmatched_rate:.4f}")
+    # ── E. Ranking applications ───────────────────────────────────────────────
+    h("E. Ranking applications")
+    ranking = _sum_int(active_rows, "scaffold_memory_ranking_applications")
+    no_hook = _sum_int(active_rows, "scaffold_memory_no_runtime_hook_available")
+    lines.append(f"  scaffold_memory_ranking_applications:     {ranking}")
+    lines.append(f"  scaffold_memory_no_runtime_hook_available:{no_hook}")
+    if assist_rows and ranking == 0 and no_hook == 0:
+        lines.append("  WARN: assist_feature ran but no runtime ranking hook was exercised.")
 
-    # ── E. Match examples ─────────────────────────────────────────────────────
-    h("E. Match examples (up to 10)")
-    examples = _collect_examples(record_rows, limit=10)
-    if not examples:
-        lines.append("  (no examples)")
-    else:
-        for i, ex in enumerate(examples, 1):
-            broad = ex.get("broad_generic_debt", False)
-            broad_tag = " [BROAD_GENERIC_DEBT]" if broad else ""
-            lines.append(
-                f"  [{i:2d}] record={str(ex.get('record_nethra_id', ''))[:50]}"
-                f"  kind={ex.get('record_kind', '')}"
-            )
-            lines.append(
-                f"       → proposal={ex.get('matched_proposal_id', '')}  "
-                f"kind={ex.get('matched_kind', '')}  "
-                f"conf={ex.get('confidence', 0):.3f}{broad_tag}"
-            )
+    # ── F. Candidate reorder stats ────────────────────────────────────────────
+    h("F. Candidate reorder stats")
+    reordered = _sum_int(active_rows, "scaffold_memory_candidates_reordered")
+    lines.append(f"  scaffold_memory_candidates_reordered: {reordered}")
 
-    # ── F. Authority boundary ─────────────────────────────────────────────────
-    h("F. Authority boundary")
-    total_auth_allowed = _sum_int(record_rows, "scaffold_memory_authority_allowed_count")
-    total_behavior_effects = _sum_int(record_rows, "scaffold_memory_behavior_effects")
+    # ── G. Top1/topk support ──────────────────────────────────────────────────
+    h("G. Top1/topk support")
+    lines.append(f"  scaffold_memory_top1_supported: {_sum_int(active_rows, 'scaffold_memory_top1_supported')}")
+    lines.append(f"  scaffold_memory_topk_supported: {_sum_int(active_rows, 'scaffold_memory_topk_supported')}")
+
+    # ── H. Behavior boundary ──────────────────────────────────────────────────
+    h("H. Behavior boundary")
+    total_auth_allowed = _sum_int(active_rows, "scaffold_memory_authority_allowed_count")
+    total_behavior_effects = _sum_int(active_rows, "scaffold_memory_behavior_effects")
 
     lines.append(f"  authority_allowed_count: {total_auth_allowed}  (must be 0)")
     lines.append(f"  behavior_effects:        {total_behavior_effects}  (must be 0)")
@@ -216,6 +223,49 @@ def summarize(rows: List[Dict[str, Any]]) -> str:
         )
     else:
         lines.append("  INVARIANT OK: behavior_effects = 0")
+
+    # ── I. Comparison off/record/assist_feature ───────────────────────────────
+    h("I. Mode comparison")
+    by_mode = {
+        mode: _mode_rows(rows, mode)
+        for mode in ("off", "record", "assist_feature")
+    }
+    for mode, mode_rows in by_mode.items():
+        if not mode_rows:
+            continue
+        lines.append(
+            f"  {mode}: rows={len(mode_rows)} "
+            f"loaded={max(int(r.get('scaffold_memory_loaded_proposals', 0) or 0) for r in mode_rows)} "
+            f"matches={_sum_int(mode_rows, 'scaffold_memory_matches')} "
+            f"ranking_applications={_sum_int(mode_rows, 'scaffold_memory_ranking_applications')} "
+            f"reordered={_sum_int(mode_rows, 'scaffold_memory_candidates_reordered')}"
+        )
+
+    # ── Legacy detail: unmatched and examples ─────────────────────────────────
+    h("Unmatched record count")
+    lines.append(f"  scaffold_memory_unmatched_records: {total_unmatched}")
+    if total_attempts > 0:
+        unmatched_rate = total_unmatched / total_attempts
+        lines.append(f"  unmatched_rate: {unmatched_rate:.4f}")
+
+    # ── E. Match examples ─────────────────────────────────────────────────────
+    h("Match examples (up to 10)")
+    examples = _collect_examples(active_rows, limit=10)
+    if not examples:
+        lines.append("  (no examples)")
+    else:
+        for i, ex in enumerate(examples, 1):
+            broad = ex.get("broad_generic_debt", False)
+            broad_tag = " [BROAD_GENERIC_DEBT]" if broad else ""
+            lines.append(
+                f"  [{i:2d}] record={str(ex.get('record_nethra_id', ''))[:50]}"
+                f"  kind={ex.get('record_kind', '')}"
+            )
+            lines.append(
+                f"       → proposal={ex.get('matched_proposal_id', '')}  "
+                f"kind={ex.get('matched_kind', '')}  "
+                f"conf={ex.get('confidence', 0):.3f}{broad_tag}"
+            )
 
     # Decision summary
     h("Decision")
@@ -242,16 +292,16 @@ def summarize(rows: List[Dict[str, Any]]) -> str:
             "  PASS for future assist consideration: useful_matches > 0."
         )
 
-    # ── G. Warning ────────────────────────────────────────────────────────────
-    h("G. Warning")
+    # ── J. Warning ────────────────────────────────────────────────────────────
+    h("J. Warning")
     lines.append(
-        "  Scaffold memory is familiarity/provenance telemetry only."
+        "  Scaffold memory is consideration, not authority."
     )
     lines.append(
         "  It does NOT issue authority, revoke authority, suppress skips,"
     )
     lines.append(
-        "  increase monitoring, increase repair priority, or affect runtime behavior."
+        "  increase monitoring, increase repair priority, or add runtime budget."
     )
     lines.append(
         "  confidence_as_familiarity means 'familiar enough to recognize,'")

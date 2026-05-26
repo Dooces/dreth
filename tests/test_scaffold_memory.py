@@ -681,6 +681,81 @@ def test_no_imports_from_agent():
     assert "ChainedAgent" not in source
 
 
+# ── Tests: assist_feature ranking ────────────────────────────────────────────
+
+def test_useful_local_scaffold_can_reorder_candidates():
+    idx = _index_with(_proposal_dict(
+        "p_rank", kind="unresolved_family", vars=[0],
+        contexts=["parent_candidates|x0|vis=5"],
+        common_parents=[[3]],
+        suggested_runtime_use="ranking_hint",
+    ))
+    ranked = idx.rank_candidate_keys(0, "parent_candidates|x0|vis=5", (1, 3, 2))
+    assert ranked == (3, 1, 2)
+    metrics = idx.runtime_metrics()
+    assert metrics["scaffold_memory_ranking_applications"] == 1
+    assert metrics["scaffold_memory_candidates_reordered"] == 1
+
+
+def test_unrelated_scaffold_does_not_reorder_candidates():
+    idx = _index_with(_proposal_dict(
+        "p_other", kind="unresolved_family", vars=[9],
+        contexts=["parent_candidates|x9|vis=5"],
+        common_parents=[[3]],
+        suggested_runtime_use="ranking_hint",
+    ))
+    ranked = idx.rank_candidate_keys(0, "parent_candidates|x0|vis=5", (1, 3, 2))
+    assert ranked == (1, 3, 2)
+    assert idx.runtime_metrics()["scaffold_memory_ranking_applications"] == 0
+
+
+def test_low_specificity_or_no_runtime_use_proposal_does_not_reorder():
+    idx = _index_with(
+        _proposal_dict(
+            "p_low", kind="unresolved_family", vars=[0],
+            contexts=["parent_candidates|x0|vis=5"],
+            common_parents=[[3]],
+            suggested_runtime_use="ranking_hint",
+            warnings=["low_specificity"],
+        ),
+        _proposal_dict(
+            "p_no_use", kind="unresolved_family", vars=[0],
+            contexts=["parent_candidates|x0|vis=5"],
+            common_parents=[[2]],
+            suggested_runtime_use="no_runtime_use",
+        ),
+    )
+    ranked = idx.rank_candidate_keys(0, "parent_candidates|x0|vis=5", (1, 3, 2))
+    assert ranked == (1, 3, 2)
+    assert idx.runtime_metrics()["scaffold_memory_ranking_applications"] == 0
+
+
+def test_broad_generic_debt_does_not_affect_ordering():
+    idx = _index_with(_proposal_dict(
+        "p_broad", kind="authority_debt_family", vars=[0],
+        contexts=[], common_signatures=[], common_parents=[],
+        role_patterns=["active_visible_conflict"],
+        suggested_runtime_use="ranking_hint",
+    ))
+    ranked = idx.rank_candidate_keys(0, "parent_candidates|x0|vis=5", (1, 3, 2))
+    assert ranked == (1, 3, 2)
+    metrics = idx.runtime_metrics()
+    assert metrics["scaffold_memory_ranking_applications"] == 0
+    assert metrics["scaffold_memory_broad_generic_noops"] > 0
+
+
+def test_scaffold_ranking_is_deterministic():
+    idx = _index_with(_proposal_dict(
+        "p_rank", kind="unresolved_family", vars=[0],
+        contexts=["parent_candidates|x0|vis=5"],
+        common_parents=[[3]],
+        suggested_runtime_use="ranking_hint",
+    ))
+    first = idx.rank_candidate_keys(0, "parent_candidates|x0|vis=5", (1, 3, 2))
+    second = idx.rank_candidate_keys(0, "parent_candidates|x0|vis=5", (1, 3, 2))
+    assert first == second == (3, 1, 2)
+
+
 # ── Tests: from_dict ─────────────────────────────────────────────────────────
 
 def test_from_dict_loads_all_fields():

@@ -209,6 +209,8 @@ class RunConfig:
     authority_strength_controller: str = "state"  # "legacy" | "state"
     authority_derivation_policy: Optional[str] = None
     background_nethra: str = "off"  # "off" | "record" | "assist_feature"
+    scaffold_memory_mode: str = "off"  # "off" | "record" | "assist_feature"
+    scaffold_memory_path: Optional[str] = None
 
     def __post_init__(self) -> None:
         self.authority_derivation_policy = resolve_authority_derivation_policy(
@@ -577,6 +579,15 @@ class ArchMetrics:
     operational_authority_count: int = 0
     background_nethra_export: Dict[str, Any] = field(default_factory=dict)
 
+    # Scaffold-memory assist metrics. Ordering only; no authority.
+    scaffold_memory_ranking_applications: int = 0
+    scaffold_memory_candidates_reordered: int = 0
+    scaffold_memory_top1_supported: int = 0
+    scaffold_memory_topk_supported: int = 0
+    scaffold_memory_broad_generic_noops: int = 0
+    scaffold_memory_no_runtime_hook_available: int = 0
+    scaffold_memory_feature_examples: List[Dict[str, Any]] = field(default_factory=list)
+
 
 @dataclass
 class BaselineMetrics:
@@ -913,6 +924,11 @@ def _build_and_run_dreth(
                 symbolic_false_ok_tolerance=cfg.shadow_key_symbolic_false_ok_tolerance,
             )
 
+    _scaffold_index = None
+    if cfg.scaffold_memory_mode != "off" and cfg.scaffold_memory_path:
+        _scaffold_index = ScaffoldMemoryIndex()
+        _scaffold_index.load_proposals(cfg.scaffold_memory_path)
+
     agent = ChainedAgent(
         world=world, rng=rng_a,
         sentinel_count=5, sentinel_pool=60,
@@ -935,6 +951,8 @@ def _build_and_run_dreth(
         authority_strength_controller=cfg.authority_strength_controller,
         authority_derivation_policy=cfg.authority_derivation_policy,
         background_nethra_mode=cfg.background_nethra,
+        scaffold_memory_mode=cfg.scaffold_memory_mode,
+        scaffold_memory_index=_scaffold_index,
     )
     if cfg.relative_authority_frontier_temporal_report:
         from dreth.relative_authority_frontier import TemporalGraphFrontierEvaluator
@@ -1437,6 +1455,29 @@ def _extract_arch_metrics(agent: ChainedAgent, world: CausalWorld) -> ArchMetric
         m.operational_authority_count = int(_bn.get("operational_authority_count", 0))
         if hasattr(agent, "background_nethra_export"):
             m.background_nethra_export = agent.background_nethra_export(limit=200)
+    if hasattr(agent, "scaffold_memory_metrics"):
+        _sm = agent.scaffold_memory_metrics()
+        m.scaffold_memory_ranking_applications = int(
+            _sm.get("scaffold_memory_ranking_applications", 0)
+        )
+        m.scaffold_memory_candidates_reordered = int(
+            _sm.get("scaffold_memory_candidates_reordered", 0)
+        )
+        m.scaffold_memory_top1_supported = int(
+            _sm.get("scaffold_memory_top1_supported", 0)
+        )
+        m.scaffold_memory_topk_supported = int(
+            _sm.get("scaffold_memory_topk_supported", 0)
+        )
+        m.scaffold_memory_broad_generic_noops = int(
+            _sm.get("scaffold_memory_broad_generic_noops", 0)
+        )
+        m.scaffold_memory_no_runtime_hook_available = int(
+            _sm.get("scaffold_memory_no_runtime_hook_available", 0)
+        )
+        m.scaffold_memory_feature_examples = list(
+            _sm.get("scaffold_memory_feature_examples", []) or []
+        )
     _temporal_frontier = getattr(agent, "_diagnostic_audit_observer", None)
     if _temporal_frontier is not None and hasattr(_temporal_frontier, "summary"):
         _tfs = _temporal_frontier.summary()
@@ -1985,6 +2026,15 @@ def _append_memory_records_for_result(
             r.arch.background_nethra_export,
             r.arch.context_role_export,
             r.arch.authority_strength_export,
+            runtime_metrics={
+                "scaffold_memory_ranking_applications": r.arch.scaffold_memory_ranking_applications,
+                "scaffold_memory_candidates_reordered": r.arch.scaffold_memory_candidates_reordered,
+                "scaffold_memory_top1_supported": r.arch.scaffold_memory_top1_supported,
+                "scaffold_memory_topk_supported": r.arch.scaffold_memory_topk_supported,
+                "scaffold_memory_broad_generic_noops": r.arch.scaffold_memory_broad_generic_noops,
+                "scaffold_memory_no_runtime_hook_available": r.arch.scaffold_memory_no_runtime_hook_available,
+                "scaffold_memory_feature_examples": r.arch.scaffold_memory_feature_examples,
+            },
         ))
     memory_records = records_from_batch_record(rec)
     written = memory_store.append_records(memory_records)
@@ -3163,9 +3213,10 @@ def main():
                          "Familiarity/provenance telemetry only — no runtime authority, "
                          "no skip suppression, no monitoring increase (default: None)"))
     p.add_argument("--scaffold-memory-mode", default="off",
-                   choices=["off", "record"],
+                   choices=["off", "record", "assist_feature"],
                    help=("scaffold memory mode: off=disabled; record=load proposals and "
-                         "report match telemetry without any behavioral effect (default: off)"))
+                         "report match telemetry; assist_feature may reorder existing "
+                         "candidate lists only (default: off)"))
     p.add_argument("--nethra-memory", default="off",
                    choices=["off", "record"],
                    help=("persistent Nethra memory: off=disabled; record=append "
@@ -3342,7 +3393,9 @@ def main():
                   authority_strength=args.authority_strength,
                   authority_strength_controller=args.authority_strength_controller,
                   authority_derivation_policy=authority_derivation_policy,
-                  background_nethra=args.background_nethra)
+                  background_nethra=args.background_nethra,
+                  scaffold_memory_mode=args.scaffold_memory_mode,
+                  scaffold_memory_path=args.scaffold_memory)
         for schedule in schedule_list
         for v in var_list
         for c in cycle_list
@@ -3870,12 +3923,22 @@ def main():
                         "background_nethra_export": r.arch.background_nethra_export,
                     })
                 if args.scaffold_memory_mode != "off":
+                    runtime_scaffold_metrics = {
+                        "scaffold_memory_ranking_applications": r.arch.scaffold_memory_ranking_applications,
+                        "scaffold_memory_candidates_reordered": r.arch.scaffold_memory_candidates_reordered,
+                        "scaffold_memory_top1_supported": r.arch.scaffold_memory_top1_supported,
+                        "scaffold_memory_topk_supported": r.arch.scaffold_memory_topk_supported,
+                        "scaffold_memory_broad_generic_noops": r.arch.scaffold_memory_broad_generic_noops,
+                        "scaffold_memory_no_runtime_hook_available": r.arch.scaffold_memory_no_runtime_hook_available,
+                        "scaffold_memory_feature_examples": r.arch.scaffold_memory_feature_examples,
+                    }
                     scaffold_metrics = (
                         compute_run_scaffold_metrics(
                             scaffold_index,
                             r.arch.background_nethra_export,
                             r.arch.context_role_export,
                             r.arch.authority_strength_export,
+                            runtime_metrics=runtime_scaffold_metrics,
                         )
                         if scaffold_index is not None
                         else empty_scaffold_metrics()

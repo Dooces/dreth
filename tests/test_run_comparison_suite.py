@@ -648,6 +648,92 @@ def test_background_nethra_comparison_parser_detects_operational_authority() -> 
     assert any("FAIL" in line and "operational_authority_count" in line for line in lines)
 
 
+def _sm_args(tmp_path: Path):
+    return suite.build_parser().parse_args(
+        [
+            "--suite",
+            "scaffold_memory",
+            "--schedule",
+            "blind_challenge",
+            "--challenge-blind",
+            "--vars",
+            "100",
+            "--cycles",
+            "10000",
+            "--seeds",
+            "3,11,13",
+            "--hybrid-control",
+            "interfaces",
+            "--repair-agenda",
+            "--parent-ranker",
+            "history_rescue",
+            "--probe-proposer",
+            "history_rescue",
+            "--uncertainty-consolidation",
+            "assist",
+            "--uncertainty-assist-policy",
+            "local_only",
+            "--context-role-index",
+            "assist_feature",
+            "--authority-strength",
+            "record",
+            "--background-nethra",
+            "record",
+            "--scaffold-memory",
+            "reports/auto_sleep_proposals.jsonl",
+            "--out-prefix",
+            str(tmp_path / "reports" / "scaffold_memory_compare"),
+        ]
+    )
+
+
+def test_scaffold_memory_builds_off_record_assist_jobs(tmp_path: Path) -> None:
+    args = _sm_args(tmp_path)
+    jobs = suite.build_scaffold_memory_jobs(args)
+
+    assert [j.label for j in jobs] == ["off", "record", "assist_feature"]
+    for job, mode in zip(jobs, ["off", "record", "assist_feature"]):
+        assert job.command[:2] == [sys.executable, str(suite.SCRIPTS / "batch_run.py")]
+        assert job.command[job.command.index("--scaffold-memory-mode") + 1] == mode
+        assert job.command[job.command.index("--scaffold-memory") + 1] == "reports/auto_sleep_proposals.jsonl"
+        assert job.command[job.command.index("--background-nethra") + 1] == "record"
+
+
+def test_scaffold_memory_output_filenames_are_deterministic(tmp_path: Path) -> None:
+    paths = suite.scaffold_memory_suite_paths(
+        str(tmp_path / "reports" / "scaffold_memory_compare")
+    )
+
+    assert paths["off"]["jsonl"].name == "scaffold_memory_compare_off.jsonl"
+    assert paths["record"]["log"].name == "scaffold_memory_compare_record.log"
+    assert paths["assist_feature"]["jsonl"].name == "scaffold_memory_compare_assist_feature.jsonl"
+    assert (
+        suite.summary_output_path(
+            str(tmp_path / "reports" / "scaffold_memory_compare"),
+            "assist_feature",
+            "scaffold_memory_summary",
+        ).name
+        == "scaffold_memory_compare_assist_feature_scaffold_memory_summary.txt"
+    )
+
+
+def test_scaffold_memory_comparison_detects_behavior_leaks() -> None:
+    off = {field: 1.0 for field in suite.BEHAVIOR_FIELDS}
+    record = dict(off)
+    record["scaffold_memory_loaded_proposals"] = 10
+    record["scaffold_memory_matches"] = 5
+    assist = dict(record)
+    assist["scaffold_memory_ranking_applications"] = 1
+    assist["scaffold_memory_authority_allowed_count"] = 0
+    assist["scaffold_memory_behavior_effects"] = 1
+    metrics = {"off": off, "record": record, "assist_feature": assist}
+
+    lines = suite.scaffold_memory_decision_lines(metrics)
+
+    assert any("PASS" in line and "off == record" in line for line in lines)
+    assert any("FAIL" in line and "behavior_effects" in line for line in lines)
+
+
 def test_reports_directory_is_created(tmp_path: Path, monkeypatch) -> None:
     args = _args(tmp_path)
     reports_dir = Path(args.out_prefix).parent

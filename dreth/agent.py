@@ -121,6 +121,7 @@ from .learned_residual import (
     ShadowResidualKeyAuthority,
 )
 from .background_nethra import BackgroundNethraIndex
+from .scaffold_memory import ScaffoldMemoryIndex
 
 # ── Trass authority thresholds ────────────────────────────────────────────────
 # A trass cert suppresses future sentinel monitoring — the strongest operational
@@ -258,6 +259,8 @@ class ChainedAgent:
         authority_strength_controller: str = "state",
         authority_derivation_policy: Optional[str] = None,
         background_nethra_mode: str = "off",
+        scaffold_memory_mode: str = "off",
+        scaffold_memory_index: Optional[ScaffoldMemoryIndex] = None,
     ):
         """Construct agent. Initializes empty ledger, zero counters, and
         applies any provided per-var cost weight overrides."""
@@ -650,6 +653,27 @@ class ChainedAgent:
             if background_nethra_mode != "off"
             else None
         )
+        if scaffold_memory_mode not in {"off", "record", "assist_feature"}:
+            raise ValueError(
+                "scaffold_memory_mode must be off, record, or assist_feature"
+            )
+        self._scaffold_memory_mode = scaffold_memory_mode
+        self._scaffold_memory_index = (
+            scaffold_memory_index if scaffold_memory_mode != "off" else None
+        )
+
+    def scaffold_memory_metrics(self) -> Dict[str, Any]:
+        if self._scaffold_memory_index is None:
+            return {
+                "scaffold_memory_ranking_applications": 0,
+                "scaffold_memory_candidates_reordered": 0,
+                "scaffold_memory_top1_supported": 0,
+                "scaffold_memory_topk_supported": 0,
+                "scaffold_memory_broad_generic_noops": 0,
+                "scaffold_memory_no_runtime_hook_available": 0,
+                "scaffold_memory_feature_examples": [],
+            }
+        return self._scaffold_memory_index.runtime_metrics()
 
     def _context_role_index_enabled(self) -> bool:
         return self._context_role_index is not None
@@ -826,6 +850,22 @@ class ChainedAgent:
             return
 
         cases = extract_uncertainty_cases_from_agent(self, cycle)
+        if (
+            self._scaffold_memory_mode == "assist_feature"
+            and self._scaffold_memory_index is not None
+            and len(cases) >= 2
+        ):
+            context = nethra_context_key(
+                operation="uncertainty_cluster",
+                visible=self.world.visible_count,
+            )
+            cases = list(
+                self._scaffold_memory_index.rank_uncertainty_local_anchors(
+                    -1,
+                    context,
+                    cases,
+                )
+            )
         clusters = cluster_uncertainty_cases(cases, visible_count=self.world.visible_count)
         assists = propose_consolidation_assists(clusters)
         summary = summarize_clusters(clusters)
@@ -3166,7 +3206,24 @@ class ChainedAgent:
         """
         n = self.ledger.vars[var]
         existing = n.tied_frontier
-        for cand_parents, cand_func in near_tie_set:
+        frontier_candidates = tuple(near_tie_set)
+        if (
+            self._scaffold_memory_mode == "assist_feature"
+            and self._scaffold_memory_index is not None
+            and len(frontier_candidates) >= 2
+        ):
+            frontier_candidates = tuple(
+                self._scaffold_memory_index.rank_frontier_candidates(
+                    var,
+                    nethra_context_key(
+                        operation="tied_frontier",
+                        var=var,
+                        visible=self.world.visible_count,
+                    ),
+                    frontier_candidates,
+                )
+            )
+        for cand_parents, cand_func in frontier_candidates:
             self._context_role_index_record_candidate(
                 prefix="frontier",
                 kind="tied_frontier_candidate",
@@ -3704,6 +3761,22 @@ class ChainedAgent:
                 x for x in ranking.ranked
                 if n.route_certs.get(x) is None or n.route_certs[x].role != "trass"
             )
+            if (
+                self._scaffold_memory_mode == "assist_feature"
+                and self._scaffold_memory_index is not None
+                and len(post_route) >= 2
+            ):
+                post_route = tuple(
+                    self._scaffold_memory_index.rank_candidate_keys(
+                        target,
+                        nethra_context_key(
+                            operation="parent_candidates",
+                            var=target,
+                            visible=self.world.visible_count,
+                        ),
+                        post_route,
+                    )
+                )
             excluded = tuple(x for x in ranking.ranked if x not in post_route)
             source_by_candidate = getattr(ranking, "source_by_candidate", {})
             post_route_sources = {
@@ -3737,7 +3810,36 @@ class ChainedAgent:
             delta = abs(hi - lo)
             if delta > DEFAULT_TOLERANCE:
                 scored.append((delta, x))
-        scored.sort(reverse=True)
+        if (
+            self._scaffold_memory_mode == "assist_feature"
+            and self._scaffold_memory_index is not None
+            and len(scored) >= 2
+        ):
+            context = nethra_context_key(
+                operation="parent_candidates",
+                var=target,
+                visible=self.world.visible_count,
+            )
+            scaffold_scores = {
+                x: sum(
+                    score
+                    for _, score, _ in self._scaffold_memory_index.useful_local_matches(
+                        target,
+                        context,
+                        x,
+                    )
+                )
+                for _, x in scored
+            }
+            if any(score > 0 for score in scaffold_scores.values()):
+                self._scaffold_memory_index.rank_candidate_keys(
+                    target,
+                    context,
+                    tuple(x for _, x in scored),
+                )
+            scored.sort(key=lambda row: (-row[0], -scaffold_scores.get(row[1], 0), row[1]))
+        else:
+            scored.sort(reverse=True)
         return {
             x for _, x in scored[:m]
             if n.route_certs.get(x) is None or n.route_certs[x].role != "trass"
