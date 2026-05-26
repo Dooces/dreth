@@ -16,7 +16,12 @@ from dreth.uncertainty_consolidation import UncertaintyCase
 from dreth.world import CausalWorld
 
 
-def _agent(*, index_mode: str = "off", uc_mode: str = "off") -> ChainedAgent:
+def _agent(
+    *,
+    index_mode: str = "off",
+    uc_mode: str = "off",
+    anchor_policy: str | None = None,
+) -> ChainedAgent:
     world = CausalWorld(5, random.Random(3), noise_sigma=0.0)
     world.visible_count = 5
     return ChainedAgent(
@@ -29,6 +34,7 @@ def _agent(*, index_mode: str = "off", uc_mode: str = "off") -> ChainedAgent:
         uncertainty_consolidation_mode=uc_mode,
         uncertainty_assist_policy="local_only",
         context_role_index_mode=index_mode,
+        context_role_anchor_policy=anchor_policy,
     )
 
 
@@ -79,10 +85,10 @@ def test_record_mode_records_nethras_but_does_not_change_behavior() -> None:
     assert record.context_role_index_metrics()["context_role_index_nodes"] > 0
 
 
-def test_assist_feature_exposes_index_match_as_local_anchor(
+def test_loose_assist_feature_exposes_broad_index_match_as_local_anchor(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    agent = _agent(index_mode="assist_feature", uc_mode="assist")
+    agent = _agent(index_mode="assist_feature", uc_mode="assist", anchor_policy="loose")
     agent.initialize()
     index = agent._context_role_index
     assert index is not None
@@ -116,6 +122,244 @@ def test_assist_feature_exposes_index_match_as_local_anchor(
     assert agent._uncertainty_budget_bonus
     assert metrics["context_role_matches_used_as_local_anchor"] > 0
     assert metrics["context_role_assist_feature_hits"] > 0
+
+
+def test_strict_assist_feature_rejects_broad_unresolved_role(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = _agent(index_mode="assist_feature", uc_mode="assist", anchor_policy="strict")
+    agent.initialize()
+    index = agent._context_role_index
+    assert index is not None
+    index.add_or_update_node(NethraNode(
+        nethra_id="broad-unresolved",
+        kind="var_fit",
+        components=(0, 1),
+        learned_parents=(),
+        first_seen_cycle=1,
+        last_seen_cycle=1,
+        source="audit",
+    ))
+    index.assign_context_role(ContextRoleRecord(
+        nethra_id="broad-unresolved",
+        context_key="operation|x0|x1",
+        operation="classification",
+        role="unresolved",
+        cycle=1,
+        uncertainty_signals=("open_novelty", "near_tie_count"),
+        validity_scope=(0, 1),
+    ))
+    monkeypatch.setattr(
+        agent_mod,
+        "extract_uncertainty_cases_from_agent",
+        lambda _agent, _cycle: [_case(0), _case(1)],
+    )
+
+    agent._run_uncertainty_consolidation(2)
+    metrics = agent.context_role_index_metrics()
+
+    assert not agent._uncertainty_budget_bonus
+    assert metrics["context_role_matches_used_as_local_anchor"] == 0
+    assert metrics["context_role_matches_suppressed_weak"] > 0
+
+
+def test_strict_exact_nethra_signature_context_qualifies() -> None:
+    index = ContextRoleIndex()
+    nid = "exact"
+    signature = "x0:FIRST(2)"
+    index.add_or_update_node(NethraNode(
+        nethra_id=nid,
+        kind="var_fit",
+        target_var=0,
+        components=(0, 2),
+        learned_parents=(2,),
+        learned_func="FIRST",
+        signature=signature,
+        first_seen_cycle=1,
+        last_seen_cycle=1,
+    ))
+    index.assign_context_role(ContextRoleRecord(
+        nethra_id=nid,
+        context_key="uncertainty_cluster|possible_missing_operator",
+        operation="uncertainty_consolidation",
+        role="tareth",
+        cycle=1,
+        validity_scope=(0, 2),
+    ))
+    cluster = type("Cluster", (), {
+        "cluster_id": "uc1",
+        "vars": (0, 1),
+        "shared_parents": (2,),
+        "shared_graph_neighbors": (),
+        "shared_signals": ("near_tie_count",),
+        "proposed_handle_kind": "possible_missing_operator",
+        "learned_signature": signature,
+        "is_giant_cluster": False,
+    })()
+
+    matches = index.query_for_uncertainty_cluster(
+        cluster,
+        anchor_policy="strict",
+        current_cycle=2,
+    )
+
+    assert [m.nethra_id for m in matches] == [nid]
+
+
+def test_strict_shared_parent_and_context_family_qualifies() -> None:
+    index = ContextRoleIndex()
+    index.add_or_update_node(NethraNode(
+        nethra_id="parent-family",
+        kind="var_fit",
+        target_var=0,
+        components=(0, 2),
+        learned_parents=(2,),
+        first_seen_cycle=1,
+        last_seen_cycle=1,
+    ))
+    index.assign_context_role(ContextRoleRecord(
+        nethra_id="parent-family",
+        context_key="uncertainty_cluster|shared_ambiguity",
+        operation="uncertainty_consolidation",
+        role="tareth",
+        cycle=1,
+        validity_scope=(0, 2),
+    ))
+    cluster = type("Cluster", (), {
+        "cluster_id": "uc1",
+        "vars": (0, 1),
+        "shared_parents": (2,),
+        "shared_graph_neighbors": (),
+        "shared_signals": ("near_tie_count",),
+        "proposed_handle_kind": "shared_ambiguity",
+        "is_giant_cluster": False,
+    })()
+
+    assert index.query_for_uncertainty_cluster(
+        cluster,
+        anchor_policy="strict",
+        current_cycle=2,
+    )
+
+
+def test_strict_role_transition_qualifies() -> None:
+    index = ContextRoleIndex()
+    index.add_or_update_node(NethraNode(
+        nethra_id="transition",
+        kind="var_fit",
+        target_var=0,
+        components=(0,),
+        first_seen_cycle=1,
+        last_seen_cycle=3,
+    ))
+    for cycle, role in ((1, "trass"), (2, "tareth")):
+        index.assign_context_role(ContextRoleRecord(
+            nethra_id="transition",
+            context_key="uncertainty_cluster|possible_latent_regime",
+            operation="uncertainty_consolidation",
+            role=role,
+            cycle=cycle,
+            validity_scope=(0,),
+        ))
+    cluster = type("Cluster", (), {
+        "cluster_id": "uc1",
+        "vars": (0, 1),
+        "shared_parents": (),
+        "shared_graph_neighbors": (),
+        "shared_signals": ("sentinel_failures",),
+        "proposed_handle_kind": "possible_latent_regime",
+        "is_giant_cluster": False,
+    })()
+
+    assert index.query_for_uncertainty_cluster(
+        cluster,
+        anchor_policy="strict",
+        current_cycle=3,
+    )
+
+
+def test_cap_suppresses_excessive_anchors() -> None:
+    index = ContextRoleIndex()
+    index.max_local_anchors_per_cluster = 2
+    for i in range(4):
+        index.add_or_update_node(NethraNode(
+            nethra_id=f"n{i}",
+            kind="var_fit",
+            target_var=0,
+            components=(0, 2),
+            learned_parents=(2,),
+            first_seen_cycle=1,
+            last_seen_cycle=1,
+        ))
+        index.assign_context_role(ContextRoleRecord(
+            nethra_id=f"n{i}",
+            context_key="uncertainty_cluster|shared_ambiguity",
+            operation="uncertainty_consolidation",
+            role="tareth",
+            cycle=1,
+            validity_scope=(0, 2),
+        ))
+    cluster = type("Cluster", (), {
+        "cluster_id": "uc1",
+        "vars": (0, 1),
+        "shared_parents": (2,),
+        "shared_graph_neighbors": (),
+        "shared_signals": ("near_tie_count",),
+        "proposed_handle_kind": "shared_ambiguity",
+        "is_giant_cluster": False,
+    })()
+
+    matches = index.query_for_uncertainty_cluster(
+        cluster,
+        anchor_policy="strict",
+        current_cycle=2,
+    )
+    metrics = index.summarize()
+
+    assert len(matches) == 2
+    assert metrics["context_role_matches_suppressed_cap"] == 2
+
+
+def test_duplicate_matches_are_suppressed_within_cycle() -> None:
+    index = ContextRoleIndex()
+    index.add_or_update_node(NethraNode(
+        nethra_id="dup",
+        kind="var_fit",
+        target_var=0,
+        components=(0, 2),
+        learned_parents=(2,),
+        first_seen_cycle=1,
+        last_seen_cycle=1,
+    ))
+    index.assign_context_role(ContextRoleRecord(
+        nethra_id="dup",
+        context_key="uncertainty_cluster|shared_ambiguity",
+        operation="uncertainty_consolidation",
+        role="tareth",
+        cycle=1,
+        validity_scope=(0, 2),
+    ))
+    cluster = type("Cluster", (), {
+        "cluster_id": "uc1",
+        "vars": (0, 1),
+        "shared_parents": (2,),
+        "shared_graph_neighbors": (),
+        "shared_signals": ("near_tie_count",),
+        "proposed_handle_kind": "shared_ambiguity",
+        "is_giant_cluster": False,
+    })()
+
+    assert len(index.query_for_uncertainty_cluster(
+        cluster,
+        anchor_policy="strict",
+        current_cycle=2,
+    )) == 1
+    assert index.query_for_uncertainty_cluster(
+        cluster,
+        anchor_policy="strict",
+        current_cycle=2,
+    ) == ()
+    assert index.summarize()["context_role_matches_suppressed_duplicate"] == 1
 
 
 def test_same_nethra_can_be_trass_and_tareth_in_different_contexts() -> None:

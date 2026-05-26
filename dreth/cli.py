@@ -97,6 +97,10 @@ def parse_args() -> argparse.Namespace:
                    help=("off=disabled; record=context role provenance only; "
                          "assist_feature=allow uncertainty consolidation to use "
                          "indexed nethra role history as local-anchor features"))
+    p.add_argument("--context-role-anchor-policy", default=None,
+                   choices=["off", "strict", "loose"],
+                   help=("ContextRoleIndex assist matching policy. Default is "
+                         "strict with assist_feature, off otherwise."))
     p.add_argument("--nethra-reservoir", dest="context_role_index", default=None,
                    choices=["off", "record", "assist_feature"],
                    help=argparse.SUPPRESS)
@@ -400,6 +404,7 @@ def run() -> None:
         uncertainty_consolidation_mode=args.uncertainty_consolidation,
         uncertainty_assist_policy=args.uncertainty_assist_policy,
         context_role_index_mode=args.context_role_index or "off",
+        context_role_anchor_policy=args.context_role_anchor_policy,
     )
     agent.probe_retention_per_var = args.probe_retention
 

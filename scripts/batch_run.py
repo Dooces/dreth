@@ -197,6 +197,7 @@ class RunConfig:
     uncertainty_consolidation: str = "off"  # "off" | "shadow" | "assist"
     uncertainty_assist_policy: str = "all"
     context_role_index: str = "off"  # "off" | "record" | "assist_feature"
+    context_role_anchor_policy: str | None = None  # "off" | "strict" | "loose"
 
 
 # ── per-run result ─────────────────────────────────────────────────────────────
@@ -437,8 +438,17 @@ class ArchMetrics:
     context_role_best_available: int = 0
     context_role_index_queries: int = 0
     context_role_index_matches: int = 0
+    context_role_raw_matches: int = 0
+    context_role_deduped_matches: int = 0
+    context_role_matches_suppressed_weak: int = 0
+    context_role_matches_suppressed_duplicate: int = 0
+    context_role_matches_suppressed_cap: int = 0
     context_role_matches_used_as_local_anchor: int = 0
     context_role_assist_feature_hits: int = 0
+    context_role_anchor_policy: str = "off"
+    context_role_assist_pressure_events: int = 0
+    context_role_assist_pressure_per_cycle: float = 0.0
+    context_role_top_match_reasons: Dict[str, int] = field(default_factory=dict)
     context_role_nodes_by_kind: Dict[str, int] = field(default_factory=dict)
     context_role_nodes_by_source: Dict[str, int] = field(default_factory=dict)
     context_roles_by_context: Dict[str, int] = field(default_factory=dict)
@@ -800,6 +810,7 @@ def _build_and_run_dreth(
         uncertainty_consolidation_mode=cfg.uncertainty_consolidation,
         uncertainty_assist_policy=cfg.uncertainty_assist_policy,
         context_role_index_mode=cfg.context_role_index,
+        context_role_anchor_policy=cfg.context_role_anchor_policy,
     )
     if cfg.relative_authority_frontier_temporal_report:
         from dreth.relative_authority_frontier import TemporalGraphFrontierEvaluator
@@ -1152,10 +1163,29 @@ def _extract_arch_metrics(agent: ChainedAgent, world: CausalWorld) -> ArchMetric
         m.context_role_best_available = int(_cri.get("context_role_best_available", 0))
         m.context_role_index_queries = int(_cri.get("context_role_index_queries", 0))
         m.context_role_index_matches = int(_cri.get("context_role_index_matches", 0))
+        m.context_role_raw_matches = int(_cri.get("context_role_raw_matches", 0))
+        m.context_role_deduped_matches = int(_cri.get("context_role_deduped_matches", 0))
+        m.context_role_matches_suppressed_weak = int(
+            _cri.get("context_role_matches_suppressed_weak", 0)
+        )
+        m.context_role_matches_suppressed_duplicate = int(
+            _cri.get("context_role_matches_suppressed_duplicate", 0)
+        )
+        m.context_role_matches_suppressed_cap = int(
+            _cri.get("context_role_matches_suppressed_cap", 0)
+        )
         m.context_role_matches_used_as_local_anchor = int(
             _cri.get("context_role_matches_used_as_local_anchor", 0)
         )
         m.context_role_assist_feature_hits = int(_cri.get("context_role_assist_feature_hits", 0))
+        m.context_role_anchor_policy = str(_cri.get("context_role_anchor_policy", "off"))
+        m.context_role_assist_pressure_events = int(
+            _cri.get("context_role_assist_pressure_events", 0)
+        )
+        m.context_role_assist_pressure_per_cycle = float(
+            _cri.get("context_role_assist_pressure_per_cycle", 0)
+        )
+        m.context_role_top_match_reasons = dict(_cri.get("context_role_top_match_reasons", {}))
         m.context_role_nodes_by_kind = dict(_cri.get("context_role_nodes_by_kind", {}))
         m.context_role_nodes_by_source = dict(_cri.get("context_role_nodes_by_source", {}))
         m.context_roles_by_context = dict(_cri.get("context_roles_by_context", {}))
@@ -2814,6 +2844,10 @@ def main():
                    choices=["off", "record", "assist_feature"],
                    help=("ContextRoleIndex over nethra graph provenance: off, "
                          "record, or assist_feature (default: off)"))
+    p.add_argument("--context-role-anchor-policy", default=None,
+                   choices=["off", "strict", "loose"],
+                   help=("ContextRoleIndex assist matching policy. Default is "
+                         "strict with assist_feature, off otherwise."))
     p.add_argument("--nethra-reservoir", dest="context_role_index", default=None,
                    choices=["off", "record", "assist_feature"],
                    help=argparse.SUPPRESS)
@@ -2946,7 +2980,8 @@ def main():
                   challenge_blind=args.challenge_blind,
                   uncertainty_consolidation=args.uncertainty_consolidation,
                   uncertainty_assist_policy=args.uncertainty_assist_policy,
-                  context_role_index=args.context_role_index or "off")
+                  context_role_index=args.context_role_index or "off",
+                  context_role_anchor_policy=args.context_role_anchor_policy)
         for schedule in schedule_list
         for v in var_list
         for c in cycle_list
@@ -3064,6 +3099,9 @@ def main():
                     "vars_open_novelty": r.arch.vars_open_novelty,
                     "vars_in_backoff": r.arch.vars_in_backoff,
                     "passive_stress_count": r.arch.passive_stress_count,
+                    "regime_sentinel_fails": r.arch.regime_sentinel_fails,
+                    "regime_sentinel_fail": r.arch.regime_sentinel_fails,
+                    "total_unique_failures": r.arch.total_unique_failures,
                     "shadow_key_total": r.arch.shadow_key_total,
                     "shadow_key_candidate_safe": r.arch.shadow_key_candidate_safe,
                     "shadow_key_revoked": r.arch.shadow_key_revoked,
@@ -3139,12 +3177,31 @@ def main():
                     "context_role_best_available": r.arch.context_role_best_available,
                     "context_role_index_queries": r.arch.context_role_index_queries,
                     "context_role_index_matches": r.arch.context_role_index_matches,
+                    "context_role_raw_matches": r.arch.context_role_raw_matches,
+                    "context_role_deduped_matches": r.arch.context_role_deduped_matches,
+                    "context_role_matches_suppressed_weak": (
+                        r.arch.context_role_matches_suppressed_weak
+                    ),
+                    "context_role_matches_suppressed_duplicate": (
+                        r.arch.context_role_matches_suppressed_duplicate
+                    ),
+                    "context_role_matches_suppressed_cap": (
+                        r.arch.context_role_matches_suppressed_cap
+                    ),
                     "context_role_matches_used_as_local_anchor": (
                         r.arch.context_role_matches_used_as_local_anchor
                     ),
                     "context_role_assist_feature_hits": (
                         r.arch.context_role_assist_feature_hits
                     ),
+                    "context_role_anchor_policy": r.arch.context_role_anchor_policy,
+                    "context_role_assist_pressure_events": (
+                        r.arch.context_role_assist_pressure_events
+                    ),
+                    "context_role_assist_pressure_per_cycle": (
+                        r.arch.context_role_assist_pressure_per_cycle
+                    ),
+                    "context_role_top_match_reasons": r.arch.context_role_top_match_reasons,
                     "context_role_nodes_by_kind": r.arch.context_role_nodes_by_kind,
                     "context_role_nodes_by_source": r.arch.context_role_nodes_by_source,
                     "context_roles_by_context": r.arch.context_roles_by_context,
@@ -3162,6 +3219,8 @@ def main():
                     "nethra_role_best_available": r.arch.context_role_best_available,
                     "reservoir_queries": r.arch.context_role_index_queries,
                     "reservoir_matches": r.arch.context_role_index_matches,
+                    "reservoir_raw_matches": r.arch.context_role_raw_matches,
+                    "reservoir_deduped_matches": r.arch.context_role_deduped_matches,
                     "reservoir_matches_used_as_local_anchor": (
                         r.arch.context_role_matches_used_as_local_anchor
                     ),

@@ -244,6 +244,7 @@ class ChainedAgent:
         uncertainty_assist_policy: str = "all",
         uncertainty_max_preserve_count: int = 3,
         context_role_index_mode: str = "off",
+        context_role_anchor_policy: Optional[str] = None,
         nethra_reservoir_mode: Optional[str] = None,
     ):
         """Construct agent. Initializes empty ledger, zero counters, and
@@ -563,9 +564,22 @@ class ChainedAgent:
                 "context_role_index_mode must be off, record, or assist_feature"
             )
         self._context_role_index_mode = context_role_index_mode
+        if context_role_anchor_policy is None:
+            context_role_anchor_policy = (
+                "strict" if context_role_index_mode == "assist_feature" else "off"
+            )
+        if context_role_anchor_policy not in {"off", "strict", "loose"}:
+            raise ValueError(
+                "context_role_anchor_policy must be off, strict, or loose"
+            )
+        if context_role_index_mode != "assist_feature":
+            context_role_anchor_policy = "off"
+        self._context_role_anchor_policy = context_role_anchor_policy
         self._context_role_index = (
             ContextRoleIndex() if context_role_index_mode != "off" else None
         )
+        if self._context_role_index is not None:
+            self._context_role_index.anchor_policy = self._context_role_anchor_policy
         self._context_role_index_latest_matches = []
 
     def _context_role_index_enabled(self) -> bool:
@@ -752,10 +766,15 @@ class ChainedAgent:
                 ))
                 if (
                     self._context_role_index_mode == "assist_feature"
+                    and self._context_role_anchor_policy != "off"
                     and not cluster.is_giant_cluster
                 ):
                     index_matches_by_cluster[cluster.cluster_id] = (
-                        self._context_role_index.query_for_uncertainty_cluster(cluster)
+                        self._context_role_index.query_for_uncertainty_cluster(
+                            cluster,
+                            anchor_policy=self._context_role_anchor_policy,
+                            current_cycle=cycle,
+                        )
                     )
             self._context_role_index_latest_matches = [
                 match
@@ -792,10 +811,8 @@ class ChainedAgent:
                 cluster is not None
                 and index_matches_by_cluster.get(cluster.cluster_id)
             )
-            if index_local_anchor and self._context_role_index is not None:
-                self._context_role_index.mark_matches_used_as_local_anchor(
-                    len(index_matches_by_cluster.get(cluster.cluster_id, ()))
-                )
+            index_anchor_required = bool(index_local_anchor and not is_local_cluster)
+            if index_local_anchor:
                 is_local_cluster = True
             is_giant_cluster = bool(cluster and cluster.is_giant_cluster)
             if not is_local_cluster or (
@@ -857,6 +874,31 @@ class ChainedAgent:
             if applied:
                 for var in target_vars:
                     self._uncertainty_assist_vars.setdefault(var, set()).add(assist.assist_kind)
+                if (
+                    index_anchor_required
+                    and self._context_role_index is not None
+                    and self._context_role_index.can_record_index_assist_for_cycle(cycle)
+                ):
+                    anchor = index_matches_by_cluster.get(assist.cluster_id, ())[0]
+                    self._context_role_index.record_index_assist(
+                        cycle=cycle,
+                        assist_kind=assist.assist_kind,
+                        cluster_id=assist.cluster_id,
+                        nethra_id=anchor.nethra_id,
+                        match_reason=anchor.match_reason,
+                        changed_budget=assist.assist_kind in {
+                            "prioritize_attention",
+                            "increase_monitoring",
+                        } and self._uncertainty_assist_policy in {
+                            "all",
+                            "budget_only",
+                            "local_only",
+                        },
+                        changed_probes=assist.assist_kind == "request_separating_probe",
+                        changed_preservation=assist.assist_kind == "preserve_alternatives",
+                        changed_priority=assist.assist_kind == "repair_priority_bonus",
+                        outcome=self._context_role_assist_outcome(target_vars),
+                    )
                 if is_giant_cluster:
                     self._uncertainty_assists_applied_from_giant_clusters += 1
                 else:
@@ -865,6 +907,42 @@ class ChainedAgent:
             if not applied:
                 self._uncertainty_assist_noops += 1
         self._uncertainty_giant_clusters_suppressed += len(suppressed_giant_clusters)
+
+    def _context_role_assist_outcome(self, target_vars: Tuple[int, ...]) -> Dict[str, Any]:
+        sentinel_failure = False
+        revocation = False
+        novelty_persistence = False
+        audit_count = 0
+        fit_signatures: Set[Tuple[Tuple[int, ...], str]] = set()
+        target_set = set(target_vars)
+        for var in target_vars:
+            if not (0 <= var < self.world.visible_count):
+                continue
+            n = self.ledger.vars[var]
+            sentinel_failure = sentinel_failure or int(n.consecutive_sentinel_failures) > 0
+            revocation = revocation or any(
+                getattr(cert, "revoked_by", None)
+                for cert in list(n.certificates.values()) + list(n.route_certs.values())
+            )
+            novelty_persistence = novelty_persistence or any(
+                int(getattr(nv, "affected_var", -1)) == int(var)
+                and getattr(nv, "status", "") == "open"
+                for nv in getattr(self.ledger, "novelty", ()) or ()
+            )
+            audit_count += int(getattr(n, "full_audits", 0) or 0)
+        for fd in getattr(self, "fit_diagnostics", ()) or ():
+            if int(getattr(fd, "var", -1)) in target_set:
+                fit_signatures.add((
+                    tuple(int(p) for p in getattr(fd, "best_parents", ()) or ()),
+                    str(getattr(fd, "best_func", "")),
+                ))
+        return {
+            "sentinel_failure": sentinel_failure,
+            "revocation": revocation,
+            "fit_churn": len(fit_signatures) > 1,
+            "novelty_persistence": novelty_persistence,
+            "audit_count": audit_count,
+        }
 
     def uncertainty_consolidation_metrics(self) -> Dict[str, Any]:
         avg_cluster = (
@@ -933,8 +1011,17 @@ class ChainedAgent:
                 "context_role_best_available": 0,
                 "context_role_index_queries": 0,
                 "context_role_index_matches": 0,
+                "context_role_raw_matches": 0,
+                "context_role_deduped_matches": 0,
+                "context_role_matches_suppressed_weak": 0,
+                "context_role_matches_suppressed_duplicate": 0,
+                "context_role_matches_suppressed_cap": 0,
                 "context_role_matches_used_as_local_anchor": 0,
                 "context_role_assist_feature_hits": 0,
+                "context_role_anchor_policy": self._context_role_anchor_policy,
+                "context_role_assist_pressure_events": 0,
+                "context_role_assist_pressure_per_cycle": 0,
+                "context_role_top_match_reasons": {},
                 "context_role_nodes_by_kind": {},
                 "context_role_nodes_by_source": {},
                 "context_roles_by_context": {},
@@ -947,6 +1034,8 @@ class ChainedAgent:
                 "nethra_role_best_available": 0,
                 "reservoir_queries": 0,
                 "reservoir_matches": 0,
+                "reservoir_raw_matches": 0,
+                "reservoir_deduped_matches": 0,
                 "reservoir_matches_used_as_local_anchor": 0,
                 "reservoir_assist_feature_hits": 0,
                 "reservoir_records_by_kind": {},
@@ -957,6 +1046,7 @@ class ChainedAgent:
         summary = self._context_role_index.summarize()
         summary["context_role_index_mode"] = self._context_role_index_mode
         summary["nethra_reservoir_mode"] = self._context_role_index_mode
+        summary["context_role_anchor_policy"] = self._context_role_anchor_policy
         return summary
 
     def context_role_index_export(self, limit: int = 200) -> Dict[str, Any]:
