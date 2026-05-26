@@ -1,0 +1,39 @@
+Nethra Memory Summary
+================================================================
+
+A. memory store inventory
+  path: reports/nethra_memory_holdout_store.jsonl
+  rows: 1822
+  memory records: 1818
+  run summaries: 3
+  sleep runs: 1
+
+B. records by type
+  context_role             900
+  background_nethra        600
+  authority_strength       300
+  scaffold_proposal        15
+  uncertainty              3
+
+C. backlog size
+  total backlog: 1818
+  authority_strength       300
+  background_nethra        600
+  context_role             900
+  scaffold_proposal        15
+  uncertainty              3
+
+D. sleep runs
+  [1] reason=run_end input_records=1803 proposals=320
+
+E. scaffold proposals created
+  auto_sleep_proposals: 320
+
+F. auto-loaded scaffold matches
+  auto_loaded_scaffold_matches: 15
+
+G. authority boundary
+  authority_allowed_count: 0  (must be 0)
+  behavior_effects: 0
+
+H. warning: persistent memory is familiarity/provenance, not authority
