@@ -1,0 +1,138 @@
+Authority Strength Report
+Warning: visible-evidence state, not truth.
+
+A. state distribution
+  runs: 3
+  exported_records: 300
+  strength:
+    strong: 0
+    usable: 3
+    weak: 2
+    contested: 295
+    insufficient: 0
+  authority_state:
+    strong: 0
+    usable: 3
+    contested_best_available: 243
+    quarantined_for_derivation: 0
+    repair_candidate: 54
+    insufficient: 0
+
+B. debt lifecycle
+  authority_debt_created=0
+  authority_debt_persisted=0
+  authority_debt_paid=0
+  authority_debt_escalated=0
+  authority_debt_deescalated=0
+  authority_debt_outstanding=0
+  debt_age_mean=0.000
+  debt_age_max=0
+  future_evidence_requirements=297
+
+C. derivation gate checks allowed/blocked
+  derivation_quarantines=0
+  derivation_gate_checks=0
+  derivation_gate_allowed=0
+  derivation_gate_blocked=0
+  derivation_gate_would_block=0
+  derivation_gate_shadow_would_block=0
+
+D. blocked handle kinds
+  by_handle_kind:
+    none
+  by_state:
+    none
+  by_reason:
+    none
+
+E. transitions
+  authority_state_transitions=0
+  transitions_to_derivation_quarantine=0
+  by_previous_next:
+    none
+  by_reason:
+    none
+  later_paid_down:
+    none
+
+F. applied vs suppressed effects
+  authority_action_candidates=0
+  authority_actions_applied=0
+  authority_noop_state_not_permit=0
+  authority_suppressed_cooldown=0
+  authority_suppressed_budget=0
+  authority_suppressed_local_use_only=0
+  authority_suppressed_derivation_only=0
+  local_use_preserved=0
+  best_available by strength:
+    strong: 0
+    usable: 3
+    weak: 2
+    contested: 295
+    insufficient: 0
+
+  bounded runtime effects applied:
+  monitoring_increases_from_strength_applied=0
+  monitoring_hints_applied=0
+  repair_priority_bumps_from_strength_applied=0
+  bounded_repairs_applied=0
+  alternatives_preserved_from_strength=0
+  suppressed candidate effects:
+  monitoring_increases_from_strength_candidates=0
+  monitoring_increases_from_strength_suppressed_by_state=0
+  monitoring_increases_from_strength_suppressed_by_cooldown=0
+  monitoring_increases_from_strength_suppressed_by_budget=0
+  monitoring_increases_from_strength_noops=0
+  repair_priority_bumps_from_strength_candidates=0
+  repair_priority_bumps_from_strength_suppressed_by_state=0
+  repair_priority_bumps_from_strength_suppressed_by_cooldown=0
+  repair_priority_bumps_from_strength_suppressed_by_budget=0
+  repair_priority_bumps_from_strength_noops=0
+
+G. off/record/state comparison
+  modes: record=3
+  controllers: state=3
+  derivation_policies: off=3
+  record/state/off: quality_cost_mean=1984999.667 iv_mean=0.000 full_audits_mean=1181.333 blocked=0 would_block=0
+
+H. warning when derivation gating worsens amortization
+  none
+
+Supplement. transition examples
+  none
+
+Supplement. warning: visible-evidence state, not truth
+  No cert issuance, revocation, skip suppression, or fit replacement is implied.
+
+Supplement. contested/weak reasons
+  active_visible_conflict: 295
+  best_available_but_limited_evidence: 2
+
+Supplement. visible-evidence triggers
+  uncertainty_cluster: 590
+  uncertainty_giant_cluster: 590
+  near_ties: 292
+  tied_frontier: 285
+  low_fit_margin: 280
+  strong_observations: 268
+  sentinel_coverage: 264
+  repeated_fit_churn: 228
+  open_novelty: 218
+  near_tie_count: 198
+  passive_stress: 113
+  sentinel_failures: 52
+  recent_revocations: 34
+  sentinel_passes: 32
+  fit_margin: 12
+
+Supplement. post-hoc interpretation may use manifest only after classification
+  var_fit:x0:HIGH(): strength=contested unknown
+  var_fit:x1:FIRST(7): strength=contested weak_noisy=2 proxy_confounded=1
+  var_fit:x2:HIGH(): strength=contested delayed=2 latent_additive=1
+  var_fit:x3:MEAN(4,5): strength=contested weak_noisy=1 dense_mixed=1 smooth_nonlinear=1
+  var_fit:x4:HIGH(): strength=usable symbolic=2 dense_mixed=1
+  var_fit:x5:TINY(): strength=contested proxy_confounded=1 dense_mixed=1 symbolic=1
+  var_fit:x6:LOW(): strength=contested dense_mixed=2 delayed=1
+  var_fit:x7:FIRST(4): strength=contested weak_noisy=2 dense_mixed=1
+  var_fit:x8:HIGH(): strength=contested symbolic=3
+  var_fit:x9:DIFF(44,95): strength=contested symbolic=2 smooth_nonlinear=1

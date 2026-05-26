@@ -1,0 +1,197 @@
+Authority Strength Report
+Warning: visible-evidence state, not truth.
+
+A. state distribution
+  runs: 3
+  exported_records: 300
+  strength:
+    strong: 0
+    usable: 2
+    weak: 1
+    contested: 297
+    insufficient: 0
+  authority_state:
+    strong: 0
+    usable: 3
+    contested_best_available: 846
+    quarantined_for_derivation: 41
+    repair_candidate: 1163
+    insufficient: 51
+
+B. debt lifecycle
+  authority_debt_created=2190
+  authority_debt_persisted=2976028
+  authority_debt_paid=31
+  authority_debt_escalated=1295
+  authority_debt_deescalated=500
+  authority_debt_outstanding=2101
+  debt_age_mean=1568.410
+  debt_age_max=10000
+  future_evidence_requirements=298
+
+C. derivation gate checks allowed/blocked
+  derivation_quarantines=148
+  derivation_gate_checks=15326
+  derivation_gate_allowed=14464
+  derivation_gate_blocked=862
+  derivation_gate_would_block=862
+  derivation_gate_shadow_would_block=0
+
+D. blocked handle kinds
+  by_handle_kind:
+    route: 612
+    composite: 222
+    context-role: 17
+    compression: 11
+  by_state:
+    repair_candidate: 493
+    quarantined_for_derivation: 369
+  by_reason:
+    active_visible_conflict: 862
+    low_fit_margin: 862
+    near_ties: 862
+    uncertainty_cluster: 862
+    uncertainty_giant_cluster: 862
+    tied_frontier: 829
+    repeated_fit_churn: 829
+    near_tie_count: 689
+    open_novelty: 680
+    sentinel_failures: 493
+    passive_stress: 182
+    recent_revocations: 117
+    low_margin: 53
+
+E. transitions
+  authority_state_transitions=1249
+  transitions_to_derivation_quarantine=148
+  by_previous_next:
+    contested_best_available->repair_candidate: 512
+    repair_candidate->contested_best_available: 227
+    insufficient->contested_best_available: 202
+    contested_best_available->quarantined_for_derivation: 114
+    quarantined_for_derivation->repair_candidate: 86
+    insufficient->repair_candidate: 35
+    repair_candidate->quarantined_for_derivation: 34
+    quarantined_for_derivation->contested_best_available: 21
+    contested_best_available->usable: 8
+    usable->repair_candidate: 3
+    usable->strong: 2
+    usable->contested_best_available: 2
+    strong->usable: 1
+    strong->repair_candidate: 1
+    repair_candidate->usable: 1
+  by_reason:
+    active_visible_conflict: 1228
+    uncertainty_cluster: 1228
+    near_ties: 1225
+    low_fit_margin: 1215
+    uncertainty_giant_cluster: 1209
+    tied_frontier: 1173
+    repeated_fit_churn: 1159
+    open_novelty: 1094
+    near_tie_count: 677
+    sentinel_failures: 635
+    recent_revocations: 516
+    passive_stress: 303
+    low_margin: 113
+    alternatives: 16
+    best_available_mostly_stable: 10
+    best_available_but_limited_evidence: 9
+    stable_visible_evidence: 2
+    dormant_alternatives: 2
+  later_paid_down:
+    insufficient->contested_best_available: 3
+    contested_best_available->usable: 3
+    usable->strong: 1
+    strong->usable: 1
+
+F. applied vs suppressed effects
+  authority_action_candidates=5938420
+  authority_actions_applied=20894
+  authority_noop_state_not_permit=5022152
+  authority_suppressed_cooldown=894880
+  authority_suppressed_budget=494
+  authority_suppressed_local_use_only=862
+  authority_suppressed_derivation_only=862
+  local_use_preserved=2996112
+  best_available by strength:
+    strong: 0
+    usable: 2
+    weak: 1
+    contested: 297
+    insufficient: 0
+
+  bounded runtime effects applied:
+  monitoring_increases_from_strength_applied=10447
+  monitoring_hints_applied=10447
+  repair_priority_bumps_from_strength_applied=10447
+  bounded_repairs_applied=10447
+  alternatives_preserved_from_strength=0
+  suppressed candidate effects:
+  monitoring_increases_from_strength_candidates=2974243
+  monitoring_increases_from_strength_suppressed_by_state=2516109
+  monitoring_increases_from_strength_suppressed_by_cooldown=447440
+  monitoring_increases_from_strength_suppressed_by_budget=247
+  monitoring_increases_from_strength_noops=447687
+  repair_priority_bumps_from_strength_candidates=2964177
+  repair_priority_bumps_from_strength_suppressed_by_state=2506043
+  repair_priority_bumps_from_strength_suppressed_by_cooldown=447440
+  repair_priority_bumps_from_strength_suppressed_by_budget=247
+  repair_priority_bumps_from_strength_noops=447687
+
+G. off/record/state comparison
+  modes: assist=3
+  controllers: state=3
+  derivation_policies: quarantine_persistent=3
+  assist/state/quarantine_persistent: quality_cost_mean=3039776.333 iv_mean=0.000 full_audits_mean=1010.333 blocked=862 would_block=862
+
+H. warning when derivation gating worsens amortization
+  none
+
+Supplement. transition examples
+  x28: contested_best_available -> repair_candidate c3479 active_visible_conflict,low_fit_margin,near_ties,open_novelty,repeated_fit_churn,recent_revocations,sentinel_failures,passive_stress,uncertainty_cluster,uncertainty_giant_cluster
+  x90: repair_candidate -> contested_best_available c3739 active_visible_conflict,low_fit_margin,near_ties,tied_frontier,uncertainty_cluster,uncertainty_giant_cluster
+  x52: repair_candidate -> contested_best_available c3741 active_visible_conflict,low_fit_margin,near_ties,tied_frontier,open_novelty,repeated_fit_churn,uncertainty_cluster,uncertainty_giant_cluster
+  x28: contested_best_available -> repair_candidate c3763 active_visible_conflict,low_fit_margin,near_ties,open_novelty,repeated_fit_churn,recent_revocations,sentinel_failures,passive_stress,uncertainty_cluster,uncertainty_giant_cluster
+  x28: repair_candidate -> contested_best_available c3766 active_visible_conflict,low_fit_margin,near_ties,tied_frontier,open_novelty,repeated_fit_churn,uncertainty_cluster,uncertainty_giant_cluster
+  x24: contested_best_available -> repair_candidate c3882 active_visible_conflict,low_fit_margin,near_ties,tied_frontier,open_novelty,repeated_fit_churn,recent_revocations,sentinel_failures,passive_stress,uncertainty_cluster,uncertainty_giant_cluster
+  x24: contested_best_available -> repair_candidate c4020 active_visible_conflict,low_fit_margin,near_ties,tied_frontier,open_novelty,repeated_fit_churn,recent_revocations,sentinel_failures,uncertainty_cluster,uncertainty_giant_cluster
+  x97: contested_best_available -> repair_candidate c4058 active_visible_conflict,low_fit_margin,near_ties,tied_frontier,repeated_fit_churn,sentinel_failures,passive_stress,uncertainty_cluster,uncertainty_giant_cluster
+  x97: repair_candidate -> contested_best_available c4076 active_visible_conflict,low_fit_margin,near_ties,tied_frontier,repeated_fit_churn,passive_stress,uncertainty_cluster,uncertainty_giant_cluster
+  x24: contested_best_available -> quarantined_for_derivation c4136 active_visible_conflict,low_fit_margin,near_ties,tied_frontier,open_novelty,repeated_fit_churn,uncertainty_cluster,uncertainty_giant_cluster
+
+Supplement. warning: visible-evidence state, not truth
+  No cert issuance, revocation, skip suppression, or fit replacement is implied.
+
+Supplement. contested/weak reasons
+  active_visible_conflict: 297
+  best_available_but_limited_evidence: 1
+
+Supplement. visible-evidence triggers
+  uncertainty_cluster: 594
+  uncertainty_giant_cluster: 594
+  near_ties: 295
+  low_fit_margin: 287
+  tied_frontier: 286
+  strong_observations: 269
+  sentinel_coverage: 266
+  repeated_fit_churn: 236
+  open_novelty: 211
+  near_tie_count: 200
+  passive_stress: 122
+  sentinel_failures: 48
+  sentinel_passes: 29
+  recent_revocations: 28
+  fit_margin: 8
+
+Supplement. post-hoc interpretation may use manifest only after classification
+  var_fit:x0:HIGH(): strength=contested unknown
+  var_fit:x1:DIFF(7,8): strength=contested weak_noisy=2 proxy_confounded=1
+  var_fit:x2:HIGH(): strength=contested delayed=2 latent_additive=1
+  var_fit:x3:MEAN(4,5): strength=contested weak_noisy=1 dense_mixed=1 smooth_nonlinear=1
+  var_fit:x4:HIGH(): strength=usable symbolic=2 dense_mixed=1
+  var_fit:x5:TINY(): strength=contested proxy_confounded=1 dense_mixed=1 symbolic=1
+  var_fit:x6:LOW(): strength=contested dense_mixed=2 delayed=1
+  var_fit:x7:FIRST(11): strength=contested weak_noisy=2 dense_mixed=1
+  var_fit:x8:HIGH(): strength=contested symbolic=3
+  var_fit:x9:FIRST(6): strength=contested symbolic=2 smooth_nonlinear=1
