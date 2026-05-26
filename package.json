@@ -1,0 +1,29 @@
+{
+  "name": "dreth",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Discovery pointer only. DRETH is a Python experimental architecture, not a Node package.",
+  "license": "UNLICENSED",
+  "scripts": {
+    "info": "python - <<'PY'\nprint('DRETH is implemented in Python. See README.md, pyproject.toml, dreth/, scripts/, and tests/.')\nPY",
+    "test": "python -m pytest"
+  },
+  "dreth": {
+    "language": "Python",
+    "readme": "README.md",
+    "projectManifest": "pyproject.toml",
+    "architectureFiles": [
+      "dreth/world.py",
+      "dreth/agent.py",
+      "dreth/ledger.py",
+      "dreth/fit.py",
+      "dreth/sentinels.py",
+      "dreth/regime.py",
+      "dreth/context_role_index.py",
+      "dreth/uncertainty_consolidation.py",
+      "dreth/authority_strength.py",
+      "dreth/background_nethra.py",
+      "scripts/batch_run.py"
+    ]
+  }
+}
