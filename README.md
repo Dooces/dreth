@@ -1,111 +1,258 @@
 # dreth
 
-**dreth** is a causal-discovery simulation framework built around *earned authority*. An agent observes a hidden causal world, proposes hypotheses about variable relationships, and earns the right to certify those relationships only by surviving structured intervention tests. Authority is never assumed or labelled — it is *factored from evidence*.
+`dreth` is an experimental architecture for studying how an agent can build, use, revise, and relate learned structure under limited attention.
 
-## Core Concepts
+The current project is **not** a production ML system and not a claim of solved AGI. It is a simulation framework for testing a narrower question:
 
-### Nethra (VarNethra)
-A **Nethra** is not a label. It is a factoring that earned authority by surviving intervention tests in a specific scope. A `VarNethra` records the earned parent→child causal link, the function form, the noise envelope, and the scope (cycle range) in which it was validated.
+> Can an agent keep useful, evidence-shaped structure available while avoiding global trust, global deletion, and flat brute-force rechecking?
 
-### Tareth and Trass
-- **Tareth**: the *true* causal parent of a variable in the hidden world.
-- **Trass**: a *false* parent — a variable that correlates with the child but is not its actual cause.
-- The **False-Trass Problem**: the agent must distinguish Tareth from Trass using only observational and interventional evidence, never by peeking at ground truth.
+The central object is a **nethra**: a learned, reusable structure or handle. A nethra may be composed from other nethras. Whether that nethra is operationally important is not its identity; it is a **context role** assigned under a particular operation, evidence state, and regime.
 
-### Earned Authority vs. Assumed Labels
-The system enforces a strict boundary: no component may treat a hypothesis as true until it has survived the full audit→fit→sentinel→certify pipeline. Diagnostic and shadow layers exist for offline analysis but are forbidden from mutating agent or ledger state.
+## Correct current semantics
 
-## Architecture
+### Nethra
 
-### Runtime Core (agent-visible, state-mutating)
+A **nethra** is learned structure: a reusable handle over an observed regularity, relation, candidate fit, component, regime, frontier candidate, composite, or higher-order pattern.
 
-| Module | Role |
-|---|---|
-| `world.py` | Hidden causal world: DAG of variables with causal functions, noise, and regime changes. Provides observation and intervention interfaces. |
-| `agent.py` | `ChainedAgent` — the authority-record control loop. Manages the attention frontier, dispatches audit/fit/sentinel/certify cycles, and maintains the ledger. |
-| `ledger.py` | Immutable earned-authority records: `NoiseEnvelope`, `VarNethra`, `TiedFrontier`, `NethraCertificate`. The ledger is the single source of truth for what the agent has earned. |
-| `fit.py` | `fit_var` — enumerates and scores parent×function hypotheses. Produces morphology output (scores, tie sets) but never cause classification. `predict_var` generates predictions from certified Nethras. |
-| `sentinels.py` | `select_var_sentinels` chooses intervention probes; `check_var_sentinels_with_envelope` validates via cheap-path dispatch. Logs `TEMPORAL_TRASS` when interventions reveal false parents. |
-| `functions.py` | `FUNC_LIBRARY` (agent vocabulary) and `HIDDEN_FUNC_LIBRARY` (world vocabulary, includes `SIN` for novelty testing). |
-| `regime.py` | Regime detection: `CertEvent` tracks cert behavior, `RegimeSignature` captures recurring co-failure patterns, `RegimeRegister` tracks and promotes regimes. |
-| `records.py` | `CycleRecord` and `FitDiagnostic` — diagnostic-only per-cycle data. `FitDiagnostic.near_tie_candidates` is the only field that feeds back into agent state (for `TiedFrontier`). |
+A nethra is not equivalent to hidden truth. It is also not a disposable label. It is something the system can use, compare, compose, revisit, or demote in scope as evidence changes.
 
-### Hybrid Provider Layer
+### Context roles: tareth, trass, unresolved, best_available
 
-| Module | Role |
-|---|---|
-| `hybrid.py` | Protocol definitions (`ResidualPrediction`, `ParentRanking`, `ProbeProposal`, `ExpertPrediction`, `RepairEvent`) and default symbolic implementations. Providers *advise* but never create `NethraCertificate`s or mutate ledger state. Provider confidence is never treated as cert authority. |
-| `learned_residual.py` | Stage 3A shadow learned-residual predictor. Diagnostic/shadow only. |
+`tareth` and `trass` are **context-indexed roles**, not global identities.
 
-### Context & Provenance
+- `tareth`: this nethra currently matters for the operation/context being considered.
+- `trass`: this nethra is currently operationally equivalent or irrelevant for that operation/context.
+- `unresolved`: evidence preserves multiple live alternatives or instability.
+- `best_available`: the current working structure when nothing better is available, even if uncertainty remains.
 
-| Module | Role |
-|---|---|
-| `context_role_index.py` | Context-indexed provenance over the Nethra graph. Defines `NethraKind`, `NethraSource`, `EdgeKind`, `ContextRole`, `NethraNode`. The index is a *view*, not separate storage. |
-| `repair_agenda.py` | `RepairAgenda` — structural representation of pending repair work. A planning surface only; items do not authorize repair. |
+A nethra can be `trass` in one context and `tareth` in another. For example, a shape-like handle may be trass for color classification and tareth for grasp planning. The implementation now treats this as a graph/index problem, not as deletion.
 
-### Diagnostic / Shadow Layers (never mutate runtime state)
+### Authority records, not absolute certainty
 
-| Module | Role |
-|---|---|
-| `relative_authority.py` | Diagnostic-only relative authority records for future NethraGraph work. Not integrated with runtime agent. |
-| `relative_authority_frontier.py` | Shadow-only frontier evaluator for diagnostic NethraGraph snapshots. Proposes bounded local candidate sets. |
-| `relative_authority_observer.py` | Post-run diagnostic NethraGraph observer. Builds sparse relative-authority graph from existing artifacts. |
-| `shadow_authority_throttle.py` | Shadow-only authority throttle evaluator. Estimates whether downgrading authority would have reduced mismatches. Uses only agent-visible evidence; never reads hidden-world fields. |
-| `shadow_policy.py` | `ShadowPolicySelector` — diagnostic-only offline policy predictor. Predicts which provider policy would have had lower `quality_cost`. Does not change active policy. |
-| `uncertainty_consolidation.py` | Factors repeated uncertainty signals into candidate higher handles. Conservative; uses only agent-visible evidence. |
-| `uncertainty_governance.py` | Shadow-only uncertainty governance agenda. Records observable uncertainty signals and proposes shadow governance actions (proposals are not actual actions). |
-| `quality.py` | `QualityWeights` and `RunQualityScore` — diagnostic-only provider policy scoring. Arithmetic only; not read by agent policy. |
+The code still contains legacy implementation names such as `NethraCertificate`, `certificates`, and `certified_eps`. These should be read as **authority records** or **evidence-bounded commitments**, not as absolute proof.
 
-### Tooling
+Authority is graded by provenance, survival, scope, revocation history, sentinels, alternatives, and context. The system should never assume that a structure is globally true merely because it is currently useful.
+
+### Hidden truth vs. agent-visible evidence
+
+Generated worlds contain hidden truth for offline evaluation. The agent must not use it. Hidden truth can be used after a run to interpret failures, but not as the runtime metric for whether an authority record was reasonable.
+
+The internal question is evidence-relative:
+
+> Given what the agent could observe or probe, was this nethra a reasonable best-available handle, a context-role assignment, or an authority/evidence mismatch?
+
+## Active architecture
+
+### Runtime core
 
 | Module | Role |
 |---|---|
-| `cli.py` | Command-line entry point. Parses arguments and runs the simulation. |
-| `baseline.py` | `RefitBaseline` — naive agent that refits every visible variable every cycle. Used for cost comparison. |
-| `summary.py` | `RunAnalyzer` and `SummaryRenderer` — end-of-run metrics computation and formatting. |
+| `dreth/world.py` | Hidden causal worlds and schedules. Provides scalar observed variables, interventions, drift/regime schedules, and blind challenge generation. Hidden debug state is for offline analysis only. |
+| `dreth/agent.py` | `ChainedAgent`, the main control loop. Runs audits, fits, sentinel checks, frontier handling, repair agenda integration, uncertainty consolidation assists, and context-role recording. |
+| `dreth/ledger.py` | Core data structures for variable nethras, authority records, tied frontiers, dormant alternatives, composites, envelopes, and revocation state. |
+| `dreth/fit.py` | Enumerates and scores parent/function hypotheses under the agent vocabulary. Produces best fits, ties, near-ties, and diagnostics. |
+| `dreth/sentinels.py` | Selects and checks sentinel probes used to cheaply test whether prior structure still holds. |
+| `dreth/regime.py` | Tracks recurring co-failure/regime patterns. Regime handling is still experimental; regime handles must be backed by active witness logic before they should buy broad skip authority. |
+| `dreth/records.py` | Cycle and fit diagnostics. Mostly offline, but near-tie diagnostics feed tied-frontier bookkeeping. |
+| `dreth/summary.py` | Run analysis and rendering. Keeps large reporting logic out of the agent. |
 
-### Scripts (`scripts/`)
+### Context-role and uncertainty layers
 
-Batch runners, benchmarks, and summarization utilities:
-`batch_run.py`, `batch_tui.py`, `bench_forms.py`, `bench_frontier.py`, `bench_transition.py`, `baseline_attention_budget.py`, `composite_churn.py`, `compare_uncertainty_consolidation_modes.py`, `test_rare_catastrophe.py`, `visualize.py`, and various `summarize_*.py` scripts for offline analysis of authority, policy, frontier, governance, and consolidation artifacts.
+| Module | Role |
+|---|---|
+| `dreth/context_role_index.py` | Context-indexed provenance over the nethra graph. Defines nethra nodes, edges, context-role records, and retrieval matches. This is a graph/index view, not a trass reservoir. |
+| `dreth/uncertainty_governance.py` | Shadow-only extraction/classification of visible uncertainty signals into proposed governance actions. It does not change behavior. |
+| `dreth/uncertainty_consolidation.py` | Groups repeated visible uncertainty into candidate higher handles and, in assist mode, can feed bounded attention/probe/repair hints. This path is experimental and must be judged by off/shadow/assist comparisons. |
+| `dreth/repair_agenda.py` | Structural surface for pending repairs. Current priority logic is intentionally limited. |
+| `dreth/relative_authority.py` | Diagnostic relative-authority records. |
+| `dreth/relative_authority_observer.py` | Post-run graph observer over existing ledger artifacts. |
+| `dreth/relative_authority_frontier.py` | Shadow evaluator for graph-frontier proposal priors. |
+| `dreth/shadow_authority_throttle.py` | Shadow-only authority/evidence throttle analysis from visible evidence. |
+| `dreth/learned_residual.py` | Shadow learned-residual/calibration experiments. Not runtime authority. |
+| `dreth/hybrid.py` | Provider interfaces and symbolic defaults for residual prediction, parent ranking, probe proposals, experts, and routing. Providers advise; they do not issue authority records. |
+| `dreth/quality.py` | Diagnostic quality-cost scoring used for policy/report comparison. |
 
-### Tests (`tests/`)
+## What the current system does
 
-Comprehensive test suite covering core logic, edge cases, regime changes, tied frontiers, sentinel behavior, hybrid providers, shadow layers, and more.
+At a high level, the agent repeatedly:
 
-## The Agent Lifecycle (per cycle)
+1. Observes current scalar world state.
+2. Chooses what needs attention under a limited audit budget.
+3. Runs a full audit when a variable or handle needs repair or initial structure.
+4. Fits candidate parent/function hypotheses using agent-visible probes.
+5. Records ties, near-ties, margins, alternatives, and novelty.
+6. Installs the best available working structure into the ledger.
+7. Uses sentinels, composites, and route/role records to reduce repeated work when evidence supports it.
+8. Revokes or demotes when sentinels or other visible evidence contradict prior authority.
+9. Builds context-role provenance over nethras so a structure can remain learned even when trass in a particular context.
+10. Optionally runs shadow/assist layers for uncertainty consolidation and context-role local anchors.
 
-1. **Observe** — read current variable values from the world.
-2. **Frontier selection** — pick which variable to attend to (attention budget).
-3. **Audit** (`_full_audit_var`) — if the variable has no Nethra or its cert is stale, run a full audit.
-4. **Fit** (`fit_var`) — enumerate parent×function hypotheses, score them, identify ties.
-5. **Sentinel probing** (`select_var_sentinels`, `check_var_sentinels_with_envelope`) — choose and execute interventions to distinguish Tareth from Trass.
-6. **Certify** (`_certify_operation_role`) — if evidence survives, issue a `NethraCertificate`. Authority is earned.
-7. **Predict** (`predict_var`) — use certified Nethras to predict variable values.
-8. **Record** — log `CycleRecord` and `FitDiagnostic` for offline analysis.
+The current design intentionally separates:
 
-## Installation & Usage
+- learning a reusable structure,
+- using it in a given context,
+- recording its role in that context,
+- and deciding whether it should influence attention or repair.
+
+## Current experimental status
+
+The project has moved beyond the original toy-only regime, but the richer paths are still experimental.
+
+Important current findings:
+
+- `blind_challenge` creates mixed symbolic, nonlinear, latent, delayed, proxy, dense, and weak/noisy structure. It is used to expose where current Dreth has grip and where the current substrate loses grip.
+- Uncertainty signals are broad in `blind_challenge`; this is not automatically a bug. It may indicate shared unresolved structure, but broad signals must be consolidated into useful local handles before they should drive attention.
+- `uncertainty_consolidation` assist mode is invariant-safe but has produced harmful broad pressure when clustering is too loose. Compression ratio alone is not success.
+- `ContextRoleIndex` record mode has been behavior-neutral in sweeps: it can record nethra/context-role provenance without changing runtime behavior.
+- `ContextRoleIndex` also demonstrates the corrected semantics: the same learned structure can have multiple roles across contexts, including trass in one context and tareth in another.
+- `ContextRoleIndex assist_feature` has shown both promising small-run behavior and harmful scale behavior when matches are admitted too broadly. This path needs strict match gating, deduplication, and attribution before it should be trusted.
+
+Do not treat any assist path as validated merely because invariants pass. Invariants show safety boundaries; they do not prove usefulness.
+
+## Core invariants
+
+The repository tests and batch checks track several invariants. The important conceptual ones are:
+
+- **No hidden-truth runtime access**: generated-world truth is offline evaluation only.
+- **Authority must flow through explicit evidence paths**: direct control-flow construction of authority is a bug risk.
+- **Providers advise, they do not authorize**.
+- **Shadow means no behavior change**: shadow mode must match off-mode operational metrics except for diagnostics.
+- **Record-only indexes must not change behavior**.
+- **Context roles are local**: `tareth` and `trass` are roles in context, not object identities.
+- **Trass is not deletion**: a nethra can be learned and retained even when operationally trass in the current context.
+- **Assist features must be reversible and bounded**: probes, monitoring, alternative preservation, repair priority; not direct revocation, skip suppression, or fit replacement.
+
+## Common commands
+
+### Install
 
 ```bash
-# Clone
 git clone https://github.com/Dooces/dreth.git
 cd dreth
-
-# Install
 pip install -e .
-
-# Run a simulation
-python -m dreth.cli --num-vars 5 --num-cycles 100
-
-# Run tests
-pytest tests/
 ```
 
-## Key Design Invariants
+### Run tests
 
-- **No peeking**: the agent never reads hidden-world ground truth. All evidence is observational or interventional.
-- **Earned, not assumed**: authority flows only through the audit→fit→sentinel→certify pipeline.
-- **Shadow layers are read-only**: diagnostic modules observe but never mutate agent or ledger state.
-- **Provider confidence ≠ cert authority**: hybrid providers advise; only the core pipeline certifies.
-- **Ledger is immutable**: once a `NethraCertificate` is issued, it is a frozen record of earned authority.
+```bash
+python -m pytest tests/test_cycle_mechanics.py -q
+python -m pytest tests/test_blind_challenge.py -q
+python -m pytest tests/test_uncertainty_consolidation.py -q
+python -m pytest tests/test_nethra_reservoir.py -q
+```
+
+`tests/test_nethra_reservoir.py` is currently a compatibility filename. It asserts the corrected `ContextRoleIndex` semantics.
+
+### Basic batch run
+
+```bash
+python scripts/batch_run.py \
+  --schedule regime_switch \
+  --vars 75 \
+  --cycles 7500 \
+  --seeds 42,99,7 \
+  --hybrid-control interfaces \
+  --repair-agenda
+```
+
+### Blind challenge with context-role recording
+
+```bash
+python scripts/batch_run.py \
+  --schedule blind_challenge \
+  --challenge-blind \
+  --vars 50 \
+  --cycles 3000 \
+  --seeds 42,99,7 \
+  --hybrid-control interfaces \
+  --repair-agenda \
+  --uncertainty-consolidation shadow \
+  --context-role-index record \
+  --out reports/context_role_record_check.jsonl \
+  2>&1 | tee reports/context_role_record_check.log
+
+python scripts/summarize_context_role_index.py \
+  --jsonl reports/context_role_record_check.jsonl \
+  | tee reports/context_role_record_check_summary.txt
+```
+
+### Compare off / record / assist behavior
+
+```bash
+python scripts/batch_run.py \
+  --schedule blind_challenge \
+  --challenge-blind \
+  --vars 50,75,100 \
+  --cycles 3000,7500 \
+  --seeds 42,99,7,3,11,13,17,23,29,31 \
+  --hybrid-control interfaces \
+  --repair-agenda \
+  --uncertainty-consolidation shadow \
+  --context-role-index off \
+  --out reports/context_role_sweep_off.jsonl \
+  2>&1 | tee reports/context_role_sweep_off.log
+
+python scripts/batch_run.py \
+  --schedule blind_challenge \
+  --challenge-blind \
+  --vars 50,75,100 \
+  --cycles 3000,7500 \
+  --seeds 42,99,7,3,11,13,17,23,29,31 \
+  --hybrid-control interfaces \
+  --repair-agenda \
+  --uncertainty-consolidation shadow \
+  --context-role-index record \
+  --out reports/context_role_sweep_record.jsonl \
+  2>&1 | tee reports/context_role_sweep_record.log
+
+python scripts/batch_run.py \
+  --schedule blind_challenge \
+  --challenge-blind \
+  --vars 50,75,100 \
+  --cycles 3000,7500 \
+  --seeds 42,99,7,3,11,13,17,23,29,31 \
+  --hybrid-control interfaces \
+  --repair-agenda \
+  --uncertainty-consolidation assist \
+  --uncertainty-assist-policy local_only \
+  --context-role-index assist_feature \
+  --out reports/context_role_sweep_assist_feature.jsonl \
+  2>&1 | tee reports/context_role_sweep_assist_feature.log
+```
+
+Interpretation:
+
+- `off == record` means indexing is behavior-neutral.
+- `assist_feature` improving metrics is only meaningful if match counters show the index was used and broad-match pressure is controlled.
+- `assist_feature` worsening metrics means the index may still be valuable as provenance, but not yet as runtime attention input.
+
+## Scripts
+
+Useful summarizers include:
+
+- `scripts/summarize_blind_challenge.py`
+- `scripts/summarize_blind_authority_evidence.py`
+- `scripts/summarize_uncertainty_governance.py`
+- `scripts/summarize_uncertainty_consolidation.py`
+- `scripts/summarize_context_role_index.py`
+- `scripts/summarize_relative_authority.py`
+- `scripts/summarize_temporal_frontier.py`
+- `scripts/compare_uncertainty_consolidation_modes.py`
+
+Most reports are diagnostic. A good report does not imply a runtime path is safe.
+
+## Known unfinished work
+
+These are active design gaps, not polish items:
+
+1. **Context-role assist gating**: runtime use of `ContextRoleIndex` currently needs stricter match quality, deduplication, and attribution.
+2. **Uncertainty consolidation specificity**: broad uncertainty must not collapse into giant global clusters without local anchors.
+3. **Regime witness semantics**: regime handles should not buy monitoring reduction unless backed by active witnesses, not merely quiescence.
+4. **Authority transaction hygiene**: authority object creation should continue moving toward explicit ledger transactions rather than inline agent construction.
+5. **Learner integration**: learned/NN components should rank or propose attention/factorization only after deterministic attribution makes the learning target clear.
+
+## What this repository is for
+
+Use this repo to test whether explicit, context-indexed, evidence-shaped structure can help an agent allocate limited attention under changing worlds.
+
+The useful outcomes are not only successes. A good Dreth run should also expose when a handle is too broad, when an assist path creates pressure without benefit, when a nethra is only best-available, and when context roles are being confused with identity.
