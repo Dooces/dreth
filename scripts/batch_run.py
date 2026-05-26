@@ -198,6 +198,7 @@ class RunConfig:
     uncertainty_assist_policy: str = "all"
     context_role_index: str = "off"  # "off" | "record" | "assist_feature"
     context_role_anchor_policy: str | None = None  # "off" | "strict" | "loose"
+    authority_strength: str = "off"  # "off" | "record" | "assist"
 
 
 # ── per-run result ─────────────────────────────────────────────────────────────
@@ -456,6 +457,23 @@ class ArchMetrics:
     context_role_edges: int = 0
     context_role_edges_by_kind: Dict[str, int] = field(default_factory=dict)
     context_role_export: Dict[str, Any] = field(default_factory=dict)
+
+    # Authority-strength metadata metrics.
+    authority_strength_mode: str = "off"
+    authority_strength_records: int = 0
+    strength_strong: int = 0
+    strength_usable: int = 0
+    strength_weak: int = 0
+    strength_contested: int = 0
+    strength_insufficient: int = 0
+    weak_best_available: int = 0
+    contested_best_available: int = 0
+    monitoring_increases_from_strength: int = 0
+    alternatives_preserved_from_strength: int = 0
+    future_evidence_requirements: int = 0
+    repair_priority_bumps_from_strength: int = 0
+    authority_strength_counts_by_reason: Dict[str, int] = field(default_factory=dict)
+    authority_strength_export: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -811,6 +829,7 @@ def _build_and_run_dreth(
         uncertainty_assist_policy=cfg.uncertainty_assist_policy,
         context_role_index_mode=cfg.context_role_index,
         context_role_anchor_policy=cfg.context_role_anchor_policy,
+        authority_strength_mode=cfg.authority_strength,
     )
     if cfg.relative_authority_frontier_temporal_report:
         from dreth.relative_authority_frontier import TemporalGraphFrontierEvaluator
@@ -1194,6 +1213,32 @@ def _extract_arch_metrics(agent: ChainedAgent, world: CausalWorld) -> ArchMetric
         m.context_role_edges_by_kind = dict(_cri.get("context_role_edges_by_kind", {}))
         if hasattr(agent, "context_role_index_export"):
             m.context_role_export = agent.context_role_index_export(limit=300)
+    if hasattr(agent, "authority_strength_metrics"):
+        _as = agent.authority_strength_metrics()
+        m.authority_strength_mode = str(_as.get("authority_strength_mode", "off"))
+        m.authority_strength_records = int(_as.get("authority_strength_records", 0))
+        m.strength_strong = int(_as.get("strength_strong", 0))
+        m.strength_usable = int(_as.get("strength_usable", 0))
+        m.strength_weak = int(_as.get("strength_weak", 0))
+        m.strength_contested = int(_as.get("strength_contested", 0))
+        m.strength_insufficient = int(_as.get("strength_insufficient", 0))
+        m.weak_best_available = int(_as.get("weak_best_available", 0))
+        m.contested_best_available = int(_as.get("contested_best_available", 0))
+        m.monitoring_increases_from_strength = int(
+            _as.get("monitoring_increases_from_strength", 0)
+        )
+        m.alternatives_preserved_from_strength = int(
+            _as.get("alternatives_preserved_from_strength", 0)
+        )
+        m.future_evidence_requirements = int(_as.get("future_evidence_requirements", 0))
+        m.repair_priority_bumps_from_strength = int(
+            _as.get("repair_priority_bumps_from_strength", 0)
+        )
+        m.authority_strength_counts_by_reason = dict(
+            _as.get("authority_strength_counts_by_reason", {})
+        )
+        if hasattr(agent, "authority_strength_export"):
+            m.authority_strength_export = agent.authority_strength_export(limit=300)
     _temporal_frontier = getattr(agent, "_diagnostic_audit_observer", None)
     if _temporal_frontier is not None and hasattr(_temporal_frontier, "summary"):
         _tfs = _temporal_frontier.summary()
@@ -2851,6 +2896,10 @@ def main():
     p.add_argument("--nethra-reservoir", dest="context_role_index", default=None,
                    choices=["off", "record", "assist_feature"],
                    help=argparse.SUPPRESS)
+    p.add_argument("--authority-strength", default="off",
+                   choices=["off", "record", "assist"],
+                   help=("visible-evidence authority-strength metadata: "
+                         "off, record, or assist (default: off)"))
     p.add_argument("--shadow-residual", default="off",
                    choices=["off", "online"],
                    help="shadow residual mode: off=disabled; online=shadow learned predictor (default: off)")
@@ -2981,7 +3030,8 @@ def main():
                   uncertainty_consolidation=args.uncertainty_consolidation,
                   uncertainty_assist_policy=args.uncertainty_assist_policy,
                   context_role_index=args.context_role_index or "off",
-                  context_role_anchor_policy=args.context_role_anchor_policy)
+                  context_role_anchor_policy=args.context_role_anchor_policy,
+                  authority_strength=args.authority_strength)
         for schedule in schedule_list
         for v in var_list
         for c in cycle_list
@@ -3009,6 +3059,8 @@ def main():
         mode += f" +uncertainty-consolidation({args.uncertainty_consolidation})"
     if (args.context_role_index or "off") != "off":
         mode += f" +context-role-index({args.context_role_index})"
+    if args.authority_strength != "off":
+        mode += f" +authority-strength({args.authority_strength})"
     if shadow_sweep:
         mode += (f" +shadow-sweep(f={factor_list} ms={ms_list} w={window_list})")
     elif args.shadow_residual != "off":
@@ -3209,6 +3261,31 @@ def main():
                     "context_role_edges": r.arch.context_role_edges,
                     "context_role_edges_by_kind": r.arch.context_role_edges_by_kind,
                     "context_role_index": r.arch.context_role_export,
+                    "authority_strength_mode": r.arch.authority_strength_mode,
+                    "authority_strength_records": r.arch.authority_strength_records,
+                    "strength_strong": r.arch.strength_strong,
+                    "strength_usable": r.arch.strength_usable,
+                    "strength_weak": r.arch.strength_weak,
+                    "strength_contested": r.arch.strength_contested,
+                    "strength_insufficient": r.arch.strength_insufficient,
+                    "weak_best_available": r.arch.weak_best_available,
+                    "contested_best_available": r.arch.contested_best_available,
+                    "monitoring_increases_from_strength": (
+                        r.arch.monitoring_increases_from_strength
+                    ),
+                    "alternatives_preserved_from_strength": (
+                        r.arch.alternatives_preserved_from_strength
+                    ),
+                    "future_evidence_requirements": (
+                        r.arch.future_evidence_requirements
+                    ),
+                    "repair_priority_bumps_from_strength": (
+                        r.arch.repair_priority_bumps_from_strength
+                    ),
+                    "authority_strength_counts_by_reason": (
+                        r.arch.authority_strength_counts_by_reason
+                    ),
+                    "authority_strength": r.arch.authority_strength_export,
                     # Compatibility aliases for older smoke scripts/reports.
                     "nethra_reservoir_mode": r.arch.context_role_index_mode,
                     "nethra_reservoir_records": r.arch.context_role_index_nodes,

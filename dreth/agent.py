@@ -108,6 +108,12 @@ from .context_role_index import (
     context_key as nethra_context_key,
     var_fit_id,
 )
+from .authority_strength import (
+    compute_authority_strength_records,
+    records_to_dicts as authority_strength_records_to_dicts,
+    summarize_authority_strength_records,
+    summary_to_dict as authority_strength_summary_to_dict,
+)
 from .learned_residual import (
     ResidualFeatureVector,
     ShadowLearnedResidualPredictor,
@@ -246,6 +252,7 @@ class ChainedAgent:
         context_role_index_mode: str = "off",
         context_role_anchor_policy: Optional[str] = None,
         nethra_reservoir_mode: Optional[str] = None,
+        authority_strength_mode: str = "off",
     ):
         """Construct agent. Initializes empty ledger, zero counters, and
         applies any provided per-var cost weight overrides."""
@@ -581,6 +588,23 @@ class ChainedAgent:
         if self._context_role_index is not None:
             self._context_role_index.anchor_policy = self._context_role_anchor_policy
         self._context_role_index_latest_matches = []
+
+        if authority_strength_mode not in {"off", "record", "assist"}:
+            raise ValueError(
+                "authority_strength_mode must be off, record, or assist"
+            )
+        self._authority_strength_mode = authority_strength_mode
+        self._authority_strength_latest_records = []
+        self._authority_strength_latest_summary = summarize_authority_strength_records([])
+        self._authority_strength_budget_bonus: Dict[int, int] = {}
+        self._authority_strength_preserve_vars: Set[int] = set()
+        self._authority_strength_preserve_remaining: int = 0
+        self._authority_strength_repair_priority_vars: Set[int] = set()
+        self._authority_strength_future_requirement_vars: Set[int] = set()
+        self._authority_strength_monitoring_increases_total = 0
+        self._authority_strength_alternatives_preserved_total = 0
+        self._authority_strength_future_requirements_total = 0
+        self._authority_strength_repair_priority_bumps_total = 0
 
     def _context_role_index_enabled(self) -> bool:
         return self._context_role_index is not None
@@ -1060,6 +1084,125 @@ class ChainedAgent:
     def nethra_reservoir_export(self, limit: int = 200) -> Dict[str, Any]:
         return self.context_role_index_export(limit=limit)
 
+    def _reset_authority_strength_assist_surfaces(self) -> None:
+        self._authority_strength_budget_bonus = {}
+        self._authority_strength_preserve_vars = set()
+        self._authority_strength_preserve_remaining = 3
+        self._authority_strength_repair_priority_vars = set()
+        self._authority_strength_future_requirement_vars = set()
+
+    def _run_authority_strength(self, cycle: int) -> None:
+        """Record visible-evidence strength and write bounded assist hints."""
+        self._reset_authority_strength_assist_surfaces()
+        if self._authority_strength_mode == "off":
+            return
+
+        records = compute_authority_strength_records(self, cycle)
+        self._authority_strength_latest_records = records
+
+        if self._authority_strength_mode == "assist":
+            for record in records:
+                if not record.best_available:
+                    continue
+                if record.required_future_evidence:
+                    self._authority_strength_future_requirement_vars.add(record.var)
+                    self._authority_strength_future_requirements_total += 1
+                if record.strength in {"weak", "contested"}:
+                    before = self._authority_strength_budget_bonus.get(record.var, 0)
+                    self._authority_strength_budget_bonus[record.var] = max(before, 1)
+                    if before == 0:
+                        self._authority_strength_monitoring_increases_total += 1
+                if record.strength == "contested":
+                    self._authority_strength_preserve_vars.add(record.var)
+                    self._authority_strength_repair_priority_vars.add(record.var)
+                    self._authority_strength_repair_priority_bumps_total += 1
+
+        self._authority_strength_latest_summary = summarize_authority_strength_records(
+            records,
+            monitoring_increases=self._authority_strength_monitoring_increases_total,
+            alternatives_preserved=self._authority_strength_alternatives_preserved_total,
+        )
+
+    def authority_strength_metrics(self) -> Dict[str, Any]:
+        if self._authority_strength_mode == "off":
+            return {
+                "authority_strength_mode": "off",
+                "authority_strength_records": 0,
+                "strength_strong": 0,
+                "strength_usable": 0,
+                "strength_weak": 0,
+                "strength_contested": 0,
+                "strength_insufficient": 0,
+                "weak_best_available": 0,
+                "contested_best_available": 0,
+                "monitoring_increases_from_strength": 0,
+                "alternatives_preserved_from_strength": 0,
+                "future_evidence_requirements": 0,
+                "repair_priority_bumps_from_strength": 0,
+                "authority_strength_counts_by_reason": {},
+            }
+        if not self._authority_strength_latest_records:
+            self._authority_strength_latest_records = compute_authority_strength_records(
+                self,
+                self.records[-1].cycle if self.records else 0,
+            )
+            self._authority_strength_latest_summary = summarize_authority_strength_records(
+                self._authority_strength_latest_records,
+                monitoring_increases=self._authority_strength_monitoring_increases_total,
+                alternatives_preserved=self._authority_strength_alternatives_preserved_total,
+            )
+        summary = authority_strength_summary_to_dict(self._authority_strength_latest_summary)
+        counts = summary.get("counts_by_strength", {})
+        return {
+            "authority_strength_mode": self._authority_strength_mode,
+            "authority_strength_records": len(self._authority_strength_latest_records),
+            "strength_strong": int(counts.get("strong", 0)),
+            "strength_usable": int(counts.get("usable", 0)),
+            "strength_weak": int(counts.get("weak", 0)),
+            "strength_contested": int(counts.get("contested", 0)),
+            "strength_insufficient": int(counts.get("insufficient", 0)),
+            "weak_best_available": int(summary.get("weak_best_available", 0)),
+            "contested_best_available": int(summary.get("contested_best_available", 0)),
+            "monitoring_increases_from_strength": (
+                self._authority_strength_monitoring_increases_total
+            ),
+            "alternatives_preserved_from_strength": (
+                self._authority_strength_alternatives_preserved_total
+            ),
+            "future_evidence_requirements": int(
+                summary.get("future_evidence_requirements", 0)
+            ),
+            "repair_priority_bumps_from_strength": (
+                self._authority_strength_repair_priority_bumps_total
+            ),
+            "authority_strength_counts_by_reason": dict(summary.get("counts_by_reason", {})),
+        }
+
+    def authority_strength_export(self, limit: int = 300) -> Dict[str, Any]:
+        if self._authority_strength_mode == "off":
+            return {"records": [], "summary": authority_strength_summary_to_dict(
+                summarize_authority_strength_records([])
+            )}
+        if not self._authority_strength_latest_records:
+            self._authority_strength_latest_records = compute_authority_strength_records(
+                self,
+                self.records[-1].cycle if self.records else 0,
+            )
+            self._authority_strength_latest_summary = summarize_authority_strength_records(
+                self._authority_strength_latest_records,
+                monitoring_increases=self._authority_strength_monitoring_increases_total,
+                alternatives_preserved=self._authority_strength_alternatives_preserved_total,
+            )
+        limit = max(0, int(limit))
+        return {
+            "records": authority_strength_records_to_dicts(
+                self._authority_strength_latest_records[:limit]
+            ),
+            "summary": authority_strength_summary_to_dict(
+                self._authority_strength_latest_summary
+            ),
+        }
+
     def _adaptive_probe_budget(self, n_hypotheses: int) -> int:
         """Return the number of probes to use for a hypothesis space of size
         n_hypotheses.
@@ -1137,6 +1280,8 @@ class ChainedAgent:
         _adaptive = self._adaptive_probe_budget(_n_hyp)
         budget = max(self._var_budget_escalation.get(var, 0), _adaptive)
         budget += self._uncertainty_budget_bonus.get(var, 0)
+        if self._authority_strength_mode == "assist":
+            budget += self._authority_strength_budget_bonus.get(var, 0)
         diag_dict: Dict[str, object] = {
             "cycle": cycle,
             "var": var,
@@ -2811,6 +2956,48 @@ class ChainedAgent:
                         f"c{cycle}: x{var} uncertainty consolidation preserved "
                         f"{archived} alternative(s) within cap"
                     )
+            if (
+                self._authority_strength_mode == "assist"
+                and var in self._authority_strength_preserve_vars
+                and self._authority_strength_preserve_remaining > 0
+            ):
+                existing_alt = {
+                    (tuple(alt.parents), alt.func)
+                    for alt in n.dormant_alternatives
+                }
+                archived = 0
+                for h in f.candidates:
+                    if h == winning_hyp or self._authority_strength_preserve_remaining <= 0:
+                        continue
+                    if (tuple(h[0]), h[1]) in existing_alt:
+                        continue
+                    n.dormant_alternatives.append(
+                        DormantAlternative(
+                            parents=h[0], func=h[1],
+                            last_score=f.scores.get(h, 0),
+                            last_seen_cycle=cycle,
+                        )
+                    )
+                    self._context_role_index_record_candidate(
+                        prefix="dormant",
+                        kind="dormant_alternative",
+                        var=var,
+                        parents=h[0],
+                        func=h[1],
+                        cycle=cycle,
+                        source="dormant_alternative",
+                        role="unresolved",
+                        score=f.scores.get(h, 0),
+                        context_operation="authority_strength_preserve",
+                    )
+                    self._authority_strength_preserve_remaining -= 1
+                    self._authority_strength_alternatives_preserved_total += 1
+                    archived += 1
+                if archived:
+                    self.ledger.event_log.append(
+                        f"c{cycle}: x{var} authority strength preserved "
+                        f"{archived} alternative(s) within cap"
+                    )
             self.ledger.event_log.append(
                 f"c{cycle}: x{var} frontier cleared (threshold not met: "
                 f"stable={f.stable_count} contexts={f.distinct_contexts_seen})"
@@ -3266,6 +3453,7 @@ class ChainedAgent:
         """
         self._uncertain_this_cycle.clear()
         self._run_uncertainty_consolidation(cycle)
+        self._run_authority_strength(cycle)
 
         skipped: List[int] = []
         audited: List[int] = []
@@ -3950,6 +4138,11 @@ class ChainedAgent:
                     and "repair_priority_bonus" in self._uncertainty_assist_vars.get(_ra_var, set())
                 ):
                     _ra_priority -= 0.25
+                if (
+                    self._authority_strength_mode == "assist"
+                    and _ra_var in self._authority_strength_repair_priority_vars
+                ):
+                    _ra_priority -= 0.10
                 self._repair_agenda.push(RepairAgendaItem(
                     cycle=cycle,
                     target_var=_ra_var,
