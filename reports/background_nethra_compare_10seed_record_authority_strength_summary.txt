@@ -1,0 +1,145 @@
+Authority Strength Report
+Warning: visible-evidence state, not truth.
+
+A. state distribution
+  runs: 10
+  exported_records: 1000
+  strength:
+    strong: 0
+    usable: 6
+    weak: 4
+    contested: 990
+    insufficient: 0
+  authority_state:
+    strong: 0
+    usable: 6
+    contested_best_available: 803
+    quarantined_for_derivation: 0
+    repair_candidate: 191
+    insufficient: 0
+
+B. debt lifecycle
+  authority_debt_created=0
+  authority_debt_persisted=0
+  authority_debt_paid=0
+  authority_debt_escalated=0
+  authority_debt_deescalated=0
+  authority_debt_outstanding=0
+  debt_age_mean=0.000
+  debt_age_max=0
+  future_evidence_requirements=994
+
+C. derivation gate checks allowed/blocked
+  derivation_quarantines=0
+  derivation_gate_checks=0
+  derivation_gate_allowed=0
+  derivation_gate_blocked=0
+  derivation_gate_would_block=0
+  derivation_gate_shadow_would_block=0
+
+D. blocked handle kinds
+  by_handle_kind:
+    none
+  by_state:
+    none
+  by_reason:
+    none
+
+E. transitions
+  authority_state_transitions=0
+  transitions_to_derivation_quarantine=0
+  by_previous_next:
+    none
+  by_reason:
+    none
+  later_paid_down:
+    none
+
+F. applied vs suppressed effects
+  authority_action_candidates=0
+  authority_actions_applied=0
+  authority_noop_state_not_permit=0
+  authority_suppressed_cooldown=0
+  authority_suppressed_budget=0
+  authority_suppressed_local_use_only=0
+  authority_suppressed_derivation_only=0
+  generic_contested_noop=0
+  authority_action_regime_sentinel_failure_attribution=0
+  authority_action_activated_failing_regime_sentinel=0
+  action_reason_specificity:
+    none
+  local_use_preserved=0
+  best_available by strength:
+    strong: 0
+    usable: 6
+    weak: 4
+    contested: 990
+    insufficient: 0
+
+  bounded runtime effects applied:
+  monitoring_increases_from_strength_applied=0
+  monitoring_hints_applied=0
+  repair_priority_bumps_from_strength_applied=0
+  bounded_repairs_applied=0
+  alternatives_preserved_from_strength=0
+  suppressed candidate effects:
+  monitoring_increases_from_strength_candidates=0
+  monitoring_increases_from_strength_suppressed_by_state=0
+  monitoring_increases_from_strength_suppressed_by_cooldown=0
+  monitoring_increases_from_strength_suppressed_by_budget=0
+  monitoring_increases_from_strength_noops=0
+  repair_priority_bumps_from_strength_candidates=0
+  repair_priority_bumps_from_strength_suppressed_by_state=0
+  repair_priority_bumps_from_strength_suppressed_by_cooldown=0
+  repair_priority_bumps_from_strength_suppressed_by_budget=0
+  repair_priority_bumps_from_strength_noops=0
+
+G. off/record/state comparison
+  modes: record=10
+  controllers: state=10
+  derivation_policies: off=10
+  record/state/off: quality_cost_mean=3219016.800 iv_mean=0.000 full_audits_mean=1371.700 blocked=0 would_block=0
+
+H. warning when derivation gating worsens amortization
+  none
+
+Supplement. transition examples
+  none
+
+Supplement. warning: visible-evidence state, not truth
+  No cert issuance, revocation, skip suppression, or fit replacement is implied.
+
+Supplement. contested/weak reasons
+  active_visible_conflict: 990
+  best_available_but_limited_evidence: 4
+
+Supplement. visible-evidence triggers
+  uncertainty_cluster: 1980
+  uncertainty_giant_cluster: 1978
+  near_ties: 975
+  low_fit_margin: 948
+  tied_frontier: 944
+  strong_observations: 868
+  sentinel_coverage: 850
+  repeated_fit_churn: 782
+  open_novelty: 761
+  near_tie_count: 396
+  passive_stress: 384
+  sentinel_failures: 180
+  sentinel_passes: 127
+  recent_revocations: 125
+  fit_margin: 37
+  regime_sentinel_failure: 8
+  dormant_alternatives: 1
+
+Supplement. post-hoc interpretation may use manifest only after classification
+  var_fit:x0:HIGH(): strength=contested unknown
+  var_fit:x1:FIRST(7): strength=contested weak_noisy=2 delayed=2 proxy_confounded=2 symbolic=2 latent_additive=1 smooth_nonlinear=1
+  var_fit:x2:HIGH(): strength=contested latent_additive=3 delayed=2 weak_noisy=2 smooth_nonlinear=2 dense_mixed=1
+  var_fit:x3:MEAN(4,5): strength=contested dense_mixed=3 symbolic=2 delayed=2 weak_noisy=1 latent_additive=1 smooth_nonlinear=1
+  var_fit:x4:HIGH(): strength=usable symbolic=6 dense_mixed=2 delayed=1 weak_noisy=1
+  var_fit:x5:TINY(): strength=contested latent_additive=2 dense_mixed=2 symbolic=2 smooth_nonlinear=2 proxy_confounded=1 delayed=1
+  var_fit:x6:LOW(): strength=contested dense_mixed=3 proxy_confounded=3 delayed=2 weak_noisy=1 symbolic=1
+  var_fit:x7:FIRST(4): strength=contested weak_noisy=3 latent_additive=3 delayed=2 dense_mixed=1 proxy_confounded=1
+  var_fit:x8:HIGH(): strength=contested symbolic=4 latent_additive=3 proxy_confounded=1 dense_mixed=1 weak_noisy=1
+  var_fit:x9:DIFF(44,95): strength=contested symbolic=3 smooth_nonlinear=2 latent_additive=2 proxy_confounded=1 dense_mixed=1 delayed=1

@@ -1,0 +1,130 @@
+Loaded 10 rows from reports/background_nethra_compare_10seed_record.jsonl
+
+── A. Background nethra size ───────────────────────────────────
+  runs: 10
+  total background_nethra_records (across runs): 302203
+  total background_nethra_edges:  0
+  total background_contexts_seen: 0
+  records by kind:
+    unresolved_pattern                       277968
+    quarantined_pattern                      9535
+    context_role_pattern                     4917
+    tied_frontier_pattern                    4867
+    trass_pattern                            4644
+    dormant_alternative_pattern              233
+    recurring_low_salience_pattern           39
+
+── B. Role / context structure ─────────────────────────────────
+  trass_patterns:          26
+  unresolved_patterns:     277976
+  quarantined_patterns:    9535
+  dormant_patterns:        233
+  tied_frontier_patterns:  4867
+  role_shift_examples:     0
+
+── C. Familiarity without authority ────────────────────────────
+  familiar_background_count:    302203
+  operational_authority_count:  0  (must be 0)
+  recognition_score_mean:       0.0000
+  action_relevance_score_mean:  0.0000  (expected 0.0)
+  INVARIANT OK: no background nethra issued any authority.
+
+── D. Top background nethra examples (up to 20) ────────────────
+  [ 1] id=frontier:x0:MEAN(4,8)
+       kind=unresolved_pattern  vars=[0]  recog=0.900  action=0.000
+       contexts=['tied_frontier|x0|vis=100|parents=5,6', 'tied_frontier|x0|vis=100|parents=26', 'tied_frontier|x0|vis=100|parents=4,8']  roles=['unresolved']
+       parents=[[5, 6]]  signals=[]
+  [ 2] id=frontier:x1:MEAN(7,8)
+       kind=unresolved_pattern  vars=[1]  recog=0.600  action=0.000
+       contexts=['tied_frontier|x1|vis=100|parents=7,8', 'tied_frontier|x1|vis=100|parents=16', 'tied_frontier|x1|vis=100|parents=67']  roles=['unresolved']
+       parents=[[7, 8]]  signals=[]
+  [ 3] id=var_fit:x2:LOW()
+       kind=context_role_pattern  vars=[2]  recog=0.350  action=0.000
+       contexts=['audit|x2|vis=100']  roles=['best_available']
+       parents=[[]]  signals=[]
+  [ 4] id=frontier:x2:LOW()
+       kind=unresolved_pattern  vars=[2]  recog=0.350  action=0.000
+       contexts=['tied_frontier|x2|vis=100']  roles=['unresolved']
+       parents=[[]]  signals=[]
+  [ 5] id=frontier:x0:FIRST(1)
+       kind=unresolved_pattern  vars=[0]  recog=0.300  action=0.000
+       contexts=['tied_frontier|x0|vis=100|parents=1,8', 'tied_frontier|x0|vis=100']  roles=['unresolved']
+       parents=[[1, 8]]  signals=[]
+  [ 6] id=frontier:x0:MAX(1,8)
+       kind=unresolved_pattern  vars=[0]  recog=0.300  action=0.000
+       contexts=['tied_frontier|x0|vis=100|parents=1,8', 'tied_frontier|x0|vis=100']  roles=['unresolved']
+       parents=[[1, 8]]  signals=[]
+  [ 7] id=frontier:x1:MEAN(6,7)
+       kind=unresolved_pattern  vars=[1]  recog=0.300  action=0.000
+       contexts=['tied_frontier|x1|vis=100|parents=7,8', 'tied_frontier|x1|vis=100']  roles=['unresolved']
+       parents=[[7, 8]]  signals=[]
+  [ 8] id=frontier:x1:MIN(0,7)
+       kind=unresolved_pattern  vars=[1]  recog=0.300  action=0.000
+       contexts=['tied_frontier|x1|vis=100|parents=7,8', 'tied_frontier|x1|vis=100']  roles=['unresolved']
+       parents=[[7, 8]]  signals=[]
+  [ 9] id=frontier:x1:DIFF(6,7)
+       kind=unresolved_pattern  vars=[1]  recog=0.300  action=0.000
+       contexts=['tied_frontier|x1|vis=100|parents=7,8', 'tied_frontier|x1|vis=100']  roles=['unresolved']
+       parents=[[7, 8]]  signals=[]
+  [10] id=var_fit:x0:MAX(1,8)
+       kind=context_role_pattern  vars=[0]  recog=0.100  action=0.000
+       contexts=['audit|x0|vis=100|parents=1,8']  roles=['best_available']
+       parents=[[1, 8]]  signals=[]
+  [11] id=frontier:x0:DIFF(1,4)
+       kind=unresolved_pattern  vars=[0]  recog=0.100  action=0.000
+       contexts=['tied_frontier|x0|vis=100|parents=1,8']  roles=['unresolved']
+       parents=[[1, 8]]  signals=[]
+  [12] id=frontier:x0:MEAN(7,8)
+       kind=unresolved_pattern  vars=[0]  recog=0.100  action=0.000
+       contexts=['tied_frontier|x0|vis=100|parents=1,8']  roles=['unresolved']
+       parents=[[1, 8]]  signals=[]
+  [13] id=frontier:x0:MAX(3,5)
+       kind=unresolved_pattern  vars=[0]  recog=0.100  action=0.000
+       contexts=['tied_frontier|x0|vis=100|parents=1,8']  roles=['unresolved']
+       parents=[[1, 8]]  signals=[]
+  [14] id=frontier:x0:MAX(1,6)
+       kind=unresolved_pattern  vars=[0]  recog=0.100  action=0.000
+       contexts=['tied_frontier|x0|vis=100|parents=1,8']  roles=['unresolved']
+       parents=[[1, 8]]  signals=[]
+  [15] id=frontier:x0:PROD(1,4)
+       kind=unresolved_pattern  vars=[0]  recog=0.100  action=0.000
+       contexts=['tied_frontier|x0|vis=100|parents=1,8']  roles=['unresolved']
+       parents=[[1, 8]]  signals=[]
+  [16] id=frontier:x0:MAX(3,8)
+       kind=unresolved_pattern  vars=[0]  recog=0.100  action=0.000
+       contexts=['tied_frontier|x0|vis=100|parents=1,8']  roles=['unresolved']
+       parents=[[1, 8]]  signals=[]
+  [17] id=frontier:x0:DIFF(2,7)
+       kind=unresolved_pattern  vars=[0]  recog=0.100  action=0.000
+       contexts=['tied_frontier|x0|vis=100|parents=1,8']  roles=['unresolved']
+       parents=[[1, 8]]  signals=[]
+  [18] id=frontier:x0:FIRST(8)
+       kind=unresolved_pattern  vars=[0]  recog=0.100  action=0.000
+       contexts=['tied_frontier|x0|vis=100|parents=1,8']  roles=['unresolved']
+       parents=[[1, 8]]  signals=[]
+  [19] id=frontier:x0:FIRST(3)
+       kind=unresolved_pattern  vars=[0]  recog=0.100  action=0.000
+       contexts=['tied_frontier|x0|vis=100|parents=1,8']  roles=['unresolved']
+       parents=[[1, 8]]  signals=[]
+  [20] id=frontier:x0:MAX(5,8)
+       kind=unresolved_pattern  vars=[0]  recog=0.100  action=0.000
+       contexts=['tied_frontier|x0|vis=100|parents=1,8']  roles=['unresolved']
+       parents=[[1, 8]]  signals=[]
+
+── E. Giant cluster handling ───────────────────────────────────
+  giant clusters recorded as background:   31
+  giant clusters used as authority:        0  (invariant)
+  giant clusters used as repair/monitoring:0  (invariant)
+  Giant clusters (31) were recorded as low-specificity background structure only.
+
+── F. Feature-use accounting ───────────────────────────────────
+  records_used_as_features: 0
+  feature_hits:             0
+  feature_noops:            0
+  operational_authority_count: 0  (must remain 0)
+
+── G. Warning ──────────────────────────────────────────────────
+  Background nethras are learned familiar structure.
+  They are NOT active authority.
+  They do NOT imply tareth in the current context.
+  background_confidence means 'familiar enough to recognize,' not 'safe enough to act.'

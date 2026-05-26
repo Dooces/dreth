@@ -67,6 +67,11 @@ from dreth.learned_residual import (
     FeatureConditionedResidualCalibrator,
 )
 from dreth.quality import QualityWeights, RunQualityScore, make_quality_score
+from dreth.scaffold_memory import (
+    ScaffoldMemoryIndex,
+    compute_run_scaffold_metrics,
+    empty_scaffold_metrics,
+)
 from dreth.shadow_policy import (
     ShadowPolicySelector,
     SHADOW_ROW_FIELDS,
@@ -3102,6 +3107,14 @@ def main():
                    choices=["legacy", "state"],
                    help=("authority-strength assist controller: state is the "
                          "default; legacy reproduces earlier pressure hints"))
+    p.add_argument("--scaffold-memory", default=None, metavar="PATH",
+                   help=("path to scaffold memory JSONL (from memory_sleep output). "
+                         "Familiarity/provenance telemetry only — no runtime authority, "
+                         "no skip suppression, no monitoring increase (default: None)"))
+    p.add_argument("--scaffold-memory-mode", default="off",
+                   choices=["off", "record"],
+                   help=("scaffold memory mode: off=disabled; record=load proposals and "
+                         "report match telemetry without any behavioral effect (default: off)"))
     p.add_argument("--authority-derivation-policy", default=None,
                    choices=[
                        "off",
@@ -3310,6 +3323,8 @@ def main():
         )
     if args.challenge_blind:
         mode += " +challenge-blind"
+    if args.scaffold_memory_mode != "off" and args.scaffold_memory:
+        mode += f" +scaffold-memory({args.scaffold_memory_mode})"
     print(f"dreth arch-test{mode}: {total} runs | "
           f"vars={var_list} cycles={cycle_list} seeds={seed_list} "
           f"schedule={schedule_list}", flush=True)
@@ -3326,6 +3341,12 @@ def main():
     header = _fmt_header()
     print(header)
     print("  " + "-" * (len(header) - 2))
+
+    scaffold_index: Optional[ScaffoldMemoryIndex] = None
+    if args.scaffold_memory_mode != "off" and args.scaffold_memory:
+        scaffold_index = ScaffoldMemoryIndex()
+        n_loaded = scaffold_index.load_proposals(args.scaffold_memory)
+        print(f"  scaffold-memory: loaded {n_loaded} proposals from {args.scaffold_memory}", flush=True)
 
     results: List[RunResult] = []
     done = 0
@@ -3740,6 +3761,19 @@ def main():
                         "operational_authority_count": r.arch.operational_authority_count,
                         "background_nethra_export": r.arch.background_nethra_export,
                     })
+                if args.scaffold_memory_mode != "off":
+                    scaffold_metrics = (
+                        compute_run_scaffold_metrics(
+                            scaffold_index,
+                            r.arch.background_nethra_export,
+                            r.arch.context_role_export,
+                            r.arch.authority_strength_export,
+                        )
+                        if scaffold_index is not None
+                        else empty_scaffold_metrics()
+                    )
+                    scaffold_metrics["scaffold_memory_mode"] = args.scaffold_memory_mode
+                    rec.update(scaffold_metrics)
                 if r.blind_challenge_evaluation is not None:
                     rec["evaluation"] = r.blind_challenge_evaluation
                 if r.baseline and r.baseline.ok:
