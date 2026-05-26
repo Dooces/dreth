@@ -1,0 +1,89 @@
+Loaded 5 rows from reports/scaffold_memory_assist_holdout_5seed_assist_feature.jsonl
+scaffold_memory summary  (0 record rows / 5 assist_feature rows / 5 total rows)
+
+── A. Loaded proposals ─────────────────────────────────────────
+  scaffold_memory_loaded_proposals: 1062
+  PASS: loaded_proposals > 0
+
+── B. Match counts and match rate ──────────────────────────────
+  match_attempts:              3000
+  matches:                     2971
+  useful_matches:              2477
+  broad_generic_debt_matches:  494
+  unmatched_records:           29
+  match_rate:                  0.9903
+  PASS: matches > 0
+  PASS for future assist consideration: useful_matches=2477 > 0
+
+── C. Useful vs broad generic ──────────────────────────────────
+  useful_matches:             2477
+  broad_generic_matches:      494
+  broad_generic_noops:        6166526
+  Broad generic debt is telemetry only and must not reorder candidates.
+
+── D. Matches by kind ──────────────────────────────────────────
+  kind                                        total   useful
+  unresolved_family                           34702    34702
+  context_role_recurrence                     30927    30927
+  authority_debt_family                        1012       95
+  tied_frontier_family                          115      115
+  background_nethra_group                        21       21
+
+── E. Ranking applications ─────────────────────────────────────
+  scaffold_memory_ranking_applications:     53635
+  scaffold_memory_no_runtime_hook_available:0
+
+── F. Candidate reorder stats ──────────────────────────────────
+  scaffold_memory_candidates_reordered: 51892
+
+── G. Top1/topk support ────────────────────────────────────────
+  scaffold_memory_top1_supported: 53635
+  scaffold_memory_topk_supported: 160903
+
+── H. Behavior boundary ────────────────────────────────────────
+  authority_allowed_count: 0  (must be 0)
+  behavior_effects:        0  (must be 0)
+  INVARIANT OK: authority_allowed_count = 0
+  INVARIANT OK: behavior_effects = 0
+
+── I. Mode comparison ──────────────────────────────────────────
+  assist_feature: rows=5 loaded=1062 matches=2971 ranking_applications=53635 reordered=51892
+
+── Unmatched record count ──────────────────────────────────────
+  scaffold_memory_unmatched_records: 29
+  unmatched_rate: 0.0097
+
+── Match examples (up to 10) ───────────────────────────────────
+  [ 1] record=var_fit:x0:LOW()  kind=trass_pattern
+       → proposal=prop_000033_context_role  kind=context_role_recurrence  conf=1.000
+  [ 2] record=frontier:x0:MEAN(5,6)  kind=unresolved_pattern
+       → proposal=prop_000901_context_role  kind=context_role_recurrence  conf=1.000
+  [ 3] record=frontier:x0:PROD(1,8)  kind=unresolved_pattern
+       → proposal=prop_000535_unresolved_f  kind=unresolved_family  conf=1.000
+  [ 4] record=frontier:x0:DIFF(1,6)  kind=unresolved_pattern
+       → proposal=prop_000698_context_role  kind=context_role_recurrence  conf=1.000
+  [ 5] record=var_fit:x0:MIN(1,3)  kind=context_role_pattern
+       → proposal=prop_000002_unresolved_f  kind=unresolved_family  conf=1.000
+  [ 6] record=frontier:x0:MAX(1,8)  kind=unresolved_pattern
+       → proposal=prop_000009_unresolved_f  kind=unresolved_family  conf=1.000
+  [ 7] record=frontier:x0:MIN(1,8)  kind=unresolved_pattern
+       → proposal=prop_000615_context_role  kind=context_role_recurrence  conf=1.000
+  [ 8] record=var_fit:x0:MIN(4,5)  kind=context_role_pattern
+       → proposal=prop_000008_unresolved_f  kind=unresolved_family  conf=1.000
+  [ 9] record=frontier:x0:MAX(1,5)  kind=unresolved_pattern
+       → proposal=prop_000802_context_role  kind=context_role_recurrence  conf=1.000
+  [10] record=var_fit:x0:TINY()  kind=context_role_pattern
+       → proposal=prop_000592_authority_de  kind=authority_debt_family  conf=1.000 [BROAD_GENERIC_DEBT]
+
+── Decision ────────────────────────────────────────────────────
+  PASS: loaded_proposals > 0, matches > 0, behavior unchanged.
+  PASS for future assist consideration: useful_matches > 0.
+
+── J. Warning ──────────────────────────────────────────────────
+  Scaffold memory is consideration, not authority.
+  It does NOT issue authority, revoke authority, suppress skips,
+  increase monitoring, increase repair priority, or add runtime budget.
+  confidence_as_familiarity means 'familiar enough to recognize,'
+  not 'safe enough to act on.'
+  broad_generic_debt proposals must not be used as ranking_hint or
+  clustering_prior without a local structural anchor.

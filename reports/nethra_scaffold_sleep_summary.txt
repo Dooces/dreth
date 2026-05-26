@@ -1,0 +1,78 @@
+NethraScaffoldSleep Report
+================================================================
+
+── A. scaffold inventory ───────────────────────────────────────
+  scaffold_nethras:       1054
+  compositions:           101
+  abstractions:           142
+  role_maps:              1054
+
+── B. full-role coverage ───────────────────────────────────────
+  tareth records seen:              1170
+  trass records seen:               114
+  background records seen:          2787
+  unresolved records seen:          1912
+  authority/debt records seen:      700
+  stable/best_available records seen:696
+
+── C. role maps ────────────────────────────────────────────────
+  [1] scaffold_da30c5570c4c788b tareth@skip|x3|vis=100|parents=0,7 -> best_available@audit|x3|vis=100|parents=0,7
+  [2] scaffold_da30c5570c4c788b best_available@audit|x3|vis=100|parents=0,7 -> unresolved@tied_frontier|x3|vis=100|parents=0,7
+  [3] scaffold_da30c5570c4c788b unresolved@tied_frontier|x3|vis=100|parents=0,7 -> background@audit|x3|vis=100|parents=0,7
+  [4] scaffold_da30c5570c4c788b background@audit|x3|vis=100|parents=0,7 -> contested_best_available@authority_strength|x3|vis=100|parents=0,7
+  [5] scaffold_da30c5570c4c788b contested_best_available@authority_strength|x3|vis=100|parents=0,7 -> quarantined_for_derivation@authority_strength|x3|vis=100|parents=0,7
+  [6] scaffold_27b46595cb9b8493 tareth@skip|x1|vis=100|parents=0,5 -> best_available@audit|x1|vis=100|parents=0,5
+  [7] scaffold_27b46595cb9b8493 best_available@audit|x1|vis=100|parents=0,5 -> unresolved@tied_frontier|x1|vis=100|parents=0,5
+  [8] scaffold_27b46595cb9b8493 unresolved@tied_frontier|x1|vis=100|parents=0,5 -> background@audit|x1|vis=100|parents=0,5
+  trass here / tareth there examples are included above when present.
+  background but later active examples are included above when present.
+
+── D. composition ──────────────────────────────────────────────
+  [1] composition_76cae6832ae39dcf lower=12 higher=scaffold_of_scaffolds_76cae6832ae39dcf confidence=1.0
+      147 lower scaffold nethras share context_signature_family=('tied_frontier', 'MEAN')
+  [2] composition_63906d601353b62e lower=12 higher=scaffold_of_scaffolds_63906d601353b62e confidence=1.0
+      141 lower scaffold nethras share context_signature_family=('tied_frontier', 'MAX')
+  [3] composition_d1ea7a1be0ab1817 lower=12 higher=scaffold_of_scaffolds_d1ea7a1be0ab1817 confidence=1.0
+      136 lower scaffold nethras share context_signature_family=('tied_frontier', 'MIN')
+  [4] composition_be633d0bc453264d lower=12 higher=scaffold_of_scaffolds_be633d0bc453264d confidence=1.0
+      113 lower scaffold nethras share context_signature_family=('tied_frontier', 'DIFF')
+  [5] composition_a137e2d648408546 lower=12 higher=scaffold_of_scaffolds_a137e2d648408546 confidence=1.0
+      114 lower scaffold nethras share context_signature_family=('tied_frontier', 'PROD')
+  [6] composition_c0a1b89f7cf04692 lower=12 higher=scaffold_of_scaffolds_c0a1b89f7cf04692 confidence=1.0
+      83 lower scaffold nethras share context_signature_family=('authority_strength', 'FIRST')
+  [7] composition_5dcdc3c79ba1ec24 lower=12 higher=scaffold_of_scaffolds_5dcdc3c79ba1ec24 confidence=1.0
+      56 lower scaffold nethras share context_signature_family=('authority_strength', 'HIGH')
+  [8] composition_bd4c975c256e12b7 lower=12 higher=scaffold_of_scaffolds_bd4c975c256e12b7 confidence=1.0
+      42 lower scaffold nethras share context_signature_family=('tied_frontier', 'FIRST')
+  nethra-of-nethra candidates are scaffold compositions only.
+
+── E. abstraction ──────────────────────────────────────────────
+  parent_signature_family          71
+  context_role_family              41
+  mixed_role_family                13
+  operator_family                  9
+  authority_debt_family            3
+  background_object_family         1
+  tareth_family                    1
+  trass_family                     1
+  uncertainty_family               1
+  unresolved_family                1
+  operator families:          9
+  parent-signature families:  71
+  context-role families:      41
+  mixed-role families:        13
+
+── F. anti-hoarding diagnostics ────────────────────────────────
+  raw records read:                  5433
+  scaffold nethras emitted:          1054
+  abstractions emitted:              142
+  broad generic debt count:          0
+  broad generic debt useful count:   0  (must be 0)
+
+── G. authority boundary ───────────────────────────────────────
+  authority_allowed_count: 0  (must be 0)
+  behavior_effects:        0  (must be 0)
+  hidden truth/debug fields ignored: ['truth_delayed_parents', 'truth_func', 'truth_latents', 'truth_parents']
+
+── H. warning ──────────────────────────────────────────────────
+  scaffold sleep builds familiarity and abstraction, not truth or authority

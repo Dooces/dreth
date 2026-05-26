@@ -1,0 +1,18 @@
+Dreth Comparison Suite: scaffold_memory
+
+Behavior Metrics
+  off: skip_pct=99.8 iv=162393 quality_cost=31475452 full_audits=7641 revocations=13.2 unique_fails=354 regime_sentinel_fail=38246 no_sentinel=707894
+  record: skip_pct=99.8 iv=162393 quality_cost=31475452 full_audits=7641 revocations=13.2 unique_fails=354 regime_sentinel_fail=38246 no_sentinel=707894
+  assist_feature: skip_pct=99.8 iv=168422 quality_cost=16438971 full_audits=6928 revocations=14.6 unique_fails=334 regime_sentinel_fail=9892 no_sentinel=542154
+
+Scaffold Memory Metrics
+  off: scaffold_memory_loaded_proposals=0 scaffold_memory_match_attempts=0 scaffold_memory_matches=0 scaffold_memory_useful_matches=0 scaffold_memory_broad_generic_debt_matches=0 scaffold_memory_ranking_applications=0 scaffold_memory_candidates_reordered=0 scaffold_memory_top1_supported=0 scaffold_memory_topk_supported=0 scaffold_memory_broad_generic_noops=0 scaffold_memory_no_runtime_hook_available=0 scaffold_memory_behavior_effects=0 scaffold_memory_authority_allowed_count=0
+  record: scaffold_memory_loaded_proposals=1062 scaffold_memory_match_attempts=3000 scaffold_memory_matches=2972 scaffold_memory_useful_matches=2478 scaffold_memory_broad_generic_debt_matches=494 scaffold_memory_ranking_applications=0 scaffold_memory_candidates_reordered=0 scaffold_memory_top1_supported=0 scaffold_memory_topk_supported=0 scaffold_memory_broad_generic_noops=494 scaffold_memory_no_runtime_hook_available=0 scaffold_memory_behavior_effects=0 scaffold_memory_authority_allowed_count=0
+  assist_feature: scaffold_memory_loaded_proposals=1062 scaffold_memory_match_attempts=3000 scaffold_memory_matches=2971 scaffold_memory_useful_matches=2477 scaffold_memory_broad_generic_debt_matches=494 scaffold_memory_ranking_applications=53635 scaffold_memory_candidates_reordered=51892 scaffold_memory_top1_supported=53635 scaffold_memory_topk_supported=160903 scaffold_memory_broad_generic_noops=6166526 scaffold_memory_no_runtime_hook_available=0 scaffold_memory_behavior_effects=0 scaffold_memory_authority_allowed_count=0
+
+Decision Block
+PASS: off == record on behavior metrics.
+PASS: record loads and matches proposals.
+PASS: assist_feature ranking applied or no_runtime_hook_available explains absence.
+PASS: broad_generic_debt matches were counted as noops.
+WARN: assist_feature changes operational metrics adversely vs record: iv, revocations, passive_stressed
