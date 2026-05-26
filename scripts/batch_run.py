@@ -72,6 +72,8 @@ from dreth.scaffold_memory import (
     compute_run_scaffold_metrics,
     empty_scaffold_metrics,
 )
+from dreth.auto_sleep import AutoSleepConfig, AutoSleepScheduler, empty_auto_sleep_metrics
+from dreth.nethra_memory_store import NethraMemoryStore, records_from_batch_record
 from dreth.shadow_policy import (
     ShadowPolicySelector,
     SHADOW_ROW_FIELDS,
@@ -1949,6 +1951,55 @@ def _fmt_row(r: RunResult) -> str:
     return dreth_line + "\n" + tier_lines + "\n" + base_line + parking_line
 
 
+def _append_memory_records_for_result(
+    memory_store: NethraMemoryStore,
+    r: RunResult,
+    *,
+    scaffold_index: Optional[ScaffoldMemoryIndex],
+    scaffold_mode: str,
+) -> int:
+    rec: dict[str, Any] = {
+        "run_id": (
+            f"{r.config.schedule}:n{r.config.n_vars}:c{r.config.cycles}:"
+            f"seed{r.config.seed}:{_policy_label(r)}"
+        ),
+        "n_vars": r.config.n_vars,
+        "cycles": r.config.cycles,
+        "seed": r.config.seed,
+        "schedule": r.config.schedule,
+        "policy": _policy_label(r),
+        "recorded_cycles": r.recorded_cycles,
+        "uncertainty_consolidation_mode": r.arch.uncertainty_consolidation_mode,
+        "uncertainty_cases_seen": r.arch.uncertainty_cases_seen,
+        "uncertainty_clusters": r.arch.uncertainty_clusters,
+        "uncertainty_compression_ratio": r.arch.uncertainty_compression_ratio,
+        "giant_cluster_count": r.arch.giant_cluster_count,
+        "max_cluster_size": r.arch.max_cluster_size,
+        "background_nethra_export": r.arch.background_nethra_export,
+        "context_role_index": r.arch.context_role_export,
+        "authority_strength": r.arch.authority_strength_export,
+    }
+    if scaffold_mode != "off" and scaffold_index is not None:
+        rec.update(compute_run_scaffold_metrics(
+            scaffold_index,
+            r.arch.background_nethra_export,
+            r.arch.context_role_export,
+            r.arch.authority_strength_export,
+        ))
+    memory_records = records_from_batch_record(rec)
+    written = memory_store.append_records(memory_records)
+    memory_store.append_run_summary({
+        "run_id": rec["run_id"],
+        "seed": r.config.seed,
+        "schedule": r.config.schedule,
+        "n_vars": r.config.n_vars,
+        "cycles": r.config.cycles,
+        "nethra_memory_records_written": written,
+        "authority_allowed": False,
+    })
+    return written
+
+
 def _fmt_header() -> str:
     return (
         f"  {'n':>3}  {'cyc':>4}  {'seed':>5}  "
@@ -3115,6 +3166,31 @@ def main():
                    choices=["off", "record"],
                    help=("scaffold memory mode: off=disabled; record=load proposals and "
                          "report match telemetry without any behavioral effect (default: off)"))
+    p.add_argument("--nethra-memory", default="off",
+                   choices=["off", "record"],
+                   help=("persistent Nethra memory: off=disabled; record=append "
+                         "runtime-visible familiarity/provenance records only"))
+    p.add_argument("--nethra-memory-path", default="reports/nethra_memory_store.jsonl",
+                   metavar="PATH",
+                   help="path for persistent Nethra memory JSONL")
+    p.add_argument("--auto-sleep", default="off",
+                   choices=["off", "run_end", "threshold"],
+                   help=("automatic offline sleep scheduling. run_end and threshold "
+                         "run only at batch/run boundaries in this implementation"))
+    p.add_argument("--auto-sleep-cycle-threshold", type=int, default=0,
+                   help="cycle threshold for boundary-only auto sleep")
+    p.add_argument("--auto-sleep-backlog-threshold", type=int, default=0,
+                   help="memory backlog threshold for boundary-only auto sleep")
+    p.add_argument("--auto-sleep-proposals", default="reports/auto_sleep_proposals.jsonl",
+                   metavar="PATH",
+                   help="path for auto-sleep scaffold proposals JSONL")
+    p.add_argument("--auto-sleep-summary", default="reports/auto_sleep_summary.txt",
+                   metavar="PATH",
+                   help="path for auto-sleep text summary")
+    p.add_argument("--auto-load-scaffold-memory", default="off",
+                   choices=["off", "record"],
+                   help=("load --auto-sleep-proposals as scaffold memory in record mode "
+                         "if the file exists; no behavior effects"))
     p.add_argument("--authority-derivation-policy", default=None,
                    choices=[
                        "off",
@@ -3323,6 +3399,12 @@ def main():
         )
     if args.challenge_blind:
         mode += " +challenge-blind"
+    if args.nethra_memory != "off":
+        mode += f" +nethra-memory({args.nethra_memory})"
+    if args.auto_sleep != "off":
+        mode += f" +auto-sleep({args.auto_sleep})"
+    if args.auto_load_scaffold_memory != "off":
+        mode += f" +auto-load-scaffold-memory({args.auto_load_scaffold_memory})"
     if args.scaffold_memory_mode != "off" and args.scaffold_memory:
         mode += f" +scaffold-memory({args.scaffold_memory_mode})"
     print(f"dreth arch-test{mode}: {total} runs | "
@@ -3347,6 +3429,32 @@ def main():
         scaffold_index = ScaffoldMemoryIndex()
         n_loaded = scaffold_index.load_proposals(args.scaffold_memory)
         print(f"  scaffold-memory: loaded {n_loaded} proposals from {args.scaffold_memory}", flush=True)
+    elif args.auto_load_scaffold_memory == "record" and Path(args.auto_sleep_proposals).exists():
+        scaffold_index = ScaffoldMemoryIndex()
+        n_loaded = scaffold_index.load_proposals(args.auto_sleep_proposals)
+        args.scaffold_memory_mode = "record"
+        print(
+            f"  auto-load-scaffold-memory: loaded {n_loaded} proposals "
+            f"from {args.auto_sleep_proposals}",
+            flush=True,
+        )
+
+    memory_store: Optional[NethraMemoryStore] = None
+    if args.nethra_memory == "record" or args.auto_sleep != "off":
+        memory_store = NethraMemoryStore(args.nethra_memory_path)
+
+    auto_sleep_scheduler = AutoSleepScheduler()
+    auto_sleep_config = AutoSleepConfig(
+        enabled=args.auto_sleep != "off",
+        memory_path=args.nethra_memory_path,
+        proposals_path=args.auto_sleep_proposals,
+        summary_path=args.auto_sleep_summary,
+        cycle_threshold=args.auto_sleep_cycle_threshold if args.auto_sleep == "threshold" else 0,
+        backlog_threshold=(
+            args.auto_sleep_backlog_threshold if args.auto_sleep == "threshold" else 0
+        ),
+        run_end=args.auto_sleep == "run_end",
+    )
 
     results: List[RunResult] = []
     done = 0
@@ -3774,6 +3882,40 @@ def main():
                     )
                     scaffold_metrics["scaffold_memory_mode"] = args.scaffold_memory_mode
                     rec.update(scaffold_metrics)
+                    if args.auto_load_scaffold_memory == "record":
+                        rec["auto_loaded_scaffold_proposals"] = int(
+                            scaffold_metrics.get("scaffold_memory_loaded_proposals", 0)
+                        )
+                        rec["auto_loaded_scaffold_matches"] = int(
+                            scaffold_metrics.get("scaffold_memory_matches", 0)
+                        )
+                else:
+                    rec["auto_loaded_scaffold_proposals"] = 0
+                    rec["auto_loaded_scaffold_matches"] = 0
+                rec.update(empty_auto_sleep_metrics())
+                rec["run_id"] = (
+                    f"{r.config.schedule}:n{r.config.n_vars}:c{r.config.cycles}:"
+                    f"seed{r.config.seed}:{_policy_label(r)}"
+                )
+                if memory_store is not None:
+                    memory_records = records_from_batch_record(rec)
+                    written = memory_store.append_records(memory_records)
+                    memory_store.append_run_summary({
+                        "run_id": rec["run_id"],
+                        "seed": r.config.seed,
+                        "schedule": r.config.schedule,
+                        "n_vars": r.config.n_vars,
+                        "cycles": r.config.cycles,
+                        "nethra_memory_records_written": written,
+                        "authority_allowed": False,
+                    })
+                    rec["nethra_memory_records_written"] = written
+                    rec["nethra_memory_backlog_count"] = memory_store.count_backlog()
+                    rec["nethra_memory_store_path"] = str(memory_store.path)
+                else:
+                    rec["nethra_memory_records_written"] = 0
+                    rec["nethra_memory_backlog_count"] = 0
+                    rec["nethra_memory_store_path"] = ""
                 if r.blind_challenge_evaluation is not None:
                     rec["evaluation"] = r.blind_challenge_evaluation
                 if r.baseline and r.baseline.ok:
@@ -3787,6 +3929,13 @@ def main():
                     }
                 out_fh.write(json.dumps(rec) + "\n")
                 out_fh.flush()
+            elif memory_store is not None:
+                _append_memory_records_for_result(
+                    memory_store,
+                    r,
+                    scaffold_index=scaffold_index,
+                    scaffold_mode=args.scaffold_memory_mode,
+                )
 
     policy_report_rows = (
         _build_policy_report_rows(results, quality_weights)
@@ -3805,6 +3954,42 @@ def main():
         out_fh.flush()
     if out_fh:
         out_fh.close()
+
+    auto_sleep_result: dict[str, Any] | None = None
+    if memory_store is not None and args.auto_sleep != "off":
+        backlog_count = memory_store.count_backlog()
+        should_sleep, sleep_reason = auto_sleep_scheduler.should_schedule_boundary_sleep(
+            auto_sleep_config,
+            cycle=max(cycle_list) if cycle_list else 0,
+            backlog_count=backlog_count,
+            run_end=True,
+        )
+        if should_sleep:
+            auto_sleep_result = auto_sleep_scheduler.run_sleep(memory_store, auto_sleep_config)
+            auto_sleep_result["auto_sleep_reason"] = sleep_reason
+            auto_sleep_scheduler.record_sleep_result(
+                memory_store,
+                reason=sleep_reason,
+                result=auto_sleep_result,
+            )
+            print(
+                f"  auto-sleep: {sleep_reason}; "
+                f"input_records={auto_sleep_result['auto_sleep_input_records']} "
+                f"proposals={auto_sleep_result['auto_sleep_proposals']} "
+                f"authority_allowed={auto_sleep_result['auto_sleep_authority_allowed_count']}",
+                flush=True,
+            )
+        else:
+            auto_sleep_result = empty_auto_sleep_metrics()
+            auto_sleep_result["auto_sleep_reason"] = sleep_reason
+        if args.out:
+            with open(args.out, "a") as fh:
+                fh.write(json.dumps({
+                    "record_type": "auto_sleep",
+                    "nethra_memory_store_path": str(memory_store.path),
+                    "nethra_memory_backlog_count": backlog_count,
+                    **auto_sleep_result,
+                }) + "\n")
     if args.policy_report_tsv:
         _write_policy_report_tsv(args.policy_report_tsv, policy_report_rows)
 
