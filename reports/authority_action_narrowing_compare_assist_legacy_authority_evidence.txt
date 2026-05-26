@@ -1,0 +1,136 @@
+A. External mismatch under authority:
+  cases=227
+  cases:
+    seed  var relation             class                          strong sent  rev drift margin
+      99    0 latent_additive      insufficient_evidence               3    9    0     0      0
+      99    1 proxy_confounded     contradicted_authority              6    9    0     0      0
+      99    2 latent_additive      contradicted_authority              4    7    0     0      0
+      99    3 smooth_nonlinear     contradicted_authority              4    7    0     0      0
+      99    6 dense_mixed          contradicted_authority              4    9    0     0      0
+      99    7 dense_mixed          contradicted_authority              3    9    0     0      0
+      99    9 symbolic             contradicted_authority              4    7    0     0      0
+      99   11 smooth_nonlinear     contradicted_authority              2    5    0     0      0
+      99   13 smooth_nonlinear     contradicted_authority              2    5    0     0      0
+      99   15 smooth_nonlinear     contradicted_authority              4    5    0     0      0
+      99   16 latent_additive      contradicted_authority              2    7    0     0      0
+      99   17 delayed              contradicted_authority              4    7    0     0      0
+      99   18 dense_mixed          insufficient_evidence               2    5    0     0      0
+      99   19 smooth_nonlinear     contradicted_authority              4    5    0     0      0
+      99   20 proxy_confounded     contradicted_authority              2    7    0     0      0
+      99   21 dense_mixed          contradicted_authority              2    5    0     0      0
+      99   22 smooth_nonlinear     contradicted_authority              4    7    0     0      0
+      99   24 weak_noisy           contradicted_authority              2    7    0     0      0
+      99   25 delayed              contradicted_authority              3    5    0     0      0
+      99   27 proxy_confounded     contradicted_authority              2    7    0     0      0
+  ... +207 more
+
+B. Evidence support level:
+  evidence_supported_surrogate          2
+  weakly_supported_surrogate           17
+  contradicted_authority              176
+  insufficient_evidence                32
+  unknown                               0
+
+C. Best-available surrogate candidates:
+  Hidden mismatch with stable residual/probe evidence and no visible better alternative is reported as a surrogate, not a failure.
+  candidates:
+    seed  var relation             class                          strong sent  rev drift margin
+       7   29 delayed              evidence_supported_surrogate        2    5    0     0      5
+      42   59 symbolic             evidence_supported_surrogate        2    5    0     0     12
+
+D. Serious authority/evidence mismatch candidates:
+  These are evidence-relative candidates: repeated stress/revocation/novelty or low observations while strong authority persisted.
+  candidates:
+    seed  var relation             class                          strong sent  rev drift margin
+      99    0 latent_additive      insufficient_evidence               3    9    0     0      0
+      99    1 proxy_confounded     contradicted_authority              6    9    0     0      0
+      99    2 latent_additive      contradicted_authority              4    7    0     0      0
+      99    3 smooth_nonlinear     contradicted_authority              4    7    0     0      0
+      99    6 dense_mixed          contradicted_authority              4    9    0     0      0
+      99    7 dense_mixed          contradicted_authority              3    9    0     0      0
+      99    9 symbolic             contradicted_authority              4    7    0     0      0
+      99   11 smooth_nonlinear     contradicted_authority              2    5    0     0      0
+      99   13 smooth_nonlinear     contradicted_authority              2    5    0     0      0
+      99   15 smooth_nonlinear     contradicted_authority              4    5    0     0      0
+      99   16 latent_additive      contradicted_authority              2    7    0     0      0
+      99   17 delayed              contradicted_authority              4    7    0     0      0
+      99   18 dense_mixed          insufficient_evidence               2    5    0     0      0
+      99   19 smooth_nonlinear     contradicted_authority              4    5    0     0      0
+      99   20 proxy_confounded     contradicted_authority              2    7    0     0      0
+      99   21 dense_mixed          contradicted_authority              2    5    0     0      0
+      99   22 smooth_nonlinear     contradicted_authority              4    7    0     0      0
+      99   24 weak_noisy           contradicted_authority              2    7    0     0      0
+      99   25 delayed              contradicted_authority              3    5    0     0      0
+      99   27 proxy_confounded     contradicted_authority              2    7    0     0      0
+  ... +188 more
+
+E. Warning:
+  Hidden truth is used only for offline interpretation. Dreth must be judged by what was available to it.
+
+F. Shadow authority throttle (mode: conservative):
+  Offline estimate only. No effect on runtime behavior, skip logic,
+  cert issuance, revocation, fit, sentinels, or route certs.
+  external_mismatch_cases:                          227
+  would_throttle:                                   208
+  would_not_throttle:                                19
+  throttled_contradicted_authority:                 176
+  throttled_insufficient_evidence:                   32
+  unthrottled_supported_surrogate:                    2
+  unthrottled_weak_surrogate:                        17
+  estimated_mismatch_cases_avoided:                 208
+  estimated_supported_surrogates_preserved:           2
+
+G. Visible evidence trigger breakdown (227 cases):
+  Offline accounting only. Trigger flags are derived from agent-visible
+  evidence fields only; hidden-world fields are not read.
+
+  Overall:
+    recent_revocations_trigger:                      0
+    recent_detected_drift_trigger:                   2
+    consecutive_sentinel_failure_trigger:            9
+    open_novelty_trigger:                          174
+    passive_stress_trigger:                          0
+    low_strong_observations_trigger:                 1
+    low_sentinel_count_trigger:                      0
+    low_fit_history_trigger:                         0
+    low_margin_trigger:                            191
+    alternatives_or_ties_trigger:                  220
+
+  By relation_type  (rev=revocations drift=drift_detect sent=sentinel_fail novl=open_novelty
+    strs=passive_stress l_ob=low_obs l_sn=low_sent l_ft=low_fit l_mg=low_margin alts=alts_ties):
+    relation_type              rev drift  sent  novl  strs  l_ob  l_sn  l_ft  l_mg  alts
+    delayed                      0     0     3    23     0     0     0     0    26    30
+    dense_mixed                  0     0     3    32     0     1     0     0    31    38
+    latent_additive              0     1     3    17     0     0     0     0    22    24
+    proxy_confounded             0     0     0    16     0     0     0     0    17    24
+    smooth_nonlinear             0     1     0    30     0     0     0     0    32    33
+    symbolic                     0     0     0    13     0     0     0     0    19    26
+    weak_noisy                   0     0     0    43     0     0     0     0    44    45
+
+  By throttle reason (mode: conservative):
+    contradicted_authority (176 cases): drift=2 sent=9 novl=174 l_mg=159 alts=173
+    insufficient_evidence (32 cases): l_ob=1 l_mg=32 alts=32
+    no_throttle (19 cases): alts=15
+
+  Top 20 cases with active triggers:
+      seed  var relation               reason                    triggers
+        99   43 delayed                contradicted_authority    consecutive_sentinel_failure_trigger open_novelty_trigger low_margin_trigger alternatives_or_ties_trigger
+        99   46 delayed                contradicted_authority    consecutive_sentinel_failure_trigger open_novelty_trigger low_margin_trigger alternatives_or_ties_trigger
+        99   66 smooth_nonlinear       contradicted_authority    recent_detected_drift_trigger open_novelty_trigger low_margin_trigger alternatives_or_ties_trigger
+         7   25 latent_additive        contradicted_authority    recent_detected_drift_trigger open_novelty_trigger low_margin_trigger alternatives_or_ties_trigger
+        42    6 delayed                contradicted_authority    consecutive_sentinel_failure_trigger open_novelty_trigger low_margin_trigger alternatives_or_ties_trigger
+        99    1 proxy_confounded       contradicted_authority    open_novelty_trigger low_margin_trigger alternatives_or_ties_trigger
+        99    2 latent_additive        contradicted_authority    open_novelty_trigger low_margin_trigger alternatives_or_ties_trigger
+        99    3 smooth_nonlinear       contradicted_authority    open_novelty_trigger low_margin_trigger alternatives_or_ties_trigger
+        99    6 dense_mixed            contradicted_authority    open_novelty_trigger low_margin_trigger alternatives_or_ties_trigger
+        99    7 dense_mixed            contradicted_authority    open_novelty_trigger low_margin_trigger alternatives_or_ties_trigger
+        99    9 symbolic               contradicted_authority    open_novelty_trigger low_margin_trigger alternatives_or_ties_trigger
+        99   11 smooth_nonlinear       contradicted_authority    open_novelty_trigger low_margin_trigger alternatives_or_ties_trigger
+        99   13 smooth_nonlinear       contradicted_authority    open_novelty_trigger low_margin_trigger alternatives_or_ties_trigger
+        99   15 smooth_nonlinear       contradicted_authority    open_novelty_trigger low_margin_trigger alternatives_or_ties_trigger
+        99   16 latent_additive        contradicted_authority    open_novelty_trigger low_margin_trigger alternatives_or_ties_trigger
+        99   17 delayed                contradicted_authority    open_novelty_trigger low_margin_trigger alternatives_or_ties_trigger
+        99   19 smooth_nonlinear       contradicted_authority    open_novelty_trigger low_margin_trigger alternatives_or_ties_trigger
+        99   20 proxy_confounded       contradicted_authority    open_novelty_trigger low_margin_trigger alternatives_or_ties_trigger
+        99   21 dense_mixed            contradicted_authority    open_novelty_trigger low_margin_trigger alternatives_or_ties_trigger
+        99   22 smooth_nonlinear       contradicted_authority    open_novelty_trigger low_margin_trigger alternatives_or_ties_trigger
