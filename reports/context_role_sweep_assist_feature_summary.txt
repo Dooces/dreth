@@ -1,0 +1,65 @@
+ContextRoleIndex Report
+Warning: nethra nodes are provenance, not truth; roles are context-indexed.
+
+A. Index size
+  runs: 60
+  exported_nodes: 18000
+  exported_context_roles: 18000
+  runtime_nodes: 1204863
+  runtime_roles: 1759800
+
+B. Nethra nodes by kind/source
+  kind: tied_frontier_candidate=16934 var_fit=872 unknown=194
+  source: tied_frontier=16934 operation_role=817 uncertainty_cluster=194 audit=55
+
+C. Context roles by role/context
+  role: unresolved=16354 best_available=824 tareth=712 trass=110
+  tied_frontier|x2|vis=100: 220
+  tied_frontier|x5|vis=75|parents=0,4: 182
+  tied_frontier|x0|vis=100: 180
+  tied_frontier|x2|vis=75: 170
+  tied_frontier|x4|vis=75: 150
+  tied_frontier|x0|vis=75: 148
+  tied_frontier|x2|vis=50|parents=0: 144
+  tied_frontier|x1|vis=50|parents=39: 136
+  tied_frontier|x4|vis=50|parents=0: 134
+  tied_frontier|x16|vis=50|parents=12: 134
+  tied_frontier|x1|vis=75|parents=0: 134
+  tied_frontier|x4|vis=100|parents=0: 134
+
+D. Nethras with multiple roles across contexts
+  var_fit:x0:FIRST(26): roles=best_available,tareth contexts=2
+  var_fit:x1:MIN(8,44): roles=best_available,tareth contexts=2
+  var_fit:x2:FIRST(0): roles=best_available,tareth contexts=4
+  var_fit:x3:FIRST(32): roles=best_available,tareth contexts=2
+  var_fit:x26:MAX(0,24): roles=best_available,tareth contexts=2
+  var_fit:x8:FIRST(34): roles=best_available,tareth contexts=2
+  var_fit:x44:MEAN(19,43): roles=best_available,trass contexts=2
+  var_fit:x32:HIGH(): roles=best_available,tareth contexts=2
+  var_fit:x24:PROD(3,20): roles=best_available,tareth contexts=2
+  var_fit:x34:PROD(5,23): roles=best_available,trass contexts=2
+
+E. Trass-in-one-context / tareth-in-another examples
+  none
+
+F. Matches used by uncertainty consolidation
+  context_role_index_matches=73958
+  context_role_matches_used_as_local_anchor=216662
+  context_role_assist_feature_hits=216662
+
+G. Post-hoc interpretation
+  Uses manifest relation_type only after index matching/reporting.
+  var_fit:x0:FIRST(26): weak_noisy=36 latent_additive=30 symbolic=22 delayed=16 smooth_nonlinear=8 dense_mixed=6 proxy_confounded=2
+  frontier:x0:FIRST(26): weak_noisy=36 latent_additive=30 symbolic=22 delayed=16 smooth_nonlinear=8 dense_mixed=6 proxy_confounded=2
+  frontier:x0:DIFF(11,48): weak_noisy=48 latent_additive=40 symbolic=40 dense_mixed=18 delayed=16 proxy_confounded=10 smooth_nonlinear=8
+  frontier:x0:MAX(26,45): weak_noisy=50 latent_additive=42 symbolic=32 delayed=30 smooth_nonlinear=14 dense_mixed=8 proxy_confounded=4
+  frontier:x0:MEAN(19,31): weak_noisy=42 latent_additive=38 symbolic=32 smooth_nonlinear=20 delayed=18 proxy_confounded=18 dense_mixed=12
+  frontier:x0:MAX(31,45): weak_noisy=46 latent_additive=44 symbolic=30 delayed=26 smooth_nonlinear=16 proxy_confounded=10 dense_mixed=8
+  frontier:x0:FIRST(31): latent_additive=32 weak_noisy=32 symbolic=20 delayed=12 smooth_nonlinear=10 proxy_confounded=8 dense_mixed=6
+  frontier:x0:MIN(31,43): latent_additive=50 weak_noisy=36 symbolic=26 delayed=24 smooth_nonlinear=16 proxy_confounded=14 dense_mixed=14
+  frontier:x0:MAX(11,43): latent_additive=50 symbolic=40 weak_noisy=34 delayed=18 dense_mixed=16 smooth_nonlinear=12 proxy_confounded=10
+  frontier:x0:MAX(11,26): symbolic=44 weak_noisy=42 latent_additive=38 delayed=22 dense_mixed=14 smooth_nonlinear=14 proxy_confounded=6
+
+H. Warning
+  ContextRoleIndex is provenance and locality memory, not runtime truth.
+  A trass role is not deletion and a tareth role is not global identity.
