@@ -1,0 +1,31 @@
+Dreth Comparison Suite: background_nethra
+
+Behavior Metrics
+  off: skip_pct=99.8 iv=120953 quality_cost=5954999 full_audits=3544 revocations=11.3 unique_fails=312 regime_sentinel_fail=0 passive_stress_count=9748.333 monitoring_increases_from_strength=0 repair_priority_bumps_from_strength=0
+  record: skip_pct=99.8 iv=120953 quality_cost=5954999 full_audits=3544 revocations=11.3 unique_fails=312 regime_sentinel_fail=0 passive_stress_count=9748.333 monitoring_increases_from_strength=0 repair_priority_bumps_from_strength=0
+
+Background Metrics (record mode)
+  background_nethra_records=26694
+  familiar_background_count=26694
+  operational_authority_count=0
+  background_trass_patterns=2.333
+  background_unresolved_patterns=24637.333
+  background_quarantined_patterns=819
+  background_giant_cluster_patterns=3.333
+  background_dormant_patterns=0
+  background_tied_frontier_patterns=413
+  background_records_used_as_features=0
+  background_feature_hits=0
+  background_feature_noops=0
+  background_nethra_by_kind:
+    unresolved_pattern: 73910
+    quarantined_pattern: 2457
+    context_role_pattern: 1262
+    tied_frontier_pattern: 1239
+    trass_pattern: 1202
+    recurring_low_salience_pattern: 12
+
+Decision Block
+PASS: off and record match on behavior metrics.
+PASS: background records > 0.
+PASS: familiar_background_count > 0 and operational_authority_count == 0.
