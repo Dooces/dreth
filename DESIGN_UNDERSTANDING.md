@@ -1,68 +1,113 @@
 # Design Understanding
 
-This document describes the current Dreth design frame. It replaces older wording that treated `tareth` as hidden-world truth, `trass` as falsehood, and `NethraCertificate` as absolute certification.
+This document describes the current Dreth design frame. It replaces older wording that treated `tareth` as hidden-world truth, `trass` as falsehood, `NethraCertificate` as absolute certification, or a nethra as identical to learned structure.
 
-The current model is different:
+The current model is:
 
-> A nethra is learned structure. `tareth`, `trass`, `unresolved`, and `best_available` are context-indexed roles assigned to that structure under evidence and operation.
+> Structure is the shared substrate. A nethra is a scoped, evidence-bearing, context-activated lens over that substrate. Roles are context-indexed. Regimes are emergent active expressions over overlapping nethras, not predeclared world labels.
 
-Dreth is a simulation framework for testing whether explicit, evidence-shaped, context-indexed structure can help an agent allocate limited attention under uncertainty. It is not a claim of solved AGI and not a production causal discovery package.
+Dreth is a simulation framework for testing whether explicit, evidence-shaped, context-indexed structure can help an agent allocate limited attention and search under uncertainty. It is not a claim of solved AGI and not a production causal discovery package.
 
 ## 1. What Dreth is testing
 
 The central problem is not simply “find the true causal graph.” The generated worlds do have hidden truth for evaluation, but the agent is not allowed to read it. The runtime problem is evidence-relative:
 
-- What structure has the agent learned?
-- What evidence supports it?
-- In which context does it matter?
-- When should it be used as the current best available handle?
-- When should it be treated as operationally irrelevant in this context?
-- When should ambiguity, novelty, or failure change attention?
-- When should a higher handle reduce work, and when is it merely a broad alarm?
+- What structure has the agent learned or observed?
+- Which nethra lenses touch that structure?
+- What evidence supports each lens?
+- In which context is each lens active?
+- What use-right does each lens currently have?
+- When should a lens annotate, rank, filter, block, preserve, or reopen structure?
+- When should overlap with prior structure become a hint, and when should it remain inert?
+- When does recognition collapse indicate that the active lens set no longer covers the current context?
+- When do co-active lenses form an emergent regime expression?
 
-The architecture studies these questions using a hidden world, an intervention interface, a ledger of learned structure, sentinel checks, frontiers, uncertainty consolidation, context-role indexing, and diagnostic reports.
+The architecture studies these questions using hidden worlds, an intervention interface, a ledger of learned structure and authority records, sentinel checks, frontiers, uncertainty consolidation, context-role indexing, background/scaffold memory, and diagnostic reports.
 
-## 2. Core terms
+## 2. Corrected core ontology
+
+### StructureGraph
+
+The **StructureGraph** is the reusable substrate: variables, relations, operators, candidate fits, parent sets, frontiers, dormant alternatives, probes, experts, sentinels, residual patterns, temporal traces, role histories, and scaffold/sleep products.
+
+Structure is not itself authority. Structure is what nethras touch.
 
 ### Nethra
 
-A **nethra** is a learned reusable structure: a handle over a relation, fit, candidate, component, regime pattern, frontier alternative, composite, or higher-order organization.
+A **nethra** is a scoped handle/lens over structure. It does not own the structure and is not identical to the structure. Multiple nethras can touch the same node, edge, operator, candidate, probe, or expert.
 
-It is not a label handed down by the world. It is also not necessarily a final truth. It is a structure the system can reuse, compare, compose, monitor, preserve, or demote in scope.
+A nethra should carry:
 
-A nethra may be composed of other nethras. That is the basis for nethras-of-nethras: higher handles built from lower ones.
+- touched structure,
+- evidence/provenance,
+- activation conditions,
+- use-rights,
+- invalidators,
+- scope/context,
+- role history,
+- and relations to other nethras.
+
+This distinction matters because the same structure may be relevant, irrelevant, familiar, blocked, unresolved, or useful as a rank hint in different contexts.
 
 ### Context role
 
-A context role says how a nethra functions in a particular context or operation.
+A context role says how a nethra functions in a particular operation/context.
 
-Current roles:
+Current roles include:
 
 - `tareth`: this nethra matters operationally in this context.
 - `trass`: this nethra is operationally equivalent or irrelevant in this context.
 - `unresolved`: available evidence preserves ambiguity or instability.
 - `best_available`: this is the current working handle, even if uncertainty remains.
 
-These are not identities. A nethra can be trass in one context and tareth in another.
+These are not identities. A nethra can be trass in one context and tareth in another. Trass is not deletion.
 
-Example:
+### Use-rights
 
-- A shape-like nethra can be trass for color classification.
-- The same shape-like nethra can be tareth for grasp planning.
-- Under a novel regime, it may be unresolved.
-- Under weak evidence, it may be best_available because nothing better exists.
+A nethra’s use-right controls how it may influence runtime search:
 
-### Authority record
+- `record_only`: stored/reported only.
+- `feature_only`: may annotate, but cannot reorder or exclude.
+- `ranking_hint`: may reorder existing candidates or probes.
+- `soft_filter`: may prioritize touched structure while preserving fallback.
+- `hard_filter`: may exclude structure only when local evidence has earned that permission.
+- `block`: may prevent use/derivation in a scope.
 
-The code still uses legacy names such as `NethraCertificate`, `certificates`, and `certified_eps`. In current design language, these should be read as **authority records**: evidence-bounded commitments, not absolute proof.
+Authority must be earned by visible evidence. Recognition, recurrence, graph proximity, and overlap are not authority.
 
-Authority is graded by evidence, scope, survival, revocation history, sentinels, alternatives, and context. A current authority record is not a global statement that the structure is true forever.
+### NethraExpression
 
-### Hidden truth
+A **NethraExpression** is a union/intersection/difference/gated/coactive expression over nethras.
 
-The world has hidden causal structure so reports can evaluate what happened after the run. Runtime must not use it.
+Examples:
 
-Hidden truth is allowed only in post-hoc interpretation sections, such as blind challenge summaries or relation-type breakdowns. It is not allowed in clustering, runtime matching, assist decisions, authority assignment, skip behavior, or fit selection.
+- `A ∩ B`: touched structure common to both lenses.
+- `A ∪ B`: touched structure from either lens.
+- `A - B`: structure touched by A but blocked/contradicted by B.
+- `A if gate_B`: A is active only if B or a signal condition is active.
+- `A coactive-with B`: A and B repeatedly become useful together.
+
+A nethra expression does not inherit the strongest member authority. It must earn its own use-right in the current scope.
+
+### ActiveSlice
+
+An **ActiveSlice** is the compiled runtime product of active nethras and nethra expressions:
+
+- hard filters,
+- soft filters,
+- rank hints,
+- probe hints,
+- blockers,
+- invalidators,
+- and provenance.
+
+Runtime should not need the full historical structure graph every cycle. It should receive a bounded active slice.
+
+### Emergent regime
+
+A regime is not a world label. The agent does not need to know that it moved from “world A” to “world B.” It only needs to detect that active recognition has collapsed: predictions degrade, familiar handles stop matching, sentinels fail, rank lift drops, or old filters no longer apply.
+
+That opens a regime-boundary candidate. Old nethras are downgraded to hints. Local overlap with existing structure is tested. If recurrent overlap improves prediction, parent ranking, probe choice, or repair localization, local bridge nethras form. If several bridges co-activate and remain useful, a regime nethra emerges as a stable active expression basin.
 
 ## 3. World model
 
@@ -70,13 +115,13 @@ Hidden truth is allowed only in post-hoc interpretation sections, such as blind 
 
 Important schedules include:
 
-- `regime_switch`: designed to produce recurring regime-like structural shifts.
+- `regime_switch`: produces recurring regime-like structural shifts.
 - `false_trass`: stresses proxy/false operational equivalence behavior.
 - `blind_challenge`: mixes symbolic, smooth nonlinear, latent, delayed, proxy, dense, and weak/noisy relations.
 
 The world is an oracle only through observations and interventions. The agent observes effects; it does not inspect hidden parent/function fields.
 
-The purpose of the more complex worlds is not to guarantee success. Failure is useful when it identifies which structures the current architecture cannot learn or use.
+The purpose of richer worlds is not to guarantee success. Failure is useful when it identifies which structures, lenses, or expressions the current architecture cannot learn or use.
 
 ## 4. Runtime loop
 
@@ -85,7 +130,7 @@ The purpose of the more complex worlds is not to guarantee success. Failure is u
 A typical cycle involves:
 
 1. Observe current state.
-2. Determine which variables or handles need attention.
+2. Determine which variables, handles, or structures need attention.
 3. Use existing authority records, sentinels, composites, roles, and repair agenda state to avoid unnecessary full audits where justified.
 4. Run full audits when needed.
 5. Fit candidate parent/function hypotheses.
@@ -96,21 +141,21 @@ A typical cycle involves:
 
 The loop should not be understood as “find truth, certify truth, skip forever.” It is closer to:
 
-> maintain usable structure under limited attention, while making failures and uncertainty explicit enough to guide future repair.
+> maintain usable structure under limited attention, while making failures and uncertainty explicit enough to guide future search and repair.
 
 ## 5. Fitting and sentinels
 
 `dreth/fit.py` enumerates and scores parent/function hypotheses using the agent’s visible vocabulary. It can find best fits, margins, ties, and near-ties. A best fit is not automatically hidden truth.
 
-`dreth/sentinels.py` selects and runs probes that test whether a learned structure still behaves as expected. Sentinels are the main cheap-path check for whether a current authority record remains usable.
+`dreth/sentinels.py` selects and runs probes that test whether a learned structure still behaves as expected. Sentinels are cheap-path checks for whether a current authority record or lens remains usable.
 
 A sentinel pass is not metaphysical proof. It means the checked evidence surface did not currently contradict the handle.
 
-A sentinel failure should create repair pressure, revocation/demotion, frontier activity, uncertainty signals, or context-role changes depending on scope.
+A sentinel failure should create repair pressure, revocation/demotion, frontier activity, uncertainty signals, recognition-collapse evidence, or context-role changes depending on scope.
 
 ## 6. Ledger and authority
 
-`dreth/ledger.py` stores variable nethras, authority records, noise envelopes, tied frontiers, dormant alternatives, composites, revocations, and related state.
+`dreth/ledger.py` stores variable handles, authority records, noise envelopes, tied frontiers, dormant alternatives, composites, revocations, and related state.
 
 The ledger is the main authority/provenance surface. The long-term design direction is to make authority changes explicit ledger transactions rather than inline agent-side object construction.
 
@@ -118,7 +163,7 @@ The invariant is:
 
 > Authority should be earned by visible evidence and changed through explicit ledger pathways.
 
-The current code still has legacy names and some agent/ledger coupling. That is an implementation hygiene issue, not a conceptual requirement.
+The current code still has legacy names such as `NethraCertificate`, `certificates`, and `certified_eps`. In current design language, these should be read as authority records or evidence-bounded commitments, not absolute proof.
 
 ## 7. Tied frontiers and dormant alternatives
 
@@ -126,35 +171,30 @@ Ambiguity is not supposed to disappear merely because one candidate is temporari
 
 Tied and near-tied hypotheses are tracked by `TiedFrontier`. Alternatives can become dormant. Dormant does not mean false, deleted, or irrelevant forever. It means not currently selected as the operative path.
 
-The current design direction is:
-
-- preserve ambiguity when evidence is insufficient,
-- use it to guide future probes or context-role indexing,
-- avoid letting dormant alternatives become global pressure everywhere.
+Dormant alternatives are structure. Nethras may touch them later as familiar, ranked, blocked, or reopened depending on context and evidence.
 
 ## 8. ContextRoleIndex
 
-`dreth/context_role_index.py` implements the corrected nethra/context-role model.
+`dreth/context_role_index.py` currently implements a provenance index over learned nethra graph structure and context roles.
 
 It defines:
 
-- `NethraNode`: learned structure node.
-- `NethraEdge`: relation between nethras.
+- `NethraNode`: current representation of a learned structure node/handle.
+- `NethraEdge`: relation between nodes.
 - `ContextRoleRecord`: role assignment in a specific context.
-- `ContextRoleIndex`: retrieval/index view over nethra graph provenance.
+- `ContextRoleIndex`: retrieval/index view over graph provenance and role history.
 
-The index is not a trass reservoir. It is not a bucket of discarded distinctions. It is a graph/index view over nethras and their context roles.
+This is useful but incomplete under the corrected ontology. `ContextRoleIndex` is not yet a full nethra-expression compiler. It does not yet represent active expression algebra, activation gates, cross-context downgrade rules, or runtime active-slice compilation.
 
-The important distinction:
+The important retained distinction:
 
-- The nethra persists as structure.
-- The role changes by context.
+- Structure persists.
+- Nethras touch structure.
+- Roles change by context.
 - Trass is not deletion.
 - Tareth is not global identity.
 
-Current reports show that record mode can remain behavior-neutral while recording nethra nodes and context roles. That is the minimum safety condition for provenance indexing.
-
-Runtime `assist_feature` use is more dangerous. It can feed context-role matches into uncertainty consolidation as locality anchors. At scale, loose matching has overconnected and worsened metrics. This means the index is useful as provenance, but runtime use requires strict match quality, deduplication, and attribution.
+Runtime `assist_feature` use is dangerous because it can affect behavior by admitting matches as local anchors or reordering candidates. It must be judged by strict attribution and outcome metrics.
 
 ## 9. Uncertainty governance and consolidation
 
@@ -170,12 +210,12 @@ Runtime `assist_feature` use is more dangerous. It can feed context-role matches
 
 It must not directly revoke authority, suppress skips, replace `fit_var`, or issue authority records.
 
-Current lessons:
+Current lesson:
 
-- Broad uncertainty is not automatically bad. It may indicate shared unresolved structure.
-- Broad uncertainty is not automatically useful. If it collapses into giant global clusters, it becomes pressure rather than structure.
+- Broad uncertainty is not automatically bad.
+- Broad uncertainty is not automatically useful.
 - Compression ratio alone is not success.
-- Useful consolidation requires specificity: local anchors, shared parents/components, shared graph neighborhoods, role transitions, co-failure timing, or strong context overlap.
+- Useful consolidation requires specificity: local anchors, shared parents/components, shared graph neighborhoods, role transitions, co-failure timing, context overlap, or later utility.
 
 ## 10. Repair agenda
 
@@ -227,7 +267,8 @@ A learner or NN should not be added merely because deterministic logic failed. F
 - predict cluster quality,
 - choose probes,
 - select attention under uncertainty,
-- or identify reusable factors.
+- identify reusable factors,
+- or mine nethra-expression utility.
 
 Without a clear target, a learner hides the failure rather than explaining it.
 
@@ -235,49 +276,35 @@ Without a clear target, a learner hides the failure rather than explaining it.
 
 Composite handles can be legitimate nethras-of-nethras when they have active witnesses that test a higher relation.
 
-Regime handles are still less mature. A recurring co-failure pattern is not enough by itself to justify reduced monitoring. A regime handle should only buy down leaf checks when it has an active witness or sentinel that validates the cluster-level invariant.
+Regime handles should be reunderstood as emergent expressions over overlapping/coactive nethras. A recurring co-failure pattern is not enough by itself to justify reduced monitoring. A regime handle should only buy down work when the expression has active witnesses/sentinels or locally measured utility.
 
 Important distinction:
 
 - Quiescence is absence of observed failure.
 - Sentinel validation is an active check.
+- Recognition collapse is a boundary signal, not a regime proof.
+- Renewed clustered predictability is what begins to earn a regime expression.
 
-A regime handle based only on quiescence should be diagnostic or weak authority at most.
+## 15. Sleep, scaffold memory, and expression mining
 
-## 15. Quality metrics and interpretation
+Current sleep/scaffold code groups familiar records into proposals. That is useful but flat.
 
-`quality_cost` and related metrics are diagnostic. They are useful for comparing policies, but they are not runtime authority.
+The stronger target is offline expression mining over the structure/nethra overlap graph:
 
-Important metrics include:
+- overlap bridges,
+- subset/superset relations,
+- union/intersection/difference expressions,
+- gated activations,
+- negative gates,
+- coactivation clusters,
+- candidate active slices,
+- and emergent regime-expression candidates.
 
-- intervention count / IV,
-- full audits,
-- revocations,
-- unique sentinel failures,
-- regime sentinel failures,
-- passive saved/stressed counts,
-- frontier recall/lift,
-- context-role matches and assist pressure,
-- dormant alternatives,
-- quality cost.
+Sleep can be parallelized across variables, operator families, context keys, nethra kinds, time windows, runs/seeds, and structure-node partitions.
 
-Passing invariants means safety boundaries held. It does not mean a behavior path is useful.
+Sleep output must remain proposal-only until runtime evidence upgrades use-rights.
 
-A runtime assist path is only promising if it improves or preserves relevant metrics without creating broad pressure, excessive audits, excessive revocations, or degraded recall.
-
-## 16. Current known results
-
-Recent experimental status, as of the current design frame:
-
-1. `ContextRoleIndex record` is conceptually correct and behavior-neutral in reported sweeps.
-2. The index can show nethras with multiple roles across contexts, including trass-in-one-context / tareth-in-another examples.
-3. `ContextRoleIndex assist_feature` has produced nonzero local-anchor use, so wiring exists.
-4. At scale, loose context-role matching overconnected and worsened behavior: IV, quality cost, audits, revocations, unique failures, and regime sentinel failures increased.
-5. Therefore ContextRoleIndex should be kept as provenance, while runtime assist use requires stricter match gating and attribution.
-6. Uncertainty consolidation must be judged by off/shadow/assist comparisons, not by whether counters fire.
-7. Blind challenge is useful because it exposes the limits of current structure, not because Dreth is expected to solve every generated relation family.
-
-## 17. How to read test modes
+## 16. Test modes
 
 Several modes exist and should not be confused.
 
@@ -293,126 +320,45 @@ If `shadow` differs from `off`, there is a leak.
 
 If `assist` differs from `off`, that is expected, but it may be harmful.
 
-## 18. Commands for current checks
-
-### Core tests
-
-```bash
-python -m pytest tests/test_cycle_mechanics.py -q
-python -m pytest tests/test_blind_challenge.py -q
-python -m pytest tests/test_uncertainty_consolidation.py -q
-python -m pytest tests/test_nethra_reservoir.py -q
-```
-
-`tests/test_nethra_reservoir.py` is a compatibility filename; the semantics now target `ContextRoleIndex`.
-
-### Context-role record check
-
-```bash
-python scripts/batch_run.py \
-  --schedule blind_challenge \
-  --challenge-blind \
-  --vars 50 \
-  --cycles 3000 \
-  --seeds 42,99,7 \
-  --hybrid-control interfaces \
-  --repair-agenda \
-  --uncertainty-consolidation shadow \
-  --context-role-index record \
-  --out reports/context_role_record_check.jsonl \
-  2>&1 | tee reports/context_role_record_check.log
-
-python scripts/summarize_context_role_index.py \
-  --jsonl reports/context_role_record_check.jsonl \
-  | tee reports/context_role_record_check_summary.txt
-```
-
-### Context-role off/record/assist comparison
-
-```bash
-python scripts/batch_run.py \
-  --schedule blind_challenge \
-  --challenge-blind \
-  --vars 50,75,100 \
-  --cycles 3000,7500 \
-  --seeds 42,99,7,3,11,13,17,23,29,31 \
-  --hybrid-control interfaces \
-  --repair-agenda \
-  --uncertainty-consolidation shadow \
-  --context-role-index off \
-  --out reports/context_role_sweep_off.jsonl \
-  2>&1 | tee reports/context_role_sweep_off.log
-
-python scripts/batch_run.py \
-  --schedule blind_challenge \
-  --challenge-blind \
-  --vars 50,75,100 \
-  --cycles 3000,7500 \
-  --seeds 42,99,7,3,11,13,17,23,29,31 \
-  --hybrid-control interfaces \
-  --repair-agenda \
-  --uncertainty-consolidation shadow \
-  --context-role-index record \
-  --out reports/context_role_sweep_record.jsonl \
-  2>&1 | tee reports/context_role_sweep_record.log
-
-python scripts/batch_run.py \
-  --schedule blind_challenge \
-  --challenge-blind \
-  --vars 50,75,100 \
-  --cycles 3000,7500 \
-  --seeds 42,99,7,3,11,13,17,23,29,31 \
-  --hybrid-control interfaces \
-  --repair-agenda \
-  --uncertainty-consolidation assist \
-  --uncertainty-assist-policy local_only \
-  --context-role-index assist_feature \
-  --out reports/context_role_sweep_assist_feature.jsonl \
-  2>&1 | tee reports/context_role_sweep_assist_feature.log
-```
-
-Interpretation:
-
-- `off == record`: provenance indexing is clean.
-- `assist_feature` improves: check match attribution before claiming the index helped.
-- `assist_feature` worsens: keep the index as provenance, but restrict or disable runtime assist use.
-
-## 19. Design risks to keep visible
+## 17. Design risks to keep visible
 
 Current risks:
 
-- **Absolute-certification drift**: reading authority records as proof rather than scoped evidence.
+- **Structure/nethra conflation**: treating the lens as the substrate.
+- **Absolute-authority drift**: reading authority records as proof rather than scoped evidence.
 - **Role identity confusion**: treating tareth/trass as object identity instead of context role.
 - **Trass-as-deletion**: losing reusable structure because it was operationally irrelevant once.
 - **Broad uncertainty pressure**: using generic uncertainty signals as if they were local structure.
 - **Context-role overmatching**: letting too many provenance matches become local anchors.
-- **Shadow loop stall**: recording reports forever without controlled runtime integration.
+- **Expression blowup**: emitting every possible union/intersection instead of utility-backed expressions.
+- **Inherited authority laundering**: letting a composite expression inherit the strongest member use-right.
+- **Global regime switch drift**: replacing one crude world label with another.
+- **Regime quiescence error**: confusing no recent failure with active higher validation.
 - **Premature learner insertion**: adding an NN before the learning target is identifiable.
-- **Regime quiescence error**: confusing no recent failure with an active higher sentinel pass.
 
-## 20. Current next design target
+## 18. Current next design target
 
-The immediate high-value target is not more ontology.
+The immediate high-value target is to update the memory/sleep path from flat scaffold grouping toward **NethraExpressionIndex** design.
 
-The next useful work is strict gating and attribution for context-role-assisted consolidation:
+Required next conceptual object:
 
-- raw vs deduped context-role matches,
-- weak-match suppression,
-- duplicate suppression,
-- per-cluster anchor caps,
-- assist pressure per cycle,
-- match-quality fields,
-- strict vs loose comparison,
-- off/record/assist comparison.
+- `NethraExpressionIndex`: offline index of overlap bridges, subset relations, gated activations, negative gates, coactivation clusters, and active-slice candidates.
 
-If strict matching still worsens behavior, then `ContextRoleIndex` should remain record/provenance only until a better factorizer or learned ranker has a clear target.
+Required runtime boundary:
 
-## 21. Bottom line
+- `record`: report active expressions only.
+- `assist_feature`: may use active expressions only for ordering/probe hints unless local evidence earns stronger use-rights.
 
-Dreth is currently best understood as an experimental ledgered attention system:
+No authority, skip suppression, fit replacement, or monitoring increase should come from sleep expression proposals by default.
 
-- nethras are reusable learned structures,
+## 19. Bottom line
+
+Dreth is currently best understood as an experimental ledgered attention/search system:
+
+- structure is the shared substrate,
+- nethras are scoped lenses over structure,
 - roles are context-indexed,
 - authority is evidence-bounded,
+- regimes are emergent active expressions over overlapping nethras,
 - uncertainty must become useful structure before it should drive behavior,
-- and negative results are valuable when they identify exactly where a handle is too broad, too weak, or too expensive.
+- and negative results are valuable when they identify exactly where a handle is too broad, too weak, too global, or too expensive.
