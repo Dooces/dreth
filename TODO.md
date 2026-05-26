@@ -4,422 +4,293 @@
 
 - ✅ Core Dreth pipeline exists: world, audit, fit, sentinel, ledger, summaries, batch harness.
 - ✅ Hybrid provider interfaces exist and remain advisory rather than authority-granting.
-- ✅ Shadow/diagnostic layers exist for policy, residuals, authority/evidence, relative authority, temporal frontier, uncertainty governance, and uncertainty consolidation.
-- ✅ `ContextRoleIndex` now records nethra nodes and context-indexed roles without changing behavior in record mode.
+- ✅ Shadow/diagnostic layers exist for policy, residuals, authority/evidence, relative authority, temporal frontier, uncertainty governance, uncertainty consolidation, context-role indexing, and authority strength.
+- ✅ `ContextRoleIndex` records nethra nodes and context-indexed roles without changing behavior in record mode.
 - ✅ The context-role model is conceptually corrected: a nethra is learned structure; `tareth`/`trass` are context-dependent roles, not the identity of the nethra.
-- ✅ Record-mode context indexing is clean: `off == record` in the 60-run sweep.
-- ⚠️ `assist_feature` is live and connected, but harmful at scale. It over-connects context-role matches and increases cost/failures.
-- ⚠️ Runtime assist from context-role matches must be gated, deduped, and attributed before any further runtime expansion.
-- ❌ Do not run the broad attention/cost optimization bundle yet. It touches too many runtime paths and would destroy attribution.
+- ✅ Strict context-role match gating, deduplication, attribution, and anchor policy plumbing have been added.
+- ✅ Authority strength now has record/assist modes, a state controller, evidence debt, derivation policies, and comparison-suite support.
+- ⚠️ Authority-action narrowing has just been implemented and must be tested before adding new runtime machinery.
+- ⚠️ Runtime assist layers have repeatedly failed by turning broad visible uncertainty into excess attention/repair pressure. Treat broad uncertainty as debt/provenance first, not automatic work.
+- ⚠️ Delayed causality and temporal structure remain underrepresented. A passive temporal ledger is relevant, but should be added only after authority-action narrowing is validated.
 
 ---
 
 ## Immediate Next Work
 
-- [ ] Implement strict `ContextRoleIndex` match gating, deduplication, and attribution.
-- [ ] Add `ContextRoleMatchQuality` with visible-only match-quality fields.
-- [ ] Add `--context-role-anchor-policy off|strict|loose`.
-- [ ] Make `strict` the default policy when `--context-role-index assist_feature` is enabled.
-- [ ] Preserve `loose` only for reproducing current over-connection behavior.
-- [ ] Add raw/deduped/suppressed/capped match counters.
-- [ ] Add assist attribution by match reason, cluster, nethra id, and assist kind.
-- [ ] Update `scripts/summarize_context_role_index.py` with strict-vs-loose match pressure reporting.
+- [ ] Run the six-way authority-strength comparison suite after authority-action narrowing.
 - [ ] Verify `off == record` remains true.
-- [ ] Verify `loose` reproduces the current broad harmful behavior.
-- [ ] Verify `strict` sharply reduces match pressure and does not worsen metrics as badly as `loose`.
-- [ ] If `strict` still worsens metrics, keep `ContextRoleIndex` as provenance/record-only for now.
+- [ ] Verify `assist_legacy` still reproduces the old broad-pressure failure.
+- [ ] Verify `assist_state_shadow` no longer blows up from generic contested records.
+- [ ] Compare `assist_quarantine_persistent` and `assist_quarantine_repair_only` against `off` on IV, quality cost, audits, revocations, unique failures, regime sentinel failures, and passive stress.
+- [ ] Confirm generic contested / giant-cluster authority records become debt/no-op rather than monitoring/repair work.
+- [ ] If all assist modes still worsen behavior, keep authority strength as record/state reporting only and do not add new runtime assist layers.
+- [ ] If narrowed authority assist becomes neutral or useful, then proceed to the passive temporal event ledger in Appendix A.
+
+Suggested command:
+
+```bash
+mkdir -p reports
+
+python scripts/run_comparison_suite.py \
+  --suite authority_strength \
+  --suite-workers 3 \
+  --summary-workers 4 \
+  --workers 8 \
+  --schedule blind_challenge \
+  --challenge-blind \
+  --vars 100 \
+  --cycles 10000 \
+  --seeds 42,99,7 \
+  --hybrid-control interfaces \
+  --repair-agenda \
+  --parent-ranker history_rescue \
+  --probe-proposer history_rescue \
+  --uncertainty-consolidation assist \
+  --uncertainty-assist-policy local_only \
+  --context-role-index assist_feature \
+  --out-prefix reports/authority_action_narrowing_compare
+```
 
 ---
 
 ## Deferred / Reference Work
 
+- [ ] TemporalEventLedger / passive temporal observers for delayed causality scaffolding. See Appendix A.
 - [ ] Weighted intervention-cost tracking is low-risk and can be cherry-picked later as diagnostic-only.
-- [ ] Tied-frontier separating probes are likely useful, but should wait until context-role assist attribution is controlled.
+- [ ] Tied-frontier separating probes are likely useful, but should wait until current authority/context-role assist attribution remains stable.
 - [ ] Dormant alternative revival is conceptually aligned, but should wait until retrieval gates are strict enough.
-- [ ] Regime-triggered inert re-screening may be valuable, but should not be mixed with context-role gating changes.
+- [ ] Regime-triggered inert re-screening may be valuable, but should not be mixed with authority-action narrowing.
 - [ ] Cheap cascade pre-checks are higher-risk because they alter re-audit behavior. Do not implement before attribution tools are stable.
-- [ ] Learned ranker/factorizer is not next. Use it only after deterministic match gating and ablation show that rule-based retrieval cannot separate useful anchors from broad noise.
+- [ ] Learned ranker/factorizer is not next. Use it only after deterministic match gating, authority narrowing, and temporal observers show that rule-based retrieval cannot separate useful anchors from broad noise.
 
 ---
 
 ## Non-Negotiable Invariants
 
-- [ ] Authority is earned by evidence, not provider confidence, graph proximity, morphology, or index membership.
-- [ ] Hidden truth/debug manifest must not be read by runtime matching, clustering, or assist logic.
-- [ ] Shadow/diagnostic layers may observe; they must not mutate authority.
+- [ ] Authority is earned by evidence, not provider confidence, graph proximity, morphology, index membership, or temporal correlation.
+- [ ] Hidden truth/debug manifest must not be read by runtime matching, clustering, temporal observers, or assist logic.
+- [ ] Shadow/diagnostic/passive layers may observe; they must not mutate authority unless explicitly promoted through a separately tested bounded runtime path.
 - [ ] `ContextRoleIndex` records provenance and role history; it is not truth.
 - [ ] `tareth`/`trass` are context roles, not global properties of a nethra.
-- [ ] No context-role match may directly issue certs, revoke certs, suppress skips, or replace `fit_var`.
-- [ ] Broad unresolved status, broad role equality, or generic uncertainty signals must not qualify as local anchors by themselves.
+- [ ] Broad unresolved status, broad role equality, giant uncertainty clusters, or generic uncertainty signals must not qualify as local anchors or runtime action triggers by themselves.
+- [ ] Temporal proposals are not authority, not certs, not revocations, and not skip suppressors.
+- [ ] Passive temporal observers must be bounded by caps/ring buffers/summaries; do not create unbounded event-history growth.
 
 ---
 
-# Appendix A — Next Codex Prompt: Strict ContextRoleIndex Match Gating
+# Appendix A — Deferred Codex Prompt: TemporalEventLedger and Passive Temporal Observers
+
+Use this only after the authority-action narrowing comparison has been run and interpreted. The temporal layer is relevant because delayed causality and lagged structure are underrepresented, but adding it before validating authority-action narrowing would blur attribution.
 
 ```text
 You are working in the Dooces/dreth repo.
 
-Current result:
-ContextRoleIndex record mode is behavior-neutral and conceptually correct:
-- off == record over 60 runs
-- index records nethra nodes and context roles
-- record mode shows trass-in-one-context / tareth-in-another examples
-
-But ContextRoleIndex assist_feature is behaviorally worse:
-- iv increased
-- quality_cost increased
-- full_audits increased
-- revocations increased
-- unique_fails increased
-- regime_sentinel_fail increased sharply
-- passive stress increased
-- dormant alternatives dropped to 0.0
-- context_role_index_matches and local-anchor hits are very large
-
-Diagnosis:
-The index is not failing to connect.
-It is over-connecting.
-Context-role matches are being admitted as local anchors too broadly and producing harmful assist pressure.
+Current diagnosis:
+Dreth now has ContextRoleIndex, uncertainty consolidation, strict context-role gating, and shadow/assist machinery.
+But delayed causality and temporal structure are still underrepresented.
+CycleRecord exists, but it is too thin: it records per-cycle skipped/audited/drift/novelty fields, not a rich event timeline with salience, interventions, lagged effects, or delayed-causality candidates.
 
 Goal:
-Add strict ContextRoleIndex match gating, deduplication, and attribution before allowing index matches to influence uncertainty consolidation assists.
+Add a TemporalEventLedger and passive temporal observers.
+
+Purpose:
+Track when salient events happen, which variables were involved, what intervention context existed, and what later events may be temporally related.
+Allow passive observers to build scaffold for delayed causality without intervening and without issuing authority.
 
 Core invariant:
 Default behavior unchanged.
-Record mode remains behavior-neutral.
-No hidden truth in runtime matching.
-No authority revocation.
-No skip suppression.
-No fit_var replacement.
-No cert issuance from index matches.
-No broad assist from generic provenance.
+No hidden truth in runtime.
+Passive observers cannot intervene.
+Passive observers cannot issue certs.
+Passive observers cannot revoke authority.
+Passive observers cannot suppress skips.
+Passive observers cannot replace fit_var.
+Passive observer output is proposal/metadata only.
 
-Tasks:
+Add module:
+  dreth/temporal_event_ledger.py
 
-1. Add ContextRoleMatchQuality.
+Define:
 
-For every match, compute visible-only fields:
-- shared_var
-- shared_target_var
-- shared_parent_count
-- shared_component_count
-- shared_context_exact
-- shared_context_family
-- shared_role_transition
-- shared_uncertainty_signal_count
-- recent_cycle_distance
-- prior_role
-- current_context
-- match_score
-- match_reason
+TemporalEvent:
+  cycle
+  event_type:
+    - intervention
+    - sentinel_failed
+    - sentinel_passed
+    - fit_changed
+    - fit_repaired
+    - revocation
+    - novelty_opened
+    - novelty_resolved
+    - frontier_opened
+    - frontier_updated
+    - context_role_changed
+    - uncertainty_cluster_seen
+    - authority_strength_changed
+    - passive_residual_stressed
+    - passive_residual_ok
+  vars
+  source_vars
+  target_vars
+  intervention_var
+  intervention_value
+  context_key
+  nethra_ids
+  role_before
+  role_after
+  fit_signature_before
+  fit_signature_after
+  local_graph_neighbors
+  payload
 
-2. Add strict local-anchor rule.
+TemporalEventLedger:
+  add_event(event)
+  events_in_window(start_cycle, end_cycle)
+  events_for_var(var, window=None)
+  events_near_vars(vars, window=None)
+  lagged_events(source_var, target_var, min_lag, max_lag)
+  summarize()
 
-A context-role match may become a consolidation local anchor only if at least one strong anchor holds:
+Add module:
+  dreth/passive_temporal_observers.py
 
-- same target var and same learned signature
-- shared parent/component count > 0 AND context family matches
-- prior role transition exists for same nethra/context family
-- same uncertainty cluster shares a specific nethra id
-- recent role change near the same graph neighborhood
+Define protocol:
+  PassiveTemporalObserver:
+    observe_event(event, ledger)
+    observe_cycle(cycle, state, intervention, ledger)
+    proposals()
 
-Weak evidence alone must not qualify:
-- same broad role only
-- same generic uncertainty signal
-- same visible count
-- same frontier kind
-- same unresolved status
-- old unrelated best_available record
+Observers:
+  RollingWindowObserver:
+    tracks rolling mean/variance/residual shifts per var.
 
-3. Add deduplication.
+  LaggedCorrelationObserver:
+    tracks whether changes/failures in target vars repeatedly follow interventions or changes in source vars at lag k.
 
-Prevent match explosion:
-- dedupe by (cluster_id, nethra_id, context_family, target_var)
-- cap local anchors per cluster
-- cap assists derived from index matches per cycle
-- record suppressed duplicate count
+  DelayedResidualObserver:
+    tracks whether current residual stress is better explained by past source values/interventions.
+
+  EventCohortObserver:
+    tracks groups of vars that repeatedly fail/repair/change within temporal windows.
+
+Proposal dataclass:
+  TemporalProposal:
+    proposal_type:
+      - delayed_parent_candidate
+      - lag_window_candidate
+      - shared_temporal_cohort
+      - delayed_residual_explanation
+      - monitoring_candidate
+    source_vars
+    target_vars
+    lag
+    score
+    evidence_summary
+    cycles_seen
+
+Runtime integration:
+Add CLI:
+  --temporal-events off|record
+  --passive-temporal-observers off|basic
+
+Defaults:
+  off
+
+record:
+  records TemporalEvents only; no behavior change.
+
+basic:
+  records TemporalEvents and runs passive observers; observer proposals are exported and may be read by offline summaries only in this pass.
+
+Do not yet feed proposals into runtime authority, fit, or skip behavior.
+
+Where to emit events:
+  - each intervention
+  - sentinel pass/failure
+  - fit changed / repaired
+  - revocation
+  - novelty opened/resolved
+  - tied frontier opened/updated/collapsed
+  - context-role role changes
+  - uncertainty cluster creation/update
+  - passive residual stress/ok if available
+
+Reports:
+  scripts/summarize_temporal_events.py
+
+Sections:
+A. event counts by type
+B. most salient vars by event count
+C. intervention-to-failure lag candidates
+D. repeated delayed-parent candidates
+E. temporal cohorts
+F. delayed residual candidates
+G. warning: passive proposals are not authority
 
 Metrics:
-- context_role_raw_matches
-- context_role_deduped_matches
-- context_role_matches_suppressed_weak
-- context_role_matches_suppressed_duplicate
-- context_role_matches_suppressed_cap
-- context_role_matches_used_as_local_anchor
-- context_role_anchor_precision_posthoc only in report, not runtime
-- context_role_assist_pressure_per_cycle
+  temporal_events_total
+  temporal_event_types
+  passive_temporal_proposals
+  delayed_parent_candidates
+  lag_window_candidates
+  temporal_cohorts
+  delayed_residual_candidates
 
-4. Add assist attribution.
-
-For each assist generated because of ContextRoleIndex:
-- assist_kind
-- cluster_id
-- nethra_id
-- match_reason
-- whether it changed budget/probes/preservation/priority
-- later local outcome if already available:
-  - sentinel failure
-  - revocation
-  - fit churn
-  - novelty persistence
-  - audit count
-
-Do not claim causality; report association only.
-
-5. Add assist policy:
---context-role-anchor-policy off|strict|loose
-
-Default:
-  strict when context-role-index assist_feature is enabled.
-  off when context-role-index is off/record.
-
-`loose` can preserve current behavior for comparison.
-
-6. Update reports.
-
-scripts/summarize_context_role_index.py should print:
-A. raw vs deduped matches
-B. weak/duplicate/cap suppressions
-C. local-anchor count
-D. top match reasons
-E. assist pressure per cycle
-F. role transition examples
-G. warning when loose matching worsens metrics
-
-7. Add comparison run support or script output.
-
-Compare:
-- off
-- record
-- assist_feature + loose
-- assist_feature + strict
-
-Report:
-- quality_cost delta
-- iv delta
-- audits delta
-- revocations delta
-- unique_fails delta
-- regime_sentinel_fail delta
-- passive stress delta
-- dormant delta
-- match pressure delta
-
-8. Tests.
-
-Add/extend tests:
-- record mode remains behavior-neutral
-- same broad unresolved role does not qualify as local anchor
-- exact same nethra/signature/context qualifies
-- shared parent + context family qualifies
-- role transition qualifies
-- duplicate matches are suppressed
-- cap suppresses excessive anchors
-- loose policy reproduces previous broad behavior
-- strict policy reduces anchor count
-- hidden truth/debug manifest is not read in runtime matching
-- no authority/revocation/skip suppression paths are touched
+Tests:
+  - off mode preserves behavior
+  - record mode preserves behavior
+  - basic observer mode preserves behavior
+  - intervention event includes intervention var/value
+  - sentinel failure event records target var and cycle
+  - lagged observer detects synthetic source→target lag
+  - observer proposals do not issue/revoke certs
+  - observer proposals do not suppress skips
+  - no hidden truth/debug manifest read in runtime observers
 
 Verification:
-python -m pytest tests/test_nethra_reservoir.py -q
-python -m pytest tests/test_uncertainty_consolidation.py -q
+python -m pytest tests/test_temporal_event_ledger.py -q
+python -m pytest tests/test_passive_temporal_observers.py -q
 python -m pytest tests/test_cycle_mechanics.py -q
 python -m pytest tests/test_blind_challenge.py -q
 
 Smoke:
-Run 4-way comparison on blind_challenge:
+python scripts/batch_run.py \
+  --schedule blind_challenge \
+  --challenge-blind \
+  --vars 50 \
+  --cycles 3000 \
+  --seeds 42,99,7 \
+  --hybrid-control interfaces \
+  --repair-agenda \
+  --temporal-events record \
+  --passive-temporal-observers basic \
+  --out reports/temporal_events_basic.jsonl \
+  2>&1 | tee reports/temporal_events_basic.log
 
-off:
-  --uncertainty-consolidation shadow
-  --context-role-index off
-
-record:
-  --uncertainty-consolidation shadow
-  --context-role-index record
-
-assist loose:
-  --uncertainty-consolidation assist
-  --uncertainty-assist-policy local_only
-  --context-role-index assist_feature
-  --context-role-anchor-policy loose
-
-assist strict:
-  --uncertainty-consolidation assist
-  --uncertainty-assist-policy local_only
-  --context-role-index assist_feature
-  --context-role-anchor-policy strict
-
-Use:
-  vars=50,75,100
-  cycles=3000,7500
-  seeds=42,99,7,3,11,13,17,23,29,31
+python scripts/summarize_temporal_events.py \
+  --jsonl reports/temporal_events_basic.jsonl \
+  | tee reports/temporal_events_basic_summary.txt
 
 Expected:
-- off == record
-- loose reproduces current overuse/worse behavior
-- strict sharply reduces match pressure
-- strict must not worsen metrics relative to off as badly as loose
-- if strict still worsens, disable assist_feature and keep ContextRoleIndex as record/provenance only
+  - invariants pass
+  - off/record/basic behavior remains unchanged except diagnostics
+  - report shows whether delayed-parent/lag candidates appear
+  - no authority behavior changes
 ```
 
 ---
 
-# Appendix B — Alternate Prompt Reference: Attention & Cost Optimizations
+## Appendix A Warnings
 
-Use this as a reference source for later task items. Do **not** run it as the immediate next prompt because it mixes too many runtime changes and would destroy attribution while the context-role matching layer is still unresolved.
-
-```text
-# Codex Task: dreth Attention & Cost Optimizations
-
-## Repository
-https://github.com/Dooces/dreth (branch: `main`)
-
-## Context
-
-dreth is a causal-discovery simulation where an agent discovers hidden causal structure through earned authority. The agent observes a hidden causal world (DAG of variables with causal functions + noise), proposes hypotheses, and earns the right to certify causal relationships only by surviving structured intervention tests. The core pipeline is: Observe → Frontier → Audit → Fit → Sentinel → Certify → Predict.
-
-Key invariants you MUST NOT violate:
-1. Authority is earned, never assumed. Only the audit→fit→sentinel→certify pipeline grants authority.
-2. Shadow/diagnostic layers observe but NEVER mutate agent or ledger state.
-3. Provider confidence is never treated as cert authority.
-4. The ledger (`NethraCertificate`, `VarNethra`) is the single source of truth.
-5. `MORPHOLOGY ≠ CAUSE` — score proximity is structural observation, not causal classification.
-6. Ambiguity is first-class — `TiedFrontier` must survive until regime-survival proof justifies collapse.
-
-## Task 1: Populate `TiedFrontier.separating_probes` during `fit_var`
-
-Problem:
-`TiedFrontier.separating_probes` is always an empty tuple. The field exists but is never populated. This means sentinel selection and frontier attention have no information about which probes would discriminate between tied hypotheses.
-
-What to do:
-- In `dreth/fit.py`, after computing `near_tie_candidates_out`, identify separating probes from the intervention pool already evaluated.
-- Use predictions among near-tie candidates to select top probes that split tied hypotheses.
-- Store them in `diag["separating_probes"]`.
-- In `dreth/agent.py`, when constructing/updating `TiedFrontier`, carry those probes into `TiedFrontier.separating_probes`.
-- In `dreth/ledger.py`, verify the field is preserved.
-
-Constraints:
-- Do not change `fit_var` return signature.
-- Separating probes are morphology, not causal proof.
-- Do not run additional interventions for this.
-
-## Task 2: Use `TiedFrontier` to influence frontier priority
-
-Problem:
-Variables with unresolved tied hypotheses have no audit-priority boost even though additional information would be discriminating.
-
-What to do:
-- In `dreth/agent.py`, add a small audit-priority tiebreaker for variables whose `VarNethra.tied_frontier` has more than one candidate.
-- The bonus must not dominate cost-weight dispatch or consequence-tier ordering.
-- If uncertainty consolidation assist already gives a budget bonus, allow the tied-frontier bonus to stack additively.
-
-Constraints:
-- This is attention routing, not authority.
-- Do not change dormancy logic.
-- Do not change trass-skip behavior.
-
-## Task 3: Feed `TiedFrontier.separating_probes` into sentinel selection
-
-Problem:
-`select_var_sentinels` selects generic discriminating probes but does not prioritize probes known to separate tied hypotheses.
-
-What to do:
-- In `dreth/agent.py`, before calling `select_var_sentinels`, extract up to 2 valid `n.tied_frontier.separating_probes`.
-- Prepend them to the selected sentinels, removing duplicates.
-- Keep total sentinel count capped at `self.sentinel_count`; separating probes displace generic probes rather than adding cost.
-
-Constraints:
-- Do not change `select_var_sentinels` signature.
-- Validate probe variable and value bounds.
-
-## Task 4: Cheap pre-check before cascade re-audit
-
-Problem:
-Cascade invalidation queues descendants for full re-audit even when some descendants may still predict correctly.
-
-What to do:
-- In sentinel-failure handling, after `ledger.invalidate()` and before descendant re-audit queueing, perform a cheap current-state prediction pre-check for descendants.
-- If predicted value matches current observed state within generous envelope margin, avoid immediate full audit and let normal sentinel/revalidation paths handle it.
-- Count `cascade_precheck_skipped`.
-
-Constraints:
-- Uses current observed state only, not hidden truth.
-- Does not re-certify anything.
-- If unsure, queue audit.
-- High-cost variables should still be re-audited.
-
-## Task 5: Revive dormant alternatives on regime change
-
-Problem:
-`VarNethra.dormant_alternatives` stores plausible collapsed hypotheses, but regime-change re-audits do not use them.
-
-What to do:
-- In regime-change handling, for affected variables with dormant alternatives, score up to 5 dormant alternatives against current sentinel probes.
-- If a dormant alternative scores perfectly or better than current fit's sentinel score, mark it as a revival candidate.
-- Ensure revival candidate parents are included in `fit_var` enumeration.
-- Count `dormant_revival_count`.
-
-Constraints:
-- Dormant revival does not skip audit.
-- Only revive in regime-change contexts.
-- Cap checked alternatives to bound cost.
-
-## Task 6: Re-screen inert variables on regime change
-
-Problem:
-Variables screened as inert at initialization may become active under regime changes.
-
-What to do:
-- On confirmed regime promotion, collect co-failure variables.
-- Re-screen up to `min(len(_inert_vars), 10)` inert vars with cheap perturbation probes.
-- If an inert var affects regime co-failure variables beyond tolerance, remove it from `_inert_vars`, add it to `_live_set`, and queue audit.
-- Count `regime_inert_wakeup_count`.
-
-Constraints:
-- Only on confirmed regimes.
-- Cap cost.
-- Uses intervention-visible effects, not hidden truth.
-
-## Task 7: Add cumulative intervention cost tracking
-
-Problem:
-`self.total_interventions` counts probes but does not weight them by cost.
-
-What to do:
-- Add `self.total_weighted_intervention_cost` to `ChainedAgent`.
-- Increment it wherever `total_interventions` increments, using var cost weight when tied to a var and `1.0` for generic probes.
-- Add it to `RunAnalyzer` / `SummaryRenderer`.
-
-Constraints:
-- Diagnostic only.
-- Do not change `RefitBaseline`.
-
-## Testing
-
-All existing tests in `tests/` must continue to pass.
-
-Add `tests/test_attention_optimizations.py` with targeted tests:
-1. `fit_var` on tied hypotheses populates valid `diag["separating_probes"]`.
-2. Cascade pre-check avoids unnecessary descendant audit while still auditing the wrong descendant.
-3. Dormant alternative appears in hypothesis space during re-audit after regime detection.
-
-## Summary of files to modify
-- `dreth/fit.py`
-- `dreth/agent.py`
-- `dreth/ledger.py`
-- `dreth/summary.py`
-- `tests/test_attention_optimizations.py`
-
-## What NOT to do
-- Do not change the authority pipeline.
-- Do not let shadow/diagnostic layers mutate agent state.
-- Do not change `fit_var` return signature.
-- Do not change `select_var_sentinels` signature.
-- Do not add new CLI arguments.
-- Do not change `RefitBaseline`.
-- Do not collapse `TiedFrontier` based on score proximity.
-- Do not read hidden-world fields in agent-visible code.
-```
+- Do not implement this before the authority-action narrowing comparison is interpreted.
+- Do not let temporal correlation become authority.
+- Do not let passive temporal observers intervene, revoke, issue certs, suppress skips, or replace `fit_var`.
+- Do not read hidden truth/debug manifest fields in temporal observers.
+- Do not store unbounded event history. Use ring buffers, rolling summaries, caps, or windowed indexes.
+- Do not feed temporal proposals into runtime behavior in the first implementation pass.
+- Do not treat delayed-parent candidates as causal parents; they are proposal metadata only.
+- Do not mix this with learned factorizer/ranker work. Temporal observers should first expose whether delayed scaffolding exists in visible evidence.
 
 ---
 
@@ -427,7 +298,7 @@ Add `tests/test_attention_optimizations.py` with targeted tests:
 
 ```text
 [D:O!,N,V,E,B,C,A,L,S,Q,M,P0,Cav↓,R0,NB,LG
-|R:AssistAttributionRisk,ContextIndexOvermatch,RuntimeAssistHarm,RoleTransitionEvidencePartial,RecordModeClean,BroadPromptAttributionLoss
-|F:strict-context-role-gating-is-next-broader-attention-optimization-is-reference-not-immediate
+|R:AuthorityAnxietyPatternUnderRetest,GenericContestedOveractionPatchPending,TemporalPromptDeferredButRelevant,RegimeSentinelFragility,TemporalAttributionRisk,UnboundedEventLogRisk
+|F:test-authority-action-narrowing-before-temporal-event-ledger-append-temporal-prompt-as-deferred-reference
 |P:obj✓metric✓evidence✓logic✓frame✓gate✓ledger✓]
 ```
