@@ -43,6 +43,40 @@ BEHAVIOR_FIELDS = (
 )
 OPERATIONAL_WARN_FIELDS = ("quality_cost", "iv", "full_audits", "revocations", "unique_fails")
 
+BACKGROUND_NETHRA_MODES = ("off", "record")
+BACKGROUND_NETHRA_SUMMARY_SPECS = (
+    ("background_nethra", "summarize_background_nethra.py", "background_nethra_summary"),
+    ("context_role", "summarize_context_role_index.py", "context_role_summary"),
+    ("uncertainty", "summarize_uncertainty_consolidation.py", "uncertainty_summary"),
+    ("authority_strength", "summarize_authority_strength.py", "authority_strength_summary"),
+)
+BN_BEHAVIOR_FIELDS = (
+    "skip_pct",
+    "iv",
+    "quality_cost",
+    "full_audits",
+    "revocations",
+    "unique_fails",
+    "regime_sentinel_fail",
+    "passive_stress_count",
+    "monitoring_increases_from_strength",
+    "repair_priority_bumps_from_strength",
+)
+BN_BACKGROUND_FIELDS = (
+    "background_nethra_records",
+    "familiar_background_count",
+    "operational_authority_count",
+    "background_trass_patterns",
+    "background_unresolved_patterns",
+    "background_quarantined_patterns",
+    "background_giant_cluster_patterns",
+    "background_dormant_patterns",
+    "background_tied_frontier_patterns",
+    "background_records_used_as_features",
+    "background_feature_hits",
+    "background_feature_noops",
+)
+
 
 @dataclass(frozen=True)
 class CommandJob:
@@ -61,7 +95,7 @@ class RunningJob:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run a Dreth comparison suite.")
-    parser.add_argument("--suite", required=True, choices=["authority_strength"])
+    parser.add_argument("--suite", required=True, choices=["authority_strength", "background_nethra"])
     parser.add_argument("--out-prefix", required=True)
     parser.add_argument("--suite-workers", type=int, default=3)
     parser.add_argument("--summary-workers", type=int, default=4)
@@ -83,12 +117,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--uncertainty-assist-policy", default=None)
     parser.add_argument("--context-role-index", default=None)
     parser.add_argument("--context-role-anchor-policy", default=None)
+    parser.add_argument("--authority-strength", default=None)
+    parser.add_argument("--authority-strength-controller", default=None)
+    parser.add_argument("--authority-derivation-policy", default=None)
     parser.add_argument("--relative-authority-report", action="store_true")
     parser.add_argument("--relative-authority-frontier-report", action="store_true")
     parser.add_argument("--relative-authority-frontier-temporal-report", action="store_true")
     parser.add_argument("--relative-authority-frontier-warmup-cycles", type=int, default=None)
     parser.add_argument("--relative-authority-frontier-max-candidates", type=int, default=None)
     parser.add_argument("--relative-authority-frontier-max-depth", type=int, default=None)
+    parser.add_argument("--background-nethra", default=None)
     return parser
 
 
@@ -717,6 +755,241 @@ def run_authority_strength_suite(args: argparse.Namespace) -> int:
     return 0
 
 
+def background_nethra_suite_paths(out_prefix: str) -> dict[str, dict[str, Path]]:
+    prefix = Path(out_prefix)
+    return {
+        mode: {
+            "jsonl": prefix.with_name(f"{prefix.name}_{mode}.jsonl"),
+            "log": prefix.with_name(f"{prefix.name}_{mode}.log"),
+        }
+        for mode in BACKGROUND_NETHRA_MODES
+    }
+
+
+def _background_nethra_passthrough_args(args: argparse.Namespace) -> list[str]:
+    out = batch_passthrough_args(args)
+    for flag, attr in (
+        ("--authority-strength", "authority_strength"),
+        ("--authority-strength-controller", "authority_strength_controller"),
+        ("--authority-derivation-policy", "authority_derivation_policy"),
+    ):
+        _append_value(out, flag, getattr(args, attr, None))
+    return out
+
+
+def build_background_nethra_jobs(args: argparse.Namespace) -> list[CommandJob]:
+    paths = background_nethra_suite_paths(args.out_prefix)
+    common = _background_nethra_passthrough_args(args)
+    jobs = []
+    for label in BACKGROUND_NETHRA_MODES:
+        command = [
+            sys.executable,
+            str(SCRIPTS / "batch_run.py"),
+            *common,
+            "--background-nethra",
+            label,
+            "--out",
+            str(paths[label]["jsonl"]),
+        ]
+        jobs.append(CommandJob(label, command, paths[label]["log"]))
+    return jobs
+
+
+def build_background_nethra_summary_jobs(out_prefix: str) -> list[CommandJob]:
+    paths = background_nethra_suite_paths(out_prefix)
+    record_jsonl = paths["record"]["jsonl"]
+    jobs: list[CommandJob] = []
+    for summary_name, script_name, suffix in BACKGROUND_NETHRA_SUMMARY_SPECS:
+        output_path = summary_output_path(out_prefix, "record", suffix)
+        command = [sys.executable, str(SCRIPTS / script_name), "--jsonl", str(record_jsonl)]
+        jobs.append(CommandJob(f"record:{summary_name}", command, output_path))
+    return jobs
+
+
+def aggregate_background_nethra_jsonl_metrics(path: Path) -> dict[str, Any]:
+    rows = load_jsonl(path)
+    if not rows:
+        return {}
+    n = len(rows)
+    metrics = aggregate_jsonl_metrics(path)
+    metrics["passive_stress_count"] = (
+        sum(_as_float(row.get("passive_stress_count")) for row in rows) / n
+    )
+    metrics["monitoring_increases_from_strength"] = (
+        sum(_as_float(row.get("monitoring_increases_from_strength")) for row in rows) / n
+    )
+    metrics["repair_priority_bumps_from_strength"] = (
+        sum(_as_float(row.get("repair_priority_bumps_from_strength")) for row in rows) / n
+    )
+    for field in BN_BACKGROUND_FIELDS:
+        metrics[field] = sum(_as_float(row.get(field)) for row in rows) / n
+    by_kind: dict[str, int] = {}
+    for row in rows:
+        for kind, count in (row.get("background_nethra_by_kind") or {}).items():
+            by_kind[kind] = by_kind.get(kind, 0) + _as_int(count)
+    metrics["background_nethra_by_kind"] = by_kind
+    return metrics
+
+
+def parse_background_nethra_summary(text: str) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    match = re.search(r"total background_nethra_records.*?:\s*(\d+)", text)
+    if match:
+        out["background_nethra_records"] = int(match.group(1))
+    match = re.search(r"familiar_background_count:\s*(\d+)", text)
+    if match:
+        out["familiar_background_count"] = int(match.group(1))
+    match = re.search(r"operational_authority_count:\s*(\d+)", text)
+    if match:
+        out["operational_authority_count"] = int(match.group(1))
+    return out
+
+
+def collect_background_nethra_mode_metrics(out_prefix: str) -> dict[str, dict[str, Any]]:
+    paths = background_nethra_suite_paths(out_prefix)
+    result: dict[str, dict[str, Any]] = {}
+    for mode, mode_paths in paths.items():
+        metrics = aggregate_background_nethra_jsonl_metrics(mode_paths["jsonl"])
+        if mode_paths["log"].exists():
+            metrics.update(parse_log_metrics(mode_paths["log"].read_text()))
+        result[mode] = metrics
+    bn_summary_path = summary_output_path(out_prefix, "record", "background_nethra_summary")
+    if bn_summary_path.exists():
+        parsed = parse_background_nethra_summary(bn_summary_path.read_text())
+        result.setdefault("record", {})["background_nethra_summary"] = parsed
+    return result
+
+
+def background_nethra_behavior_equal(off: dict[str, Any], record: dict[str, Any]) -> bool:
+    for field in BN_BEHAVIOR_FIELDS:
+        if abs(_as_float(off.get(field)) - _as_float(record.get(field))) > 1e-9:
+            return False
+    return True
+
+
+def background_nethra_decision_lines(metrics: dict[str, dict[str, Any]]) -> list[str]:
+    off = metrics.get("off", {})
+    record = metrics.get("record", {})
+    lines: list[str] = []
+
+    if background_nethra_behavior_equal(off, record):
+        lines.append("PASS: off and record match on behavior metrics.")
+    else:
+        changed = [
+            f for f in BN_BEHAVIOR_FIELDS
+            if abs(_as_float(off.get(f)) - _as_float(record.get(f))) > 1e-9
+        ]
+        lines.append(f"FAIL: record differs from off on behavior metrics: {', '.join(changed)}.")
+
+    bg_records = _as_int(record.get("background_nethra_records"))
+    if bg_records > 0:
+        lines.append("PASS: background records > 0.")
+    else:
+        lines.append("FAIL: background records == 0.")
+
+    authority = _as_int(record.get("operational_authority_count"))
+    familiar = _as_int(record.get("familiar_background_count"))
+    if authority > 0:
+        lines.append(
+            f"FAIL: operational_authority_count={authority} (must be 0)."
+        )
+    elif familiar > 0:
+        lines.append(
+            "PASS: familiar_background_count > 0 and operational_authority_count == 0."
+        )
+    else:
+        lines.append("WARN: familiar_background_count == 0.")
+
+    bn_summary = record.get("background_nethra_summary", {})
+    expected_summary_fields = (
+        "background_nethra_records",
+        "familiar_background_count",
+        "operational_authority_count",
+    )
+    missing = [f for f in expected_summary_fields if f not in bn_summary]
+    if missing:
+        lines.append(f"WARN: summary missing expected fields: {', '.join(missing)}.")
+
+    return lines
+
+
+def render_background_nethra_comparison(metrics: dict[str, dict[str, Any]]) -> str:
+    lines = ["Dreth Comparison Suite: background_nethra", ""]
+
+    lines.append("Behavior Metrics")
+    for mode in BACKGROUND_NETHRA_MODES:
+        row = metrics.get(mode, {})
+        bits = [f"{f}={_fmt(row.get(f))}" for f in BN_BEHAVIOR_FIELDS]
+        lines.append(f"  {mode}: " + " ".join(bits))
+
+    lines.extend(["", "Background Metrics (record mode)"])
+    record = metrics.get("record", {})
+    for field in BN_BACKGROUND_FIELDS:
+        lines.append(f"  {field}={_fmt(record.get(field))}")
+    by_kind = record.get("background_nethra_by_kind") or {}
+    if by_kind:
+        lines.append(f"  background_nethra_by_kind:")
+        for kind, count in sorted(by_kind.items(), key=lambda kv: -kv[1]):
+            lines.append(f"    {kind}: {count}")
+
+    lines.extend(["", "Decision Block", *background_nethra_decision_lines(metrics)])
+    lines.append("")
+    return "\n".join(lines)
+
+
+def validate_background_nethra_outputs_exist(out_prefix: str) -> None:
+    missing = [
+        path
+        for mode_paths in background_nethra_suite_paths(out_prefix).values()
+        for path in (mode_paths["jsonl"], mode_paths["log"])
+        if not path.exists()
+    ]
+    if missing:
+        raise FileNotFoundError("missing batch outputs: " + ", ".join(str(p) for p in missing))
+
+
+def write_background_nethra_comparison(out_prefix: str) -> tuple[Path, str]:
+    comparison_path = Path(out_prefix).with_name(f"{Path(out_prefix).name}_comparison.txt")
+    comparison_path.parent.mkdir(parents=True, exist_ok=True)
+    text = render_background_nethra_comparison(collect_background_nethra_mode_metrics(out_prefix))
+    comparison_path.write_text(text)
+    return comparison_path, text
+
+
+def run_background_nethra_suite(args: argparse.Namespace) -> int:
+    Path(args.out_prefix).parent.mkdir(parents=True, exist_ok=True)
+    batch_jobs = build_background_nethra_jobs(args)
+    code = run_labeled_commands(
+        batch_jobs,
+        max_workers=args.suite_workers,
+        sequential=args.sequential,
+    )
+    if code != 0:
+        return code
+
+    validate_background_nethra_outputs_exist(args.out_prefix)
+    summary_jobs = build_background_nethra_summary_jobs(args.out_prefix)
+    code = run_labeled_commands(
+        summary_jobs,
+        max_workers=args.summary_workers,
+        sequential=args.sequential,
+    )
+    if code != 0:
+        return code
+
+    comparison_path, text = write_background_nethra_comparison(args.out_prefix)
+    print(f"[comparison] wrote {comparison_path}")
+    in_decision = False
+    for line in text.splitlines():
+        if line == "Decision Block":
+            in_decision = True
+            print(line)
+            continue
+        if in_decision and line:
+            print(line)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -726,6 +999,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--summary-workers must be >= 1")
     if args.suite == "authority_strength":
         return run_authority_strength_suite(args)
+    if args.suite == "background_nethra":
+        return run_background_nethra_suite(args)
     parser.error(f"unsupported suite: {args.suite}")
     return 2
 

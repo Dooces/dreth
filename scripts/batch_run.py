@@ -3721,6 +3721,25 @@ def main():
                         "max_candidates": r.arch.temporal_frontier_max_candidates,
                         "max_depth": r.arch.temporal_frontier_max_depth,
                     })
+                if r.arch.background_nethra_mode != "off":
+                    rec.update({
+                        "background_nethra_mode": r.arch.background_nethra_mode,
+                        "background_nethra_records": r.arch.background_nethra_records,
+                        "background_nethra_by_kind": r.arch.background_nethra_by_kind,
+                        "background_nethra_edges": r.arch.background_nethra_edges,
+                        "background_trass_patterns": r.arch.background_trass_patterns,
+                        "background_unresolved_patterns": r.arch.background_unresolved_patterns,
+                        "background_quarantined_patterns": r.arch.background_quarantined_patterns,
+                        "background_giant_cluster_patterns": r.arch.background_giant_cluster_patterns,
+                        "background_dormant_patterns": r.arch.background_dormant_patterns,
+                        "background_tied_frontier_patterns": r.arch.background_tied_frontier_patterns,
+                        "background_records_used_as_features": r.arch.background_records_used_as_features,
+                        "background_feature_hits": r.arch.background_feature_hits,
+                        "background_feature_noops": r.arch.background_feature_noops,
+                        "familiar_background_count": r.arch.familiar_background_count,
+                        "operational_authority_count": r.arch.operational_authority_count,
+                        "background_nethra_export": r.arch.background_nethra_export,
+                    })
                 if r.blind_challenge_evaluation is not None:
                     rec["evaluation"] = r.blind_challenge_evaluation
                 if r.baseline and r.baseline.ok:

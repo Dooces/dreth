@@ -43,10 +43,8 @@ def _load_jsonl(path: str) -> List[Dict[str, Any]]:
 
 
 def _get_arch(row: Dict[str, Any]) -> Dict[str, Any]:
-    arch = row.get("arch") or row.get("architecture_metrics") or {}
-    if not isinstance(arch, dict):
-        arch = {}
-    return arch
+    # Background nethra metrics are serialized as top-level JSONL keys.
+    return row
 
 
 def _sum_int(rows: List[Dict[str, Any]], key: str) -> int:
