@@ -112,12 +112,12 @@ G. Visible evidence trigger breakdown (223 cases):
 
   Top 20 cases with active triggers:
       seed  var relation               reason                    triggers
-        99   91 delayed                contradicted_authority    consecutive_sentinel_failure_trigger open_novelty_trigger low_margin_trigger alternatives_or_ties_trigger
         42   29 delayed                contradicted_authority    consecutive_sentinel_failure_trigger open_novelty_trigger low_margin_trigger alternatives_or_ties_trigger
         42   34 latent_additive        contradicted_authority    consecutive_sentinel_failure_trigger open_novelty_trigger low_margin_trigger alternatives_or_ties_trigger
         42   39 delayed                contradicted_authority    consecutive_sentinel_failure_trigger open_novelty_trigger low_margin_trigger alternatives_or_ties_trigger
         42   57 latent_additive        contradicted_authority    consecutive_sentinel_failure_trigger open_novelty_trigger low_margin_trigger alternatives_or_ties_trigger
         42   68 latent_additive        contradicted_authority    consecutive_sentinel_failure_trigger open_novelty_trigger low_margin_trigger alternatives_or_ties_trigger
+        99   91 delayed                contradicted_authority    consecutive_sentinel_failure_trigger open_novelty_trigger low_margin_trigger alternatives_or_ties_trigger
          7    1 weak_noisy             contradicted_authority    open_novelty_trigger low_margin_trigger alternatives_or_ties_trigger
          7    2 delayed                contradicted_authority    open_novelty_trigger low_margin_trigger alternatives_or_ties_trigger
          7    7 weak_noisy             contradicted_authority    open_novelty_trigger low_margin_trigger alternatives_or_ties_trigger

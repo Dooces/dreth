@@ -76,7 +76,7 @@ H. Post-hoc interpretation
   frontier:x0:DIFF(1,6): latent_additive=2 weak_noisy=2 dense_mixed=2 symbolic=1 proxy_confounded=1 delayed=1
   frontier:x0:DIFF(2,4): latent_additive=3 symbolic=3 delayed=2 dense_mixed=1
   frontier:x0:DIFF(3,8): symbolic=4 latent_additive=2 smooth_nonlinear=1 weak_noisy=1 dense_mixed=1
-  frontier:x0:DIFF(7,8): symbolic=4 latent_additive=2 weak_noisy=2 dense_mixed=1
+  frontier:x0:PROD(1,4): symbolic=3 latent_additive=2 weak_noisy=2 proxy_confounded=1 dense_mixed=1
 
 
 I. Four-way comparison

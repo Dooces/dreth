@@ -187,9 +187,9 @@ Supplement. post-hoc interpretation may use manifest only after classification
   var_fit:x0:HIGH(): strength=contested unknown
   var_fit:x1:FIRST(14): strength=contested weak_noisy=2 proxy_confounded=1
   var_fit:x2:HIGH(): strength=contested delayed=2 latent_additive=1
-  var_fit:x3:MEAN(4,5): strength=contested weak_noisy=1 smooth_nonlinear=1 dense_mixed=1
+  var_fit:x3:MEAN(4,5): strength=contested weak_noisy=1 dense_mixed=1 smooth_nonlinear=1
   var_fit:x4:HIGH(): strength=strong symbolic=2 dense_mixed=1
-  var_fit:x5:TINY(): strength=contested proxy_confounded=1 symbolic=1 dense_mixed=1
+  var_fit:x5:TINY(): strength=contested proxy_confounded=1 dense_mixed=1 symbolic=1
   var_fit:x6:LOW(): strength=contested dense_mixed=2 delayed=1
   var_fit:x7:LOW(): strength=contested weak_noisy=2 dense_mixed=1
   var_fit:x8:HIGH(): strength=contested symbolic=3

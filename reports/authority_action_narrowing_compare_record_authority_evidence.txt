@@ -114,14 +114,14 @@ G. Visible evidence trigger breakdown (243 cases):
       seed  var relation               reason                    triggers
          7   35 latent_additive        contradicted_authority    consecutive_sentinel_failure_trigger open_novelty_trigger low_margin_trigger alternatives_or_ties_trigger
          7   42 proxy_confounded       contradicted_authority    recent_detected_drift_trigger open_novelty_trigger low_margin_trigger alternatives_or_ties_trigger
-        99   61 latent_additive        contradicted_authority    consecutive_sentinel_failure_trigger open_novelty_trigger low_margin_trigger alternatives_or_ties_trigger
-        99   83 dense_mixed            contradicted_authority    consecutive_sentinel_failure_trigger open_novelty_trigger low_margin_trigger alternatives_or_ties_trigger
-        99   94 weak_noisy             contradicted_authority    consecutive_sentinel_failure_trigger open_novelty_trigger low_margin_trigger alternatives_or_ties_trigger
         42    4 symbolic               contradicted_authority    consecutive_sentinel_failure_trigger open_novelty_trigger low_margin_trigger alternatives_or_ties_trigger
         42   43 delayed                contradicted_authority    consecutive_sentinel_failure_trigger open_novelty_trigger low_margin_trigger alternatives_or_ties_trigger
         42   45 delayed                contradicted_authority    consecutive_sentinel_failure_trigger open_novelty_trigger low_margin_trigger alternatives_or_ties_trigger
         42   68 latent_additive        contradicted_authority    consecutive_sentinel_failure_trigger open_novelty_trigger low_margin_trigger alternatives_or_ties_trigger
         42   87 symbolic               contradicted_authority    consecutive_sentinel_failure_trigger open_novelty_trigger low_margin_trigger alternatives_or_ties_trigger
+        99   61 latent_additive        contradicted_authority    consecutive_sentinel_failure_trigger open_novelty_trigger low_margin_trigger alternatives_or_ties_trigger
+        99   83 dense_mixed            contradicted_authority    consecutive_sentinel_failure_trigger open_novelty_trigger low_margin_trigger alternatives_or_ties_trigger
+        99   94 weak_noisy             contradicted_authority    consecutive_sentinel_failure_trigger open_novelty_trigger low_margin_trigger alternatives_or_ties_trigger
          7    1 weak_noisy             contradicted_authority    open_novelty_trigger low_margin_trigger alternatives_or_ties_trigger
          7    2 delayed                contradicted_authority    open_novelty_trigger low_margin_trigger alternatives_or_ties_trigger
          7    7 weak_noisy             contradicted_authority    open_novelty_trigger low_margin_trigger alternatives_or_ties_trigger
