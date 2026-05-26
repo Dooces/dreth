@@ -1,0 +1,90 @@
+ContextRoleIndex Report
+Warning: nethra nodes are provenance, not truth; roles are context-indexed.
+
+A. Index size
+  runs: 1
+  exported_nodes: 300
+  exported_context_roles: 300
+  runtime_nodes: 9567
+  runtime_roles: 15252
+
+B. Nethra nodes by kind/source
+  kind: tied_frontier_candidate=284 var_fit=13 unknown=3
+  source: tied_frontier=284 operation_role=13 uncertainty_cluster=3
+
+C. Context roles by role/context
+  role: unresolved=276 best_available=12 tareth=12
+  tied_frontier|x0|vis=50|parents=5,6: 36
+  tied_frontier|x1|vis=50|parents=8: 36
+  tied_frontier|x2|vis=50|parents=1,6: 36
+  tied_frontier|x5|vis=50|parents=8: 32
+  tied_frontier|x10|vis=50|parents=5: 32
+  tied_frontier|x3|vis=50|parents=1,4: 24
+  tied_frontier|x6|vis=50|parents=3,7: 21
+  tied_frontier|x9|vis=50|parents=1,7: 21
+  tied_frontier|x7|vis=50|parents=5,8: 17
+  tied_frontier|x11|vis=50|parents=1,6: 13
+  tied_frontier|x8|vis=50|parents=4,5: 5
+  uncertainty_cluster|vis=50: 3
+
+D. Nethras with multiple roles across contexts
+  var_fit:x0:MEAN(5,6): roles=best_available,tareth contexts=2
+  var_fit:x1:FIRST(8): roles=best_available,tareth contexts=2
+  var_fit:x2:MAX(1,6): roles=best_available,tareth contexts=2
+  var_fit:x3:MEAN(1,4): roles=best_available,tareth contexts=2
+  var_fit:x5:FIRST(8): roles=best_available,tareth contexts=2
+  var_fit:x6:MEAN(3,7): roles=best_available,tareth contexts=2
+  var_fit:x8:PROD(4,5): roles=best_available,tareth contexts=2
+  var_fit:x4:HIGH(): roles=best_available,tareth contexts=2
+  var_fit:x7:MAX(5,8): roles=best_available,tareth contexts=2
+  var_fit:x9:PROD(1,7): roles=best_available,tareth contexts=2
+
+E. Trass-in-one-context / tareth-in-another examples
+  none
+
+F. Match pressure and anchor admission
+  context_role_index_matches=1241
+  context_role_raw_matches=1241
+  context_role_deduped_matches=0
+  suppressions: weak=1241 duplicate=0 cap=0
+  context_role_matches_used_as_local_anchor=0
+  context_role_assist_feature_hits=0
+  context_role_assist_pressure_per_cycle=0.000000
+  top_match_reasons: none
+
+G. Role transition examples
+  var_fit:x0:MEAN(5,6): best_available@audit|x0|vis=50|parents=5,6 -> tareth@skip|x0|vis=50|parents=5,6
+  var_fit:x1:FIRST(8): best_available@audit|x1|vis=50|parents=8 -> tareth@skip|x1|vis=50|parents=8
+  var_fit:x2:MAX(1,6): best_available@audit|x2|vis=50|parents=1,6 -> tareth@skip|x2|vis=50|parents=1,6
+  var_fit:x3:MEAN(1,4): best_available@audit|x3|vis=50|parents=1,4 -> tareth@skip|x3|vis=50|parents=1,4
+  var_fit:x5:FIRST(8): best_available@audit|x5|vis=50|parents=8 -> tareth@skip|x5|vis=50|parents=8
+  var_fit:x6:MEAN(3,7): best_available@audit|x6|vis=50|parents=3,7 -> tareth@skip|x6|vis=50|parents=3,7
+  var_fit:x8:PROD(4,5): best_available@audit|x8|vis=50|parents=4,5 -> tareth@skip|x8|vis=50|parents=4,5
+  var_fit:x4:HIGH(): best_available@audit|x4|vis=50 -> tareth@skip|x4|vis=50
+  var_fit:x7:MAX(5,8): best_available@audit|x7|vis=50|parents=5,8 -> tareth@skip|x7|vis=50|parents=5,8
+  var_fit:x9:PROD(1,7): best_available@audit|x9|vis=50|parents=1,7 -> tareth@skip|x9|vis=50|parents=1,7
+
+H. Post-hoc interpretation
+  Uses manifest relation_type only after index matching/reporting.
+  context_role_anchor_precision_posthoc is report-only; runtime never reads it.
+  var_fit:x0:MEAN(5,6): latent_additive=1 dense_mixed=1 smooth_nonlinear=1
+  frontier:x0:FIRST(2): latent_additive=2
+  frontier:x0:MAX(1,2): latent_additive=2 smooth_nonlinear=1
+  frontier:x0:MEAN(2,6): latent_additive=2 smooth_nonlinear=1
+  frontier:x0:MEAN(3,6): latent_additive=1 proxy_confounded=1 smooth_nonlinear=1
+  frontier:x0:MAX(2,5): latent_additive=2 dense_mixed=1
+  frontier:x0:MEAN(6,7): latent_additive=1 smooth_nonlinear=1 weak_noisy=1
+  frontier:x0:MEAN(3,5): latent_additive=1 proxy_confounded=1 dense_mixed=1
+  frontier:x0:MEAN(1,6): smooth_nonlinear=2 latent_additive=1
+  frontier:x0:MEAN(4,8): latent_additive=1 dense_mixed=1 weak_noisy=1
+
+
+I. Four-way comparison
+  off: none
+  record: none
+  assist_feature+loose: none
+  assist_feature+strict: quality_cost=594764.000 d=+0.000 iv=30999.000 d=+0.000 audits=393.000 d=+0.000 revocations=3.000 d=+0.000 unique_fails=78.000 d=+0.000 regime_sentinel_fail=0.000 d=+0.000 passive_stress=2004.000 d=+0.000 dormant=0.000 d=+0.000 raw_match_pressure=1241.000 d=+0.000 anchor_pressure=0.000 d=+0.000 assist_pressure=0.000 d=+0.000
+
+J. Warning
+  ContextRoleIndex is provenance and locality memory, not runtime truth.
+  A trass role is not deletion and a tareth role is not global identity.

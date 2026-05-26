@@ -1,0 +1,59 @@
+Authority Strength Report
+Warning: strength is visible-evidence metadata, not truth.
+
+A. strength distribution
+  runs: 3
+  exported_records: 300
+  strong: 0
+  usable: 6
+  weak: 0
+  contested: 294
+  insufficient: 0
+
+B. best_available by strength
+  strong: 0
+  usable: 6
+  weak: 0
+  contested: 294
+  insufficient: 0
+
+C. contested/weak reasons
+  active_visible_conflict: 294
+
+D. visible-evidence triggers
+  uncertainty_cluster: 588
+  uncertainty_giant_cluster: 588
+  near_ties: 290
+  low_fit_margin: 282
+  tied_frontier: 282
+  strong_observations: 259
+  sentinel_coverage: 258
+  repeated_fit_churn: 237
+  open_novelty: 214
+  passive_stress: 110
+  sentinel_failures: 50
+  recent_revocations: 38
+  sentinel_passes: 36
+  fit_margin: 12
+
+E. authority-strength effects in assist mode
+  modes: assist=3
+  monitoring_increases_from_strength=2946301
+  alternatives_preserved_from_strength=0
+  future_evidence_requirements=294
+  repair_priority_bumps_from_strength=2943099
+
+F. post-hoc interpretation may use manifest only after classification
+  var_fit:x0:LOW(): strength=contested unknown
+  var_fit:x1:FIRST(18): strength=contested weak_noisy=2 proxy_confounded=1
+  var_fit:x2:HIGH(): strength=contested delayed=2 latent_additive=1
+  var_fit:x3:LOW(): strength=contested dense_mixed=1 smooth_nonlinear=1 weak_noisy=1
+  var_fit:x4:MAX(2,3): strength=contested symbolic=2 dense_mixed=1
+  var_fit:x5:FIRST(60): strength=contested dense_mixed=1 symbolic=1 proxy_confounded=1
+  var_fit:x6:LOW(): strength=contested dense_mixed=2 delayed=1
+  var_fit:x7:HIGH(): strength=contested weak_noisy=2 dense_mixed=1
+  var_fit:x8:FIRST(1): strength=contested symbolic=3
+  var_fit:x9:LOW(): strength=contested symbolic=2 smooth_nonlinear=1
+
+G. warning: strength is visible-evidence metadata, not truth
+  No cert issuance, revocation, skip suppression, or fit replacement is implied.

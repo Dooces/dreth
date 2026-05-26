@@ -20,6 +20,15 @@ AuthorityStrength = Literal[
     "insufficient",
 ]
 
+AuthorityState = Literal[
+    "strong",
+    "usable",
+    "contested_best_available",
+    "quarantined_for_derivation",
+    "repair_candidate",
+    "insufficient",
+]
+
 
 @dataclass(frozen=True)
 class AuthorityStrengthRecord:
@@ -35,17 +44,82 @@ class AuthorityStrengthRecord:
     uncertainty_signals: tuple[str, ...] = ()
     prior_role: str = ""
     best_available: bool = False
+    authority_state: AuthorityState = "usable"
+    evidence_epoch: int = 0
+
+
+@dataclass
+class AuthorityDebt:
+    var: int
+    context_key: str
+    current_state: AuthorityState
+    active_reasons: tuple[str, ...] = ()
+    persistence_count: int = 0
+    last_seen_cycle: int = 0
+    last_action_cycle: int = -1_000_000
+    evidence_required: int = 0
+    evidence_paid: int = 0
+    debt_score: int = 0
+    derivation_allowed: bool = True
+    local_use_allowed: bool = True
+    repair_attention_allowed: bool = False
+    last_evidence_epoch: int = -1
+
+
+@dataclass(frozen=True)
+class AuthorityStateTransition:
+    var: int
+    context_key: str
+    cycle: int
+    previous_state: AuthorityState
+    current_state: AuthorityState
+    reasons: tuple[str, ...] = ()
+    action: str = "state_update"
+
+
+@dataclass(frozen=True)
+class AuthorityControllerResult:
+    monitoring_bonus_vars: dict[int, int] = field(default_factory=dict)
+    preserve_vars: set[int] = field(default_factory=set)
+    repair_priority_vars: set[int] = field(default_factory=set)
+    future_requirement_vars: set[int] = field(default_factory=set)
+    derivation_quarantined_vars: set[int] = field(default_factory=set)
 
 
 @dataclass(frozen=True)
 class AuthorityStrengthSummary:
     counts_by_strength: dict[str, int] = field(default_factory=dict)
     counts_by_reason: dict[str, int] = field(default_factory=dict)
+    counts_by_authority_state: dict[str, int] = field(default_factory=dict)
     weak_best_available: int = 0
     contested_best_available: int = 0
     monitoring_increases: int = 0
     alternatives_preserved: int = 0
     future_evidence_requirements: int = 0
+
+
+def _evidence_keys(items: tuple[str, ...]) -> set[str]:
+    return {str(item).split("=", 1)[0] for item in items}
+
+
+def proposed_authority_state(
+    *,
+    strength: AuthorityStrength,
+    contradictory_evidence: tuple[str, ...],
+    best_available: bool,
+) -> AuthorityState:
+    keys = _evidence_keys(contradictory_evidence)
+    if "sentinel_failures" in keys or "recent_revocations" in keys:
+        return "repair_candidate"
+    if strength == "strong":
+        return "strong"
+    if strength == "usable":
+        return "usable"
+    if strength == "insufficient":
+        return "insufficient"
+    if best_available and strength in {"weak", "contested"}:
+        return "contested_best_available"
+    return "insufficient"
 
 
 def _as_int(value: Any) -> int:
@@ -119,6 +193,319 @@ def _context_key(var: int, visible: int, parents: tuple[int, ...]) -> str:
     if parents:
         bits.append("parents=" + ",".join(str(int(p)) for p in parents))
     return "|".join(bits)
+
+
+def _authority_flags(state: AuthorityState) -> tuple[bool, bool, bool]:
+    local_use_allowed = state != "insufficient"
+    derivation_allowed = state not in {
+        "quarantined_for_derivation",
+        "insufficient",
+    }
+    repair_attention_allowed = state == "repair_candidate"
+    return derivation_allowed, local_use_allowed, repair_attention_allowed
+
+
+def _debt_score(
+    state: AuthorityState,
+    persistence_count: int,
+    evidence_required: int,
+    evidence_paid: int,
+) -> int:
+    base = {
+        "strong": 0,
+        "usable": 0,
+        "contested_best_available": 2,
+        "quarantined_for_derivation": 4,
+        "repair_candidate": 5,
+        "insufficient": 3,
+    }[state]
+    return max(0, base + max(0, persistence_count - 1) + evidence_required - evidence_paid)
+
+
+class AuthorityStateController:
+    """Persistent visible-evidence authority-state controller.
+
+    The controller turns strength metadata into bounded runtime hints. It does
+    not issue certificates, revoke certificates, suppress skips, or replace fits.
+    """
+
+    def __init__(
+        self,
+        *,
+        monitoring_budget_per_cycle: int = 2,
+        repair_budget_per_cycle: int = 2,
+        preserve_budget_per_cycle: int = 3,
+        cooldown_cycles: int = 50,
+    ) -> None:
+        self.monitoring_budget_per_cycle = max(0, int(monitoring_budget_per_cycle))
+        self.repair_budget_per_cycle = max(0, int(repair_budget_per_cycle))
+        self.preserve_budget_per_cycle = max(0, int(preserve_budget_per_cycle))
+        self.cooldown_cycles = max(1, int(cooldown_cycles))
+        self.debts: dict[tuple[int, str], AuthorityDebt] = {}
+        self.transitions: list[AuthorityStateTransition] = []
+        self.metrics: Counter[str] = Counter()
+        self._latest_result = AuthorityControllerResult()
+
+    @staticmethod
+    def _reasons(record: AuthorityStrengthRecord) -> tuple[str, ...]:
+        reasons = [record.reason]
+        reasons.extend(str(item).split("=", 1)[0] for item in record.contradictory_evidence)
+        return tuple(dict.fromkeys(reason for reason in reasons if reason))
+
+    def _next_state(
+        self,
+        record: AuthorityStrengthRecord,
+        debt: AuthorityDebt | None,
+        persistence_count: int,
+    ) -> AuthorityState:
+        proposed = record.authority_state
+        keys = _evidence_keys(record.contradictory_evidence)
+        if proposed == "contested_best_available":
+            if (
+                persistence_count >= 2
+                and "open_novelty" in keys
+                and "repeated_fit_churn" in keys
+            ):
+                return "quarantined_for_derivation"
+        if proposed in {"strong", "usable"} and debt is not None:
+            if debt.evidence_required > debt.evidence_paid + 1:
+                return "usable"
+        return proposed
+
+    def process(
+        self,
+        records: list[AuthorityStrengthRecord],
+        cycle: int,
+    ) -> AuthorityControllerResult:
+        monitoring_bonus: dict[int, int] = {}
+        preserve_vars: set[int] = set()
+        repair_vars: set[int] = set()
+        future_vars: set[int] = set()
+        quarantined_vars: set[int] = set()
+        monitoring_budget = self.monitoring_budget_per_cycle
+        repair_budget = self.repair_budget_per_cycle
+        preserve_budget = self.preserve_budget_per_cycle
+
+        for record in records:
+            key = (int(record.var), str(record.context_key))
+            previous = self.debts.get(key)
+            evidence_changed = (
+                previous is None
+                or previous.last_evidence_epoch != int(record.evidence_epoch)
+            )
+            persistence = previous.persistence_count if previous is not None else 0
+            if evidence_changed:
+                if (
+                    previous is not None
+                    and previous.current_state == record.authority_state
+                    and record.authority_state in {
+                        "contested_best_available",
+                        "quarantined_for_derivation",
+                        "repair_candidate",
+                        "insufficient",
+                    }
+                ):
+                    persistence += 1
+                elif record.authority_state in {
+                    "contested_best_available",
+                    "repair_candidate",
+                    "insufficient",
+                }:
+                    persistence = 1
+                else:
+                    persistence = 0
+
+            state = self._next_state(record, previous, persistence)
+            reasons = self._reasons(record)
+            derivation_allowed, local_use_allowed, repair_allowed = _authority_flags(state)
+            if local_use_allowed and record.best_available:
+                self.metrics["local_use_preserved"] += 1
+
+            if previous is None:
+                evidence_required = len(record.required_future_evidence)
+                evidence_paid = 0
+                self.metrics["authority_debt_created"] += int(state not in {"strong", "usable"})
+            else:
+                evidence_required = previous.evidence_required
+                evidence_paid = previous.evidence_paid
+
+            if evidence_changed and state == "contested_best_available" and persistence >= 2:
+                evidence_required += 1
+                future_vars.add(record.var)
+                self.metrics["authority_debt_created"] += 1
+                if preserve_budget > 0:
+                    preserve_vars.add(record.var)
+                    preserve_budget -= 1
+
+            if state in {"strong", "usable"} and previous is not None:
+                paid = 0
+                evidence_keys = _evidence_keys(record.active_evidence)
+                if "sentinel_coverage" in evidence_keys or "sentinel_passes" in evidence_keys:
+                    paid += 1
+                if "fit_margin" in evidence_keys:
+                    paid += 1
+                if paid:
+                    before_paid = evidence_paid
+                    evidence_paid = min(evidence_required, evidence_paid + paid)
+                    self.metrics["authority_debt_paid"] += max(0, evidence_paid - before_paid)
+                    if evidence_paid >= evidence_required:
+                        state = "strong" if record.strength == "strong" else "usable"
+
+            if state == "quarantined_for_derivation":
+                quarantined_vars.add(record.var)
+                if previous is None or previous.current_state != state:
+                    self.metrics["derivation_quarantines"] += 1
+            if state == "repair_candidate":
+                self.metrics["repair_candidates"] += 1
+
+            debt = AuthorityDebt(
+                var=int(record.var),
+                context_key=str(record.context_key),
+                current_state=state,
+                active_reasons=reasons,
+                persistence_count=persistence,
+                last_seen_cycle=int(cycle),
+                last_action_cycle=(
+                    previous.last_action_cycle if previous is not None else -1_000_000
+                ),
+                evidence_required=max(0, int(evidence_required)),
+                evidence_paid=max(0, int(evidence_paid)),
+                debt_score=_debt_score(state, persistence, evidence_required, evidence_paid),
+                derivation_allowed=derivation_allowed,
+                local_use_allowed=local_use_allowed,
+                repair_attention_allowed=repair_allowed,
+                last_evidence_epoch=int(record.evidence_epoch),
+            )
+
+            if previous is not None and previous.current_state != state:
+                self.transitions.append(AuthorityStateTransition(
+                    var=record.var,
+                    context_key=record.context_key,
+                    cycle=int(cycle),
+                    previous_state=previous.current_state,
+                    current_state=state,
+                    reasons=reasons,
+                ))
+                self.metrics["authority_state_transitions"] += 1
+
+            # Split legacy pressure candidates from bounded controller effects.
+            wants_monitoring = record.strength in {"weak", "contested"}
+            wants_repair = record.strength == "contested"
+            if wants_monitoring:
+                self.metrics["monitoring_increases_from_strength_candidates"] += 1
+            if wants_repair:
+                self.metrics["repair_priority_bumps_from_strength_candidates"] += 1
+
+            if wants_monitoring and state != "repair_candidate":
+                self.metrics["monitoring_increases_from_strength_suppressed_by_state"] += 1
+                self.metrics["monitoring_hints_suppressed"] += 1
+            if wants_repair and state != "repair_candidate":
+                self.metrics["repair_priority_bumps_from_strength_suppressed_by_state"] += 1
+                self.metrics["repair_hints_suppressed"] += 1
+
+            can_act = int(cycle) - debt.last_action_cycle >= self.cooldown_cycles
+            acted = False
+            if state == "repair_candidate":
+                if not can_act:
+                    if wants_monitoring:
+                        self.metrics["monitoring_increases_from_strength_suppressed_by_cooldown"] += 1
+                        self.metrics["monitoring_hints_suppressed"] += 1
+                    if wants_repair:
+                        self.metrics["repair_priority_bumps_from_strength_suppressed_by_cooldown"] += 1
+                        self.metrics["repair_hints_suppressed"] += 1
+                else:
+                    if wants_monitoring:
+                        if monitoring_budget > 0:
+                            monitoring_bonus[record.var] = 1
+                            monitoring_budget -= 1
+                            acted = True
+                            self.metrics["monitoring_increases_from_strength_applied"] += 1
+                            self.metrics["monitoring_hints_applied"] += 1
+                        else:
+                            self.metrics["monitoring_increases_from_strength_suppressed_by_budget"] += 1
+                            self.metrics["monitoring_hints_suppressed"] += 1
+                    if wants_repair:
+                        if repair_budget > 0:
+                            repair_vars.add(record.var)
+                            repair_budget -= 1
+                            acted = True
+                            self.metrics["repair_priority_bumps_from_strength_applied"] += 1
+                            self.metrics["bounded_repairs_applied"] += 1
+                        else:
+                            self.metrics["repair_priority_bumps_from_strength_suppressed_by_budget"] += 1
+                            self.metrics["repair_hints_suppressed"] += 1
+                if acted:
+                    debt.last_action_cycle = int(cycle)
+
+            if wants_monitoring and record.var not in monitoring_bonus and state == "repair_candidate":
+                self.metrics["monitoring_increases_from_strength_noops"] += int(not acted)
+            if wants_repair and record.var not in repair_vars and state == "repair_candidate":
+                self.metrics["repair_priority_bumps_from_strength_noops"] += int(not acted)
+            if not acted:
+                self.metrics["debt_noops"] += 1
+
+            self.debts[key] = debt
+
+        self._latest_result = AuthorityControllerResult(
+            monitoring_bonus_vars=monitoring_bonus,
+            preserve_vars=preserve_vars,
+            repair_priority_vars=repair_vars,
+            future_requirement_vars=future_vars,
+            derivation_quarantined_vars=quarantined_vars,
+        )
+        return self._latest_result
+
+    def derivation_allowed(self, var: int, context_key: str | None = None) -> bool:
+        matching = [
+            debt for (debt_var, debt_context), debt in self.debts.items()
+            if debt_var == int(var) and (context_key is None or debt_context == context_key)
+        ]
+        if not matching:
+            return True
+        return all(debt.derivation_allowed for debt in matching)
+
+    def summary(self) -> dict[str, Any]:
+        state_counts = Counter(debt.current_state for debt in self.debts.values())
+        outstanding = sum(
+            1 for debt in self.debts.values()
+            if debt.current_state not in {"strong", "usable"}
+            or debt.evidence_paid < debt.evidence_required
+        )
+        out: dict[str, Any] = {
+            "authority_state_counts": dict(state_counts),
+            "authority_debt_outstanding": outstanding,
+            "authority_debts": [asdict(debt) for debt in self.debts.values()],
+            "authority_state_transitions_examples": [
+                asdict(item) for item in self.transitions[-20:]
+            ],
+        }
+        for name in (
+            "authority_debt_created",
+            "authority_debt_paid",
+            "authority_state_transitions",
+            "derivation_quarantines",
+            "local_use_preserved",
+            "repair_candidates",
+            "bounded_repairs_applied",
+            "monitoring_hints_applied",
+            "monitoring_hints_suppressed",
+            "repair_hints_suppressed",
+            "debt_noops",
+            "monitoring_increases_from_strength_candidates",
+            "monitoring_increases_from_strength_applied",
+            "monitoring_increases_from_strength_suppressed_by_state",
+            "monitoring_increases_from_strength_suppressed_by_cooldown",
+            "monitoring_increases_from_strength_suppressed_by_budget",
+            "monitoring_increases_from_strength_noops",
+            "repair_priority_bumps_from_strength_candidates",
+            "repair_priority_bumps_from_strength_applied",
+            "repair_priority_bumps_from_strength_suppressed_by_state",
+            "repair_priority_bumps_from_strength_suppressed_by_cooldown",
+            "repair_priority_bumps_from_strength_suppressed_by_budget",
+            "repair_priority_bumps_from_strength_noops",
+        ):
+            out[name] = int(self.metrics.get(name, 0))
+        return out
 
 
 def _revocation_count(n: Any) -> int:
@@ -310,6 +697,15 @@ def compute_authority_strength_records(agent: Any, cycle: int) -> list[Authority
             cluster_signals=cluster_signals.get(var, set()),
             best_available=True,
         )
+        authority_state = proposed_authority_state(
+            strength=strength,
+            contradictory_evidence=contradictory,
+            best_available=True,
+        )
+        evidence_epoch = max(
+            _as_int(getattr(n, "full_audits", 0)),
+            _as_int(getattr(last_fit, "cycle", 0)) if last_fit is not None else 0,
+        )
         records.append(AuthorityStrengthRecord(
             var=var,
             nethra_id=nid,
@@ -323,6 +719,8 @@ def compute_authority_strength_records(agent: Any, cycle: int) -> list[Authority
             uncertainty_signals=tuple(sorted(cluster_signals.get(var, set()))),
             prior_role=_recent_role_for_nethra(agent, nid),
             best_available=True,
+            authority_state=authority_state,
+            evidence_epoch=evidence_epoch,
         ))
     return records
 
@@ -335,9 +733,11 @@ def summarize_authority_strength_records(
 ) -> AuthorityStrengthSummary:
     strength_counts = Counter(record.strength for record in records)
     reason_counts = Counter(record.reason for record in records)
+    state_counts = Counter(record.authority_state for record in records)
     return AuthorityStrengthSummary(
         counts_by_strength=dict(strength_counts),
         counts_by_reason=dict(reason_counts),
+        counts_by_authority_state=dict(state_counts),
         weak_best_available=sum(
             1 for record in records
             if record.best_available and record.strength == "weak"

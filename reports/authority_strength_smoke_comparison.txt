@@ -1,0 +1,27 @@
+Dreth Comparison Suite: authority_strength
+
+Log Metrics
+  off: runs_ok=1/1 invariants=ALL PASS (1 runs) skip_pct=99.6 iv=38391 quality_cost=762381 full_audits=482 revocations=8 unique_fails=101 regime_sentinel_fail=0 no_sentinel=5424 passive_saved_iv=656469 passive_stressed=2241 route_certs=40 audit_certs=4 dormant=0 chosen_parent_recall=- recall_lift=- candidate_reduction_vs_visible=-
+  record: runs_ok=1/1 invariants=ALL PASS (1 runs) skip_pct=99.6 iv=38391 quality_cost=762381 full_audits=482 revocations=8 unique_fails=101 regime_sentinel_fail=0 no_sentinel=5424 passive_saved_iv=656469 passive_stressed=2241 route_certs=40 audit_certs=4 dormant=0 chosen_parent_recall=- recall_lift=- candidate_reduction_vs_visible=-
+  assist: runs_ok=1/1 invariants=ALL PASS (1 runs) skip_pct=99.7 iv=30999 quality_cost=594764 full_audits=393 revocations=3 unique_fails=78 regime_sentinel_fail=0 no_sentinel=0 passive_saved_iv=659617 passive_stressed=2004 route_certs=58 audit_certs=5 dormant=0 chosen_parent_recall=- recall_lift=- candidate_reduction_vs_visible=-
+
+Authority Strength Summaries
+  record: strong=0 usable=1 weak=0 contested=49 insufficient=0 weak_contested=49 monitoring_budget_hints=0 alternative_preservation_hints=0 repair_priority_hints=0 future_evidence_requirements=49
+  assist: strong=0 usable=0 weak=1 contested=49 insufficient=0 weak_contested=50 monitoring_budget_hints=149357 alternative_preservation_hints=0 repair_priority_hints=146367 future_evidence_requirements=50
+
+Blind Authority Evidence
+  off: external_mismatch_cases=33 evidence_supported_surrogate=1 weakly_supported_surrogate=1 contradicted_authority=29 insufficient_evidence=2 would_throttle=31 would_not_throttle=2 supported_surrogates_preserved=1
+  record: external_mismatch_cases=33 evidence_supported_surrogate=1 weakly_supported_surrogate=1 contradicted_authority=29 insufficient_evidence=2 would_throttle=31 would_not_throttle=2 supported_surrogates_preserved=1
+  assist: external_mismatch_cases=39 evidence_supported_surrogate=0 weakly_supported_surrogate=1 contradicted_authority=34 insufficient_evidence=4 would_throttle=38 would_not_throttle=1 supported_surrogates_preserved=0
+
+Comparison Table
+mode        iv      qcost      audits   rev   unique_fails   mismatch   contradicted   supported_surrogate
+off         38391   762381     482      8     101            33         29             1
+record      38391   762381     482      8     101            33         29             1
+assist      30999   594764     393      3     78             39         34             0
+assist_delta_vs_off -7392   -167617    -89      -5    -23            6          5              -1
+record_delta_vs_off 0       0          0        0     0              0          0              0
+
+Decision Block
+PASS: off and record match on behavior metrics.
+WARN: hidden truth is offline interpretation only; runtime does not use it.

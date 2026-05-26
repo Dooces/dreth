@@ -199,6 +199,7 @@ class RunConfig:
     context_role_index: str = "off"  # "off" | "record" | "assist_feature"
     context_role_anchor_policy: str | None = None  # "off" | "strict" | "loose"
     authority_strength: str = "off"  # "off" | "record" | "assist"
+    authority_strength_controller: str = "state"  # "legacy" | "state"
 
 
 # ── per-run result ─────────────────────────────────────────────────────────────
@@ -460,18 +461,44 @@ class ArchMetrics:
 
     # Authority-strength metadata metrics.
     authority_strength_mode: str = "off"
+    authority_strength_controller: str = "state"
     authority_strength_records: int = 0
     strength_strong: int = 0
     strength_usable: int = 0
     strength_weak: int = 0
     strength_contested: int = 0
     strength_insufficient: int = 0
+    authority_state_counts: Dict[str, int] = field(default_factory=dict)
     weak_best_available: int = 0
     contested_best_available: int = 0
     monitoring_increases_from_strength: int = 0
     alternatives_preserved_from_strength: int = 0
     future_evidence_requirements: int = 0
     repair_priority_bumps_from_strength: int = 0
+    authority_debt_created: int = 0
+    authority_debt_paid: int = 0
+    authority_debt_outstanding: int = 0
+    authority_state_transitions: int = 0
+    derivation_quarantines: int = 0
+    local_use_preserved: int = 0
+    repair_candidates: int = 0
+    bounded_repairs_applied: int = 0
+    monitoring_hints_applied: int = 0
+    monitoring_hints_suppressed: int = 0
+    repair_hints_suppressed: int = 0
+    debt_noops: int = 0
+    monitoring_increases_from_strength_candidates: int = 0
+    monitoring_increases_from_strength_applied: int = 0
+    monitoring_increases_from_strength_suppressed_by_state: int = 0
+    monitoring_increases_from_strength_suppressed_by_cooldown: int = 0
+    monitoring_increases_from_strength_suppressed_by_budget: int = 0
+    monitoring_increases_from_strength_noops: int = 0
+    repair_priority_bumps_from_strength_candidates: int = 0
+    repair_priority_bumps_from_strength_applied: int = 0
+    repair_priority_bumps_from_strength_suppressed_by_state: int = 0
+    repair_priority_bumps_from_strength_suppressed_by_cooldown: int = 0
+    repair_priority_bumps_from_strength_suppressed_by_budget: int = 0
+    repair_priority_bumps_from_strength_noops: int = 0
     authority_strength_counts_by_reason: Dict[str, int] = field(default_factory=dict)
     authority_strength_export: Dict[str, Any] = field(default_factory=dict)
 
@@ -830,6 +857,7 @@ def _build_and_run_dreth(
         context_role_index_mode=cfg.context_role_index,
         context_role_anchor_policy=cfg.context_role_anchor_policy,
         authority_strength_mode=cfg.authority_strength,
+        authority_strength_controller=cfg.authority_strength_controller,
     )
     if cfg.relative_authority_frontier_temporal_report:
         from dreth.relative_authority_frontier import TemporalGraphFrontierEvaluator
@@ -1216,12 +1244,16 @@ def _extract_arch_metrics(agent: ChainedAgent, world: CausalWorld) -> ArchMetric
     if hasattr(agent, "authority_strength_metrics"):
         _as = agent.authority_strength_metrics()
         m.authority_strength_mode = str(_as.get("authority_strength_mode", "off"))
+        m.authority_strength_controller = str(
+            _as.get("authority_strength_controller", "state")
+        )
         m.authority_strength_records = int(_as.get("authority_strength_records", 0))
         m.strength_strong = int(_as.get("strength_strong", 0))
         m.strength_usable = int(_as.get("strength_usable", 0))
         m.strength_weak = int(_as.get("strength_weak", 0))
         m.strength_contested = int(_as.get("strength_contested", 0))
         m.strength_insufficient = int(_as.get("strength_insufficient", 0))
+        m.authority_state_counts = dict(_as.get("authority_state_counts", {}))
         m.weak_best_available = int(_as.get("weak_best_available", 0))
         m.contested_best_available = int(_as.get("contested_best_available", 0))
         m.monitoring_increases_from_strength = int(
@@ -1234,6 +1266,33 @@ def _extract_arch_metrics(agent: ChainedAgent, world: CausalWorld) -> ArchMetric
         m.repair_priority_bumps_from_strength = int(
             _as.get("repair_priority_bumps_from_strength", 0)
         )
+        for field_name in (
+            "authority_debt_created",
+            "authority_debt_paid",
+            "authority_debt_outstanding",
+            "authority_state_transitions",
+            "derivation_quarantines",
+            "local_use_preserved",
+            "repair_candidates",
+            "bounded_repairs_applied",
+            "monitoring_hints_applied",
+            "monitoring_hints_suppressed",
+            "repair_hints_suppressed",
+            "debt_noops",
+            "monitoring_increases_from_strength_candidates",
+            "monitoring_increases_from_strength_applied",
+            "monitoring_increases_from_strength_suppressed_by_state",
+            "monitoring_increases_from_strength_suppressed_by_cooldown",
+            "monitoring_increases_from_strength_suppressed_by_budget",
+            "monitoring_increases_from_strength_noops",
+            "repair_priority_bumps_from_strength_candidates",
+            "repair_priority_bumps_from_strength_applied",
+            "repair_priority_bumps_from_strength_suppressed_by_state",
+            "repair_priority_bumps_from_strength_suppressed_by_cooldown",
+            "repair_priority_bumps_from_strength_suppressed_by_budget",
+            "repair_priority_bumps_from_strength_noops",
+        ):
+            setattr(m, field_name, int(_as.get(field_name, 0)))
         m.authority_strength_counts_by_reason = dict(
             _as.get("authority_strength_counts_by_reason", {})
         )
@@ -2900,6 +2959,10 @@ def main():
                    choices=["off", "record", "assist"],
                    help=("visible-evidence authority-strength metadata: "
                          "off, record, or assist (default: off)"))
+    p.add_argument("--authority-strength-controller", default="state",
+                   choices=["legacy", "state"],
+                   help=("authority-strength assist controller: state is the "
+                         "default; legacy reproduces earlier pressure hints"))
     p.add_argument("--shadow-residual", default="off",
                    choices=["off", "online"],
                    help="shadow residual mode: off=disabled; online=shadow learned predictor (default: off)")
@@ -3031,7 +3094,8 @@ def main():
                   uncertainty_assist_policy=args.uncertainty_assist_policy,
                   context_role_index=args.context_role_index or "off",
                   context_role_anchor_policy=args.context_role_anchor_policy,
-                  authority_strength=args.authority_strength)
+                  authority_strength=args.authority_strength,
+                  authority_strength_controller=args.authority_strength_controller)
         for schedule in schedule_list
         for v in var_list
         for c in cycle_list
@@ -3060,7 +3124,10 @@ def main():
     if (args.context_role_index or "off") != "off":
         mode += f" +context-role-index({args.context_role_index})"
     if args.authority_strength != "off":
-        mode += f" +authority-strength({args.authority_strength})"
+        mode += (
+            f" +authority-strength({args.authority_strength}/"
+            f"{args.authority_strength_controller})"
+        )
     if shadow_sweep:
         mode += (f" +shadow-sweep(f={factor_list} ms={ms_list} w={window_list})")
     elif args.shadow_residual != "off":
@@ -3262,12 +3329,14 @@ def main():
                     "context_role_edges_by_kind": r.arch.context_role_edges_by_kind,
                     "context_role_index": r.arch.context_role_export,
                     "authority_strength_mode": r.arch.authority_strength_mode,
+                    "authority_strength_controller": r.arch.authority_strength_controller,
                     "authority_strength_records": r.arch.authority_strength_records,
                     "strength_strong": r.arch.strength_strong,
                     "strength_usable": r.arch.strength_usable,
                     "strength_weak": r.arch.strength_weak,
                     "strength_contested": r.arch.strength_contested,
                     "strength_insufficient": r.arch.strength_insufficient,
+                    "authority_state_counts": r.arch.authority_state_counts,
                     "weak_best_available": r.arch.weak_best_available,
                     "contested_best_available": r.arch.contested_best_available,
                     "monitoring_increases_from_strength": (
@@ -3281,6 +3350,54 @@ def main():
                     ),
                     "repair_priority_bumps_from_strength": (
                         r.arch.repair_priority_bumps_from_strength
+                    ),
+                    "authority_debt_created": r.arch.authority_debt_created,
+                    "authority_debt_paid": r.arch.authority_debt_paid,
+                    "authority_debt_outstanding": r.arch.authority_debt_outstanding,
+                    "authority_state_transitions": r.arch.authority_state_transitions,
+                    "derivation_quarantines": r.arch.derivation_quarantines,
+                    "local_use_preserved": r.arch.local_use_preserved,
+                    "repair_candidates": r.arch.repair_candidates,
+                    "bounded_repairs_applied": r.arch.bounded_repairs_applied,
+                    "monitoring_hints_applied": r.arch.monitoring_hints_applied,
+                    "monitoring_hints_suppressed": r.arch.monitoring_hints_suppressed,
+                    "repair_hints_suppressed": r.arch.repair_hints_suppressed,
+                    "debt_noops": r.arch.debt_noops,
+                    "monitoring_increases_from_strength_candidates": (
+                        r.arch.monitoring_increases_from_strength_candidates
+                    ),
+                    "monitoring_increases_from_strength_applied": (
+                        r.arch.monitoring_increases_from_strength_applied
+                    ),
+                    "monitoring_increases_from_strength_suppressed_by_state": (
+                        r.arch.monitoring_increases_from_strength_suppressed_by_state
+                    ),
+                    "monitoring_increases_from_strength_suppressed_by_cooldown": (
+                        r.arch.monitoring_increases_from_strength_suppressed_by_cooldown
+                    ),
+                    "monitoring_increases_from_strength_suppressed_by_budget": (
+                        r.arch.monitoring_increases_from_strength_suppressed_by_budget
+                    ),
+                    "monitoring_increases_from_strength_noops": (
+                        r.arch.monitoring_increases_from_strength_noops
+                    ),
+                    "repair_priority_bumps_from_strength_candidates": (
+                        r.arch.repair_priority_bumps_from_strength_candidates
+                    ),
+                    "repair_priority_bumps_from_strength_applied": (
+                        r.arch.repair_priority_bumps_from_strength_applied
+                    ),
+                    "repair_priority_bumps_from_strength_suppressed_by_state": (
+                        r.arch.repair_priority_bumps_from_strength_suppressed_by_state
+                    ),
+                    "repair_priority_bumps_from_strength_suppressed_by_cooldown": (
+                        r.arch.repair_priority_bumps_from_strength_suppressed_by_cooldown
+                    ),
+                    "repair_priority_bumps_from_strength_suppressed_by_budget": (
+                        r.arch.repair_priority_bumps_from_strength_suppressed_by_budget
+                    ),
+                    "repair_priority_bumps_from_strength_noops": (
+                        r.arch.repair_priority_bumps_from_strength_noops
                     ),
                     "authority_strength_counts_by_reason": (
                         r.arch.authority_strength_counts_by_reason

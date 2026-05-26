@@ -109,6 +109,7 @@ from .context_role_index import (
     var_fit_id,
 )
 from .authority_strength import (
+    AuthorityStateController,
     compute_authority_strength_records,
     records_to_dicts as authority_strength_records_to_dicts,
     summarize_authority_strength_records,
@@ -253,6 +254,7 @@ class ChainedAgent:
         context_role_anchor_policy: Optional[str] = None,
         nethra_reservoir_mode: Optional[str] = None,
         authority_strength_mode: str = "off",
+        authority_strength_controller: str = "state",
     ):
         """Construct agent. Initializes empty ledger, zero counters, and
         applies any provided per-var cost weight overrides."""
@@ -593,14 +595,21 @@ class ChainedAgent:
             raise ValueError(
                 "authority_strength_mode must be off, record, or assist"
             )
+        if authority_strength_controller not in {"legacy", "state"}:
+            raise ValueError(
+                "authority_strength_controller must be legacy or state"
+            )
         self._authority_strength_mode = authority_strength_mode
+        self._authority_strength_controller_mode = authority_strength_controller
         self._authority_strength_latest_records = []
         self._authority_strength_latest_summary = summarize_authority_strength_records([])
+        self._authority_state_controller = AuthorityStateController()
         self._authority_strength_budget_bonus: Dict[int, int] = {}
         self._authority_strength_preserve_vars: Set[int] = set()
         self._authority_strength_preserve_remaining: int = 0
         self._authority_strength_repair_priority_vars: Set[int] = set()
         self._authority_strength_future_requirement_vars: Set[int] = set()
+        self._authority_strength_derivation_quarantined_vars: Set[int] = set()
         self._authority_strength_monitoring_increases_total = 0
         self._authority_strength_alternatives_preserved_total = 0
         self._authority_strength_future_requirements_total = 0
@@ -653,6 +662,10 @@ class ChainedAgent:
     ) -> None:
         if self._context_role_index is None or not nethra_id:
             return
+        if operation in {"route", "composite", "regime", "compression"}:
+            for support_var in validity_scope:
+                if support_var != var and not self._authority_strength_derivation_allowed(support_var):
+                    return
         n = self.ledger.vars[var]
         revoked = sum(
             1 for cert in list(n.certificates.values()) + list(n.route_certs.values())
@@ -1090,6 +1103,15 @@ class ChainedAgent:
         self._authority_strength_preserve_remaining = 3
         self._authority_strength_repair_priority_vars = set()
         self._authority_strength_future_requirement_vars = set()
+        self._authority_strength_derivation_quarantined_vars = set()
+
+    def _authority_strength_derivation_allowed(self, var: int) -> bool:
+        if (
+            self._authority_strength_mode != "assist"
+            or self._authority_strength_controller_mode != "state"
+        ):
+            return True
+        return self._authority_state_controller.derivation_allowed(var)
 
     def _run_authority_strength(self, cycle: int) -> None:
         """Record visible-evidence strength and write bounded assist hints."""
@@ -1100,7 +1122,10 @@ class ChainedAgent:
         records = compute_authority_strength_records(self, cycle)
         self._authority_strength_latest_records = records
 
-        if self._authority_strength_mode == "assist":
+        if (
+            self._authority_strength_mode == "assist"
+            and self._authority_strength_controller_mode == "legacy"
+        ):
             for record in records:
                 if not record.best_available:
                     continue
@@ -1116,6 +1141,30 @@ class ChainedAgent:
                     self._authority_strength_preserve_vars.add(record.var)
                     self._authority_strength_repair_priority_vars.add(record.var)
                     self._authority_strength_repair_priority_bumps_total += 1
+        elif self._authority_strength_mode == "assist":
+            result = self._authority_state_controller.process(records, cycle)
+            self._authority_strength_budget_bonus = dict(result.monitoring_bonus_vars)
+            self._authority_strength_preserve_vars = set(result.preserve_vars)
+            self._authority_strength_preserve_remaining = (
+                3 if result.preserve_vars else 0
+            )
+            self._authority_strength_repair_priority_vars = set(result.repair_priority_vars)
+            self._authority_strength_future_requirement_vars = set(
+                result.future_requirement_vars
+            )
+            self._authority_strength_derivation_quarantined_vars = set(
+                result.derivation_quarantined_vars
+            )
+            summary = self._authority_state_controller.summary()
+            self._authority_strength_monitoring_increases_total = int(
+                summary.get("monitoring_increases_from_strength_applied", 0)
+            )
+            self._authority_strength_repair_priority_bumps_total = int(
+                summary.get("repair_priority_bumps_from_strength_applied", 0)
+            )
+            self._authority_strength_future_requirements_total = int(
+                summary.get("authority_debt_created", 0)
+            )
 
         self._authority_strength_latest_summary = summarize_authority_strength_records(
             records,
@@ -1124,6 +1173,34 @@ class ChainedAgent:
         )
 
     def authority_strength_metrics(self) -> Dict[str, Any]:
+        zero_controller_metrics: Dict[str, Any] = {
+            "authority_strength_controller": self._authority_strength_controller_mode,
+            "authority_state_counts": {},
+            "authority_debt_created": 0,
+            "authority_debt_paid": 0,
+            "authority_debt_outstanding": 0,
+            "authority_state_transitions": 0,
+            "derivation_quarantines": 0,
+            "local_use_preserved": 0,
+            "repair_candidates": 0,
+            "bounded_repairs_applied": 0,
+            "monitoring_hints_applied": 0,
+            "monitoring_hints_suppressed": 0,
+            "repair_hints_suppressed": 0,
+            "debt_noops": 0,
+            "monitoring_increases_from_strength_candidates": 0,
+            "monitoring_increases_from_strength_applied": 0,
+            "monitoring_increases_from_strength_suppressed_by_state": 0,
+            "monitoring_increases_from_strength_suppressed_by_cooldown": 0,
+            "monitoring_increases_from_strength_suppressed_by_budget": 0,
+            "monitoring_increases_from_strength_noops": 0,
+            "repair_priority_bumps_from_strength_candidates": 0,
+            "repair_priority_bumps_from_strength_applied": 0,
+            "repair_priority_bumps_from_strength_suppressed_by_state": 0,
+            "repair_priority_bumps_from_strength_suppressed_by_cooldown": 0,
+            "repair_priority_bumps_from_strength_suppressed_by_budget": 0,
+            "repair_priority_bumps_from_strength_noops": 0,
+        }
         if self._authority_strength_mode == "off":
             return {
                 "authority_strength_mode": "off",
@@ -1140,6 +1217,7 @@ class ChainedAgent:
                 "future_evidence_requirements": 0,
                 "repair_priority_bumps_from_strength": 0,
                 "authority_strength_counts_by_reason": {},
+                **zero_controller_metrics,
             }
         if not self._authority_strength_latest_records:
             self._authority_strength_latest_records = compute_authority_strength_records(
@@ -1153,8 +1231,30 @@ class ChainedAgent:
             )
         summary = authority_strength_summary_to_dict(self._authority_strength_latest_summary)
         counts = summary.get("counts_by_strength", {})
+        controller_summary = (
+            self._authority_state_controller.summary()
+            if (
+                self._authority_strength_mode == "assist"
+                and self._authority_strength_controller_mode == "state"
+            )
+            else {}
+        )
+        if not controller_summary:
+            controller_summary = {
+                **zero_controller_metrics,
+                "authority_state_counts": dict(
+                    summary.get("counts_by_authority_state", {})
+                ),
+            }
+        else:
+            controller_summary = {
+                **zero_controller_metrics,
+                **controller_summary,
+                "authority_strength_controller": self._authority_strength_controller_mode,
+            }
         return {
             "authority_strength_mode": self._authority_strength_mode,
+            "authority_strength_controller": self._authority_strength_controller_mode,
             "authority_strength_records": len(self._authority_strength_latest_records),
             "strength_strong": int(counts.get("strong", 0)),
             "strength_usable": int(counts.get("usable", 0)),
@@ -1176,13 +1276,14 @@ class ChainedAgent:
                 self._authority_strength_repair_priority_bumps_total
             ),
             "authority_strength_counts_by_reason": dict(summary.get("counts_by_reason", {})),
+            **controller_summary,
         }
 
     def authority_strength_export(self, limit: int = 300) -> Dict[str, Any]:
         if self._authority_strength_mode == "off":
             return {"records": [], "summary": authority_strength_summary_to_dict(
                 summarize_authority_strength_records([])
-            )}
+            ), "controller": {}}
         if not self._authority_strength_latest_records:
             self._authority_strength_latest_records = compute_authority_strength_records(
                 self,
@@ -1200,6 +1301,14 @@ class ChainedAgent:
             ),
             "summary": authority_strength_summary_to_dict(
                 self._authority_strength_latest_summary
+            ),
+            "controller": (
+                self._authority_state_controller.summary()
+                if (
+                    self._authority_strength_mode == "assist"
+                    and self._authority_strength_controller_mode == "state"
+                )
+                else {}
             ),
         }
 
@@ -1652,6 +1761,11 @@ class ChainedAgent:
         replay. No invalidate_certs call — the composite cert is the authority;
         revocation happens when the composite sentinel fails in _check_composites.
         """
+        if (
+            not self._authority_strength_derivation_allowed(var_a)
+            or not self._authority_strength_derivation_allowed(var_b)
+        ):
+            return "untested"
         saved = self.world.state
         spread = [0.05, 0.25, 0.5, 0.75, 0.95]
 
@@ -1959,6 +2073,11 @@ class ChainedAgent:
             size = len(members_set)
             if size < _COMPONENT_MIN_SIZE:
                 continue
+            if any(
+                not self._authority_strength_derivation_allowed(member)
+                for member in members_set
+            ):
+                continue
             max_edges = size * (size - 1) // 2
             density = len(pairs) / max_edges if max_edges > 0 else 0.0
             if density < _COMPONENT_MIN_DENSITY:
@@ -2253,6 +2372,13 @@ class ChainedAgent:
         n = self.ledger.vars[var]
         if not n.parents:
             return 0
+        if not self._authority_strength_derivation_allowed(var):
+            return 0
+        if any(
+            not self._authority_strength_derivation_allowed(parent)
+            for parent in n.parents
+        ):
+            return 0
 
         budget = self.compression_discovery_budget
         candidate_gates = list(n.parents)
@@ -2511,26 +2637,28 @@ class ChainedAgent:
         if just_promoted:
             # Route certs: counterfactual fit per non-parent candidate.
             # Earned at promotion — the fit is stable enough to trust the comparison.
-            avail_for_route = {
-                other_var for other_var, other_n in self.ledger.vars.items()
-                if other_var != var
-                and (other_n.status == "certified" or other_n.status == "trass"
-                     or other_n.role_for("skip") == "trass"
-                     or (other_n.status == "proposed" and bool(other_n.sentinels)))
-            }
-            self._certify_route_certs(var, new_parents, avail_for_route, cycle, fit_diag)
-            # Audit cert: stable fit earned enough observations; mark as reusable.
-            self.ledger.issue_cert(
-                var, "audit", "reusable", "guarded_reuse",
-                context_parents=new_parents,
-                context_visible=self.world.visible_count,
-                context_cycle=cycle,
-                targets=(),
-                substitutions_tested=("stable_audit",),
-                changes=0,
-                trials=self.promote_after,
-                earned_by="stable_audit",
-            )
+            if self._authority_strength_derivation_allowed(var):
+                avail_for_route = {
+                    other_var for other_var, other_n in self.ledger.vars.items()
+                    if other_var != var
+                    and self._authority_strength_derivation_allowed(other_var)
+                    and (other_n.status == "certified" or other_n.status == "trass"
+                         or other_n.role_for("skip") == "trass"
+                         or (other_n.status == "proposed" and bool(other_n.sentinels)))
+                }
+                self._certify_route_certs(var, new_parents, avail_for_route, cycle, fit_diag)
+                # Audit cert: stable fit earned enough observations; mark as reusable.
+                self.ledger.issue_cert(
+                    var, "audit", "reusable", "guarded_reuse",
+                    context_parents=new_parents,
+                    context_visible=self.world.visible_count,
+                    context_cycle=cycle,
+                    targets=(),
+                    substitutions_tested=("stable_audit",),
+                    changes=0,
+                    trials=self.promote_after,
+                    earned_by="stable_audit",
+                )
             # Dormant revival check: if any archived alternative now wins,
             # increment its revival_count and track the context.
             context_key = near_tie_context_key
@@ -2567,6 +2695,11 @@ class ChainedAgent:
                     derived.extend(self.extension.derive_equivalence_compressions(self, var, cycle))
                 existing_gates = {c.gate for c in n.compressions}
                 for d in derived:
+                    if any(
+                        not self._authority_strength_derivation_allowed(int(gate_var))
+                        for gate_var, _, _ in d.gate
+                    ):
+                        continue
                     if d.gate not in existing_gates:
                         n.compressions.append(d)
                         existing_gates.add(d.gate)
@@ -2626,6 +2759,7 @@ class ChainedAgent:
             for cand_parents, _, _ in fit_diag.near_tie_candidates
             for p in cand_parents
             if p not in parents_set and p in available
+            and self._authority_strength_derivation_allowed(p)
         }
         if not competing:
             return

@@ -16,7 +16,12 @@ from dreth.records import FitDiagnostic
 from dreth.world import CausalWorld
 
 
-def _agent(mode: str = "off", *, repair_agenda: bool = False) -> ChainedAgent:
+def _agent(
+    mode: str = "off",
+    *,
+    repair_agenda: bool = False,
+    controller: str = "state",
+) -> ChainedAgent:
     world = CausalWorld(5, random.Random(3), noise_sigma=0.0)
     world.visible_count = 5
     agent = ChainedAgent(
@@ -28,15 +33,24 @@ def _agent(mode: str = "off", *, repair_agenda: bool = False) -> ChainedAgent:
         frontier_k=world.n_vars,
         repair_agenda_enabled=repair_agenda,
         authority_strength_mode=mode,
+        authority_strength_controller=controller,
     )
     agent.initialize()
     return agent
 
 
-def _fit_diag(var: int, *, margin: int = 5, near_ties: int = 0) -> FitDiagnostic:
+def _fit_diag(
+    var: int,
+    *,
+    margin: int = 5,
+    near_ties: int = 0,
+    cycle: int = 1,
+    best_parents: tuple[int, ...] = (),
+    best_func: str = "LOW",
+) -> FitDiagnostic:
     near = tuple(((i,), "FIRST", 10 - i) for i in range(near_ties))
     return FitDiagnostic(
-        cycle=1,
+        cycle=cycle,
         var=var,
         status_before="proposed",
         role_before="untested",
@@ -46,8 +60,8 @@ def _fit_diag(var: int, *, margin: int = 5, near_ties: int = 0) -> FitDiagnostic
         best_score=10,
         second_score=10 - margin,
         margin=margin,
-        best_parents=(),
-        best_func="LOW",
+        best_parents=best_parents,
+        best_func=best_func,
         failure_class="fit_clean",
         probes=((0, 0.05),),
         actuals=(0.0,),
@@ -160,6 +174,7 @@ def test_novelty_churn_revocation_yields_contested() -> None:
 
     assert record.strength == "contested"
     assert record.best_available
+    assert record.authority_state == "repair_candidate"
 
 
 def test_best_available_can_be_weak_or_contested_without_revocation() -> None:
@@ -179,7 +194,7 @@ def test_best_available_can_be_weak_or_contested_without_revocation() -> None:
     assert n.role_for("skip") == before_role
 
 
-def test_assist_increases_monitoring_without_revoking_or_suppressing_skip() -> None:
+def test_contested_once_creates_debt_but_no_monitoring_spam() -> None:
     agent = _agent("assist")
     n = agent.ledger.vars[0]
     n.strong_observations = 1
@@ -191,12 +206,16 @@ def test_assist_increases_monitoring_without_revoking_or_suppressing_skip() -> N
 
     agent._run_authority_strength(1)
 
-    assert agent._authority_strength_budget_bonus.get(0, 0) >= 1
+    metrics = agent.authority_strength_metrics()
+    assert agent._authority_strength_budget_bonus.get(0, 0) == 0
+    assert metrics["authority_debt_created"] > 0
+    assert metrics["monitoring_increases_from_strength_suppressed_by_state"] > 0
+    assert metrics["local_use_preserved"] > 0
     assert n.role_for("skip") == role_before
     assert _operational_snapshot(agent) == before
 
 
-def test_assist_preserves_alternatives_without_replacing_best_fit() -> None:
+def test_persistent_contested_requires_evidence_and_preserves_alternatives() -> None:
     agent = _agent("assist")
     n = agent.ledger.vars[0]
     n.tied_frontier = TiedFrontier(
@@ -210,15 +229,173 @@ def test_assist_preserves_alternatives_without_replacing_best_fit() -> None:
         last_seen_cycle=1,
     )
     agent.fit_diagnostics.clear()
-    agent.fit_diagnostics.append(_fit_diag(0, margin=1, near_ties=2))
+    n.full_audits = 1
+    agent.fit_diagnostics.append(_fit_diag(0, margin=1, near_ties=2, cycle=1))
     agent._run_authority_strength(1)
+    n.full_audits = 2
+    agent.fit_diagnostics.append(
+        _fit_diag(0, margin=1, near_ties=2, cycle=2, best_parents=(1,), best_func="FIRST")
+    )
+    agent._run_authority_strength(2)
 
     before_fit = (n.parents, n.func)
-    agent._collapse_tied_frontier(0, ((), "LOW"), 1)
+    agent._collapse_tied_frontier(0, ((), "LOW"), 2)
 
     assert (n.parents, n.func) == before_fit
     assert n.dormant_alternatives
-    assert agent.authority_strength_metrics()["alternatives_preserved_from_strength"] > 0
+    metrics = agent.authority_strength_metrics()
+    assert metrics["authority_debt_created"] > 0
+    assert metrics["alternatives_preserved_from_strength"] > 0
+
+
+def test_local_use_allowed_for_contested_best_available() -> None:
+    agent = _agent("assist")
+    n = agent.ledger.vars[0]
+    n.strong_observations = 1
+    n.sentinels = []
+    agent.fit_diagnostics.clear()
+    agent.fit_diagnostics.append(_fit_diag(0, margin=1))
+
+    agent._run_authority_strength(1)
+    debt = next(
+        debt for debt in agent._authority_state_controller.debts.values()
+        if debt.var == 0
+    )
+
+    assert debt.current_state == "contested_best_available"
+    assert debt.local_use_allowed
+    assert debt.derivation_allowed
+
+
+def test_open_novelty_and_churn_quarantines_derivation() -> None:
+    agent = _agent("assist")
+    n = agent.ledger.vars[0]
+    n.strong_observations = 3
+    n.sentinels = [(1, 0.05)]
+    agent.fit_diagnostics.clear()
+    n.full_audits = 1
+    agent.fit_diagnostics.append(_fit_diag(0, margin=1, near_ties=2, cycle=1))
+    agent.ledger.propose_novelty(1, 0, "vocabulary", "test", ["test"])
+    agent._run_authority_strength(1)
+    n.full_audits = 2
+    agent.fit_diagnostics.append(
+        _fit_diag(
+            0,
+            margin=1,
+            near_ties=2,
+            cycle=2,
+            best_parents=(1,),
+            best_func="FIRST",
+        )
+    )
+
+    agent._run_authority_strength(2)
+    debt = next(
+        debt for debt in agent._authority_state_controller.debts.values()
+        if debt.var == 0
+    )
+
+    assert debt.current_state == "quarantined_for_derivation"
+    assert debt.local_use_allowed
+    assert not debt.derivation_allowed
+    assert not agent._authority_strength_derivation_allowed(0)
+
+
+def test_sentinel_failure_promotes_repair_candidate_with_bounded_hint() -> None:
+    agent = _agent("assist")
+    n = agent.ledger.vars[0]
+    n.strong_observations = 3
+    n.sentinels = [(1, 0.05)]
+    n.consecutive_sentinel_failures = 1
+    agent.fit_diagnostics.clear()
+    agent.fit_diagnostics.append(_fit_diag(0, margin=5, near_ties=2))
+
+    agent._run_authority_strength(1)
+    metrics = agent.authority_strength_metrics()
+
+    assert agent._authority_strength_budget_bonus.get(0, 0) == 1
+    assert 0 in agent._authority_strength_repair_priority_vars
+    assert metrics["repair_candidates"] > 0
+    assert metrics["bounded_repairs_applied"] > 0
+
+
+def test_cooldown_prevents_repeated_per_cycle_hints() -> None:
+    agent = _agent("assist")
+    n = agent.ledger.vars[0]
+    n.strong_observations = 3
+    n.sentinels = [(1, 0.05)]
+    n.consecutive_sentinel_failures = 1
+    agent.fit_diagnostics.clear()
+    agent.fit_diagnostics.append(_fit_diag(0, margin=5, near_ties=2, cycle=1))
+
+    agent._run_authority_strength(1)
+    first = agent.authority_strength_metrics()["bounded_repairs_applied"]
+    agent._run_authority_strength(2)
+    second_metrics = agent.authority_strength_metrics()
+
+    assert second_metrics["bounded_repairs_applied"] == first
+    assert second_metrics["repair_priority_bumps_from_strength_suppressed_by_cooldown"] > 0
+
+
+def test_debt_can_be_paid_down_by_stable_evidence() -> None:
+    agent = _agent("assist")
+    n = agent.ledger.vars[0]
+    n.strong_observations = 1
+    n.sentinels = []
+    n.full_audits = 1
+    agent.fit_diagnostics.clear()
+    agent.fit_diagnostics.append(_fit_diag(0, margin=1, cycle=1))
+    agent._run_authority_strength(1)
+
+    n.strong_observations = 4
+    n.sentinels = [(1, 0.05)]
+    n.full_audits = 2
+    agent.fit_diagnostics.append(_fit_diag(0, margin=6, cycle=2))
+    agent._run_authority_strength(2)
+    metrics = agent.authority_strength_metrics()
+
+    assert metrics["authority_debt_paid"] > 0
+
+
+def test_legacy_controller_reproduces_pressure_for_comparison() -> None:
+    agent = _agent("assist", controller="legacy")
+    n = agent.ledger.vars[0]
+    n.strong_observations = 1
+    n.sentinels = []
+    agent.fit_diagnostics.clear()
+    agent.fit_diagnostics.append(_fit_diag(0, margin=1))
+
+    agent._run_authority_strength(1)
+
+    assert agent._authority_strength_budget_bonus.get(0, 0) >= 1
+
+
+def test_state_controller_does_not_issue_revoke_suppress_skip_or_replace_fit() -> None:
+    agent = _agent("assist")
+    n = agent.ledger.vars[0]
+    n.parents = (1,)
+    n.func = "FIRST"
+    n.strong_observations = 3
+    n.sentinels = [(1, 0.05)]
+    n.consecutive_sentinel_failures = 1
+    before_fit = (n.parents, n.func)
+    before_role = n.role_for("skip")
+    before_certs = {
+        v: (set(agent.ledger.vars[v].certificates), set(agent.ledger.vars[v].route_certs))
+        for v in range(agent.world.visible_count)
+    }
+    agent.fit_diagnostics.clear()
+    agent.fit_diagnostics.append(_fit_diag(0, margin=5, near_ties=2))
+
+    agent._run_authority_strength(1)
+
+    after_certs = {
+        v: (set(agent.ledger.vars[v].certificates), set(agent.ledger.vars[v].route_certs))
+        for v in range(agent.world.visible_count)
+    }
+    assert (n.parents, n.func) == before_fit
+    assert n.role_for("skip") == before_role
+    assert after_certs == before_certs
 
 
 def test_strength_is_context_specific_not_global() -> None:
