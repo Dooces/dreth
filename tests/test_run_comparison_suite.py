@@ -47,10 +47,27 @@ def test_command_construction_for_authority_strength_suite(tmp_path: Path) -> No
     args = _args(tmp_path)
     jobs = suite.build_authority_strength_jobs(args)
 
-    assert [job.label for job in jobs] == ["off", "record", "assist"]
-    for job, mode in zip(jobs, ["off", "record", "assist"]):
+    assert [job.label for job in jobs] == [
+        "off",
+        "record",
+        "assist",
+        "assist_quarantine_persistent",
+        "assist_quarantine_repair_only",
+        "assist_legacy",
+    ]
+    expected = [
+        ("off", "state", "off"),
+        ("record", "state", "off"),
+        ("assist", "state", "shadow"),
+        ("assist", "state", "quarantine_persistent"),
+        ("assist", "state", "quarantine_repair_only"),
+        ("assist", "legacy", "off"),
+    ]
+    for job, (mode, controller, policy) in zip(jobs, expected):
         assert job.command[:2] == [sys.executable, str(suite.SCRIPTS / "batch_run.py")]
         assert job.command[job.command.index("--authority-strength") + 1] == mode
+        assert job.command[job.command.index("--authority-strength-controller") + 1] == controller
+        assert job.command[job.command.index("--authority-derivation-policy") + 1] == policy
         assert "--challenge-blind" in job.command
         assert "--repair-agenda" in job.command
         assert job.command[job.command.index("--vars") + 1] == "100"
@@ -66,6 +83,10 @@ def test_output_filenames_are_deterministic(tmp_path: Path) -> None:
     assert paths["record"]["jsonl"].name == "authority_strength_compare_record.jsonl"
     assert paths["assist"]["log"].name == "authority_strength_compare_assist.log"
     assert (
+        paths["assist_quarantine_repair_only"]["jsonl"].name
+        == "authority_strength_compare_assist_quarantine_repair_only.jsonl"
+    )
+    assert (
         suite.summary_output_path(
             str(tmp_path / "reports" / "authority_strength_compare"),
             "record",
@@ -80,7 +101,7 @@ def test_summaries_are_invoked_after_runs(tmp_path: Path, monkeypatch) -> None:
     phases: list[str] = []
 
     def fake_run(jobs, *, max_workers, sequential=False, terminal=None, popen_factory=None):
-        if jobs and jobs[0].label in {"off", "record", "assist"}:
+        if jobs and jobs[0].label in set(suite.AUTHORITY_STRENGTH_MODES):
             phases.append("batch")
             for mode_paths in suite.suite_paths(args.out_prefix).values():
                 mode_paths["jsonl"].parent.mkdir(parents=True, exist_ok=True)
@@ -329,7 +350,7 @@ def test_final_comparison_waits_for_all_summaries(tmp_path: Path, monkeypatch) -
         return 0
 
     def fake_write(out_prefix):
-        assert len(seen_summary_outputs) == 8
+        assert len(seen_summary_outputs) == 20
         path = Path(out_prefix).with_name(f"{Path(out_prefix).name}_comparison.txt")
         path.write_text("Decision Block\nWARN: hidden truth is offline interpretation only\n")
         return path, path.read_text()

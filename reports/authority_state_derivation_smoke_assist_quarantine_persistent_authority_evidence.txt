@@ -1,0 +1,68 @@
+A. External mismatch under authority:
+  cases=3
+  cases:
+    seed  var relation             class                          strong sent  rev drift margin
+      42    0 weak_noisy           weakly_supported_surrogate          4    7    0     1      1
+      42    2 symbolic             weakly_supported_surrogate          1    5    0     0     30
+      42    3 proxy_confounded     weakly_supported_surrogate          2    5    0     0     22
+
+B. Evidence support level:
+  evidence_supported_surrogate          0
+  weakly_supported_surrogate            3
+  contradicted_authority                0
+  insufficient_evidence                 0
+  unknown                               0
+
+C. Best-available surrogate candidates:
+  Hidden mismatch with stable residual/probe evidence and no visible better alternative is reported as a surrogate, not a failure.
+  candidates:
+  (none)
+
+D. Serious authority/evidence mismatch candidates:
+  These are evidence-relative candidates: repeated stress/revocation/novelty or low observations while strong authority persisted.
+  candidates:
+  (none)
+
+E. Warning:
+  Hidden truth is used only for offline interpretation. Dreth must be judged by what was available to it.
+
+F. Shadow authority throttle (mode: conservative):
+  Offline estimate only. No effect on runtime behavior, skip logic,
+  cert issuance, revocation, fit, sentinels, or route certs.
+  external_mismatch_cases:                            3
+  would_throttle:                                     0
+  would_not_throttle:                                 3
+  throttled_contradicted_authority:                   0
+  throttled_insufficient_evidence:                    0
+  unthrottled_supported_surrogate:                    0
+  unthrottled_weak_surrogate:                         3
+  estimated_mismatch_cases_avoided:                   0
+  estimated_supported_surrogates_preserved:           0
+
+G. Visible evidence trigger breakdown (3 cases):
+  Offline accounting only. Trigger flags are derived from agent-visible
+  evidence fields only; hidden-world fields are not read.
+
+  Overall:
+    recent_revocations_trigger:                      0
+    recent_detected_drift_trigger:                   0
+    consecutive_sentinel_failure_trigger:            0
+    open_novelty_trigger:                            0
+    passive_stress_trigger:                          0
+    low_strong_observations_trigger:                 0
+    low_sentinel_count_trigger:                      0
+    low_fit_history_trigger:                         0
+    low_margin_trigger:                              0
+    alternatives_or_ties_trigger:                    1
+
+  By relation_type  (rev=revocations drift=drift_detect sent=sentinel_fail novl=open_novelty
+    strs=passive_stress l_ob=low_obs l_sn=low_sent l_ft=low_fit l_mg=low_margin alts=alts_ties):
+    relation_type              rev drift  sent  novl  strs  l_ob  l_sn  l_ft  l_mg  alts
+    weak_noisy                   0     0     0     0     0     0     0     0     0     1
+
+  By throttle reason (mode: conservative):
+    no_throttle (3 cases): alts=1
+
+  Top 1 cases with active triggers:
+      seed  var relation               reason                    triggers
+        42    0 weak_noisy             no_throttle               alternatives_or_ties_trigger

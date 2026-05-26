@@ -16,7 +16,15 @@ from typing import Any, Iterable, TextIO
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
-AUTHORITY_STRENGTH_MODES = ("off", "record", "assist")
+AUTHORITY_STRENGTH_JOBS = (
+    ("off", "off", "state", "off"),
+    ("record", "record", "state", "off"),
+    ("assist", "assist", "state", "shadow"),
+    ("assist_quarantine_persistent", "assist", "state", "quarantine_persistent"),
+    ("assist_quarantine_repair_only", "assist", "state", "quarantine_repair_only"),
+    ("assist_legacy", "assist", "legacy", "off"),
+)
+AUTHORITY_STRENGTH_MODES = tuple(label for label, _, _, _ in AUTHORITY_STRENGTH_JOBS)
 SUMMARY_SPECS = (
     ("authority_strength", "summarize_authority_strength.py", "authority_strength_summary"),
     ("context_role", "summarize_context_role_index.py", "context_role_summary"),
@@ -138,17 +146,21 @@ def build_authority_strength_jobs(args: argparse.Namespace) -> list[CommandJob]:
     paths = suite_paths(args.out_prefix)
     common = batch_passthrough_args(args)
     jobs = []
-    for mode in AUTHORITY_STRENGTH_MODES:
+    for label, mode, controller, policy in AUTHORITY_STRENGTH_JOBS:
         command = [
             sys.executable,
             str(SCRIPTS / "batch_run.py"),
             *common,
             "--authority-strength",
             mode,
+            "--authority-strength-controller",
+            controller,
+            "--authority-derivation-policy",
+            policy,
             "--out",
-            str(paths[mode]["jsonl"]),
+            str(paths[label]["jsonl"]),
         ]
-        jobs.append(CommandJob(mode, command, paths[mode]["log"]))
+        jobs.append(CommandJob(label, command, paths[label]["log"]))
     return jobs
 
 
@@ -160,7 +172,9 @@ def summary_output_path(out_prefix: str, mode: str, suffix: str) -> Path:
 def build_summary_jobs(out_prefix: str) -> list[CommandJob]:
     paths = suite_paths(out_prefix)
     jobs: list[CommandJob] = []
-    for mode in ("record", "assist"):
+    for mode in AUTHORITY_STRENGTH_MODES:
+        if mode == "off":
+            continue
         jsonl = paths[mode]["jsonl"]
         for summary_name, script_name, suffix in SUMMARY_SPECS:
             output_path = summary_output_path(out_prefix, mode, suffix)
@@ -465,7 +479,9 @@ def collect_mode_metrics(out_prefix: str) -> dict[str, dict[str, Any]]:
         evidence = evidence_metrics_from_jsonl(mode_paths["jsonl"])
         metrics.update(evidence)
         result[mode] = metrics
-    for mode in ("record", "assist"):
+    for mode in AUTHORITY_STRENGTH_MODES:
+        if mode == "off":
+            continue
         auth_path = summary_output_path(out_prefix, mode, "authority_strength_summary")
         evidence_path = summary_output_path(out_prefix, mode, "authority_evidence")
         if auth_path.exists():
@@ -566,7 +582,9 @@ def render_comparison(metrics: dict[str, dict[str, Any]]) -> str:
         lines.append(f"  {mode}: " + " ".join(bits))
 
     lines.extend(["", "Authority Strength Summaries"])
-    for mode in ("record", "assist"):
+    for mode in AUTHORITY_STRENGTH_MODES:
+        if mode == "off":
+            continue
         summary = metrics.get(mode, {}).get("authority_strength_summary", {})
         lines.append(
             f"  {mode}: "

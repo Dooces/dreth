@@ -43,10 +43,26 @@ def _sum_int(rows: Iterable[dict[str, Any]], field: str) -> int:
     return sum(int(row.get(field) or 0) for row in rows)
 
 
+def _mean_float(rows: Iterable[dict[str, Any]], field: str) -> float:
+    values = [float(row.get(field) or 0.0) for row in rows if row.get(field) is not None]
+    return sum(values) / len(values) if values else 0.0
+
+
 def _counter_field(rows: Iterable[dict[str, Any]], field: str) -> Counter[str]:
     out: Counter[str] = Counter()
     for row in rows:
         value = row.get(field) or {}
+        if isinstance(value, dict):
+            out.update({str(k): int(v) for k, v in value.items()})
+    return out
+
+
+def _controller_counter(rows: Iterable[dict[str, Any]], field: str) -> Counter[str]:
+    out = _counter_field(rows, field)
+    for row in rows:
+        payload = row.get("authority_strength") or {}
+        controller = payload.get("controller") or {}
+        value = controller.get(field) or {}
         if isinstance(value, dict):
             out.update({str(k): int(v) for k, v in value.items()})
     return out
@@ -103,19 +119,19 @@ def print_report(rows: list[dict[str, Any]], out: TextIO) -> None:
 
     modes = Counter(str(row.get("authority_strength_mode") or "off") for row in rows)
     controllers = Counter(str(row.get("authority_strength_controller") or "state") for row in rows)
+    policies = Counter(str(row.get("authority_derivation_policy") or "off") for row in rows)
 
     print("Authority Strength Report", file=out)
     print("Warning: visible-evidence state, not truth.", file=out)
     print(file=out)
 
-    print("A. strength distribution", file=out)
+    print("A. state distribution", file=out)
     print(f"  runs: {len(rows)}", file=out)
     print(f"  exported_records: {len(records)}", file=out)
+    print("  strength:", file=out)
     for strength in ("strong", "usable", "weak", "contested", "insufficient"):
-        print(f"  {strength}: {strength_counts.get(strength, 0)}", file=out)
-    print(file=out)
-
-    print("B. authority state distribution", file=out)
+        print(f"    {strength}: {strength_counts.get(strength, 0)}", file=out)
+    print("  authority_state:", file=out)
     for state in (
         "strong",
         "usable",
@@ -124,21 +140,92 @@ def print_report(rows: list[dict[str, Any]], out: TextIO) -> None:
         "repair_candidate",
         "insufficient",
     ):
-        print(f"  {state}: {state_counts.get(state, 0)}", file=out)
+        print(f"    {state}: {state_counts.get(state, 0)}", file=out)
     print(file=out)
 
-    print("C. debt created / paid / outstanding", file=out)
+    print("B. debt lifecycle", file=out)
     print(f"  authority_debt_created={_sum_int(rows, 'authority_debt_created')}", file=out)
+    print(f"  authority_debt_persisted={_sum_int(rows, 'authority_debt_persisted')}", file=out)
     print(f"  authority_debt_paid={_sum_int(rows, 'authority_debt_paid')}", file=out)
+    print(f"  authority_debt_escalated={_sum_int(rows, 'authority_debt_escalated')}", file=out)
+    print(f"  authority_debt_deescalated={_sum_int(rows, 'authority_debt_deescalated')}", file=out)
     print(f"  authority_debt_outstanding={_sum_int(rows, 'authority_debt_outstanding')}", file=out)
+    print(f"  debt_age_mean={_mean_float(rows, 'debt_age_mean'):.3f}", file=out)
+    print(f"  debt_age_max={max((int(row.get('debt_age_max') or 0) for row in rows), default=0)}", file=out)
     print(f"  future_evidence_requirements={_sum_int(rows, 'future_evidence_requirements')}", file=out)
     print(file=out)
 
-    print("D. derivation quarantines", file=out)
+    print("C. derivation gate checks allowed/blocked", file=out)
     print(f"  derivation_quarantines={_sum_int(rows, 'derivation_quarantines')}", file=out)
+    print(f"  derivation_gate_checks={_sum_int(rows, 'derivation_gate_checks')}", file=out)
+    print(f"  derivation_gate_allowed={_sum_int(rows, 'derivation_gate_allowed')}", file=out)
+    print(f"  derivation_gate_blocked={_sum_int(rows, 'derivation_gate_blocked')}", file=out)
+    print(f"  derivation_gate_would_block={_sum_int(rows, 'derivation_gate_would_block')}", file=out)
+    print(f"  derivation_gate_shadow_would_block={_sum_int(rows, 'derivation_gate_shadow_would_block')}", file=out)
     print(file=out)
 
-    print("E. local-use-preserved counts", file=out)
+    print("D. blocked handle kinds", file=out)
+    handle_counts = _counter_field(rows, "derivation_gate_blocked_by_handle_kind")
+    state_block_counts = _counter_field(rows, "derivation_gate_blocked_by_state")
+    reason_block_counts = _counter_field(rows, "derivation_gate_blocked_by_reason")
+    print("  by_handle_kind:", file=out)
+    if handle_counts:
+        for key, count in handle_counts.most_common():
+            print(f"    {key}: {count}", file=out)
+    else:
+        print("    none", file=out)
+    print("  by_state:", file=out)
+    if state_block_counts:
+        for key, count in state_block_counts.most_common():
+            print(f"    {key}: {count}", file=out)
+    else:
+        print("    none", file=out)
+    print("  by_reason:", file=out)
+    if reason_block_counts:
+        for key, count in reason_block_counts.most_common():
+            print(f"    {key}: {count}", file=out)
+    else:
+        print("    none", file=out)
+    print(file=out)
+
+    print("E. transitions", file=out)
+    transition_edges = _controller_counter(rows, "authority_state_transitions_by_edge")
+    transition_reasons = _controller_counter(rows, "authority_state_transitions_by_reason")
+    transition_paid = _controller_counter(rows, "authority_state_transitions_later_paid_down")
+    print(f"  authority_state_transitions={_sum_int(rows, 'authority_state_transitions')}", file=out)
+    print(
+        "  transitions_to_derivation_quarantine="
+        f"{sum(int(((row.get('authority_strength') or {}).get('controller') or {}).get('authority_state_transitions_to_derivation_quarantine') or 0) for row in rows)}",
+        file=out,
+    )
+    print("  by_previous_next:", file=out)
+    if transition_edges:
+        for key, count in transition_edges.most_common():
+            print(f"    {key}: {count}", file=out)
+    else:
+        print("    none", file=out)
+    print("  by_reason:", file=out)
+    if transition_reasons:
+        for key, count in transition_reasons.most_common():
+            print(f"    {key}: {count}", file=out)
+    else:
+        print("    none", file=out)
+    print("  later_paid_down:", file=out)
+    if transition_paid:
+        for key, count in transition_paid.most_common():
+            print(f"    {key}: {count}", file=out)
+    else:
+        print("    none", file=out)
+    print(file=out)
+
+    print("F. applied vs suppressed effects", file=out)
+    print(f"  authority_action_candidates={_sum_int(rows, 'authority_action_candidates')}", file=out)
+    print(f"  authority_actions_applied={_sum_int(rows, 'authority_actions_applied')}", file=out)
+    print(f"  authority_noop_state_not_permit={_sum_int(rows, 'authority_noop_state_not_permit')}", file=out)
+    print(f"  authority_suppressed_cooldown={_sum_int(rows, 'authority_suppressed_cooldown')}", file=out)
+    print(f"  authority_suppressed_budget={_sum_int(rows, 'authority_suppressed_budget')}", file=out)
+    print(f"  authority_suppressed_local_use_only={_sum_int(rows, 'authority_suppressed_local_use_only')}", file=out)
+    print(f"  authority_suppressed_derivation_only={_sum_int(rows, 'authority_suppressed_derivation_only')}", file=out)
     print(f"  local_use_preserved={_sum_int(rows, 'local_use_preserved')}", file=out)
     if records:
         print("  best_available by strength:", file=out)
@@ -149,7 +236,7 @@ def print_report(rows: list[dict[str, Any]], out: TextIO) -> None:
         print(f"  contested_best_available={_sum_int(rows, 'contested_best_available')}", file=out)
     print(file=out)
 
-    print("F. bounded runtime effects applied", file=out)
+    print("  bounded runtime effects applied:", file=out)
     print(
         f"  monitoring_increases_from_strength_applied="
         f"{_sum_int(rows, 'monitoring_increases_from_strength_applied')}",
@@ -167,9 +254,7 @@ def print_report(rows: list[dict[str, Any]], out: TextIO) -> None:
         f"{_sum_int(rows, 'alternatives_preserved_from_strength')}",
         file=out,
     )
-    print(file=out)
-
-    print("G. suppressed candidate effects", file=out)
+    print("  suppressed candidate effects:", file=out)
     for prefix in (
         "monitoring_increases_from_strength",
         "repair_priority_bumps_from_strength",
@@ -181,7 +266,65 @@ def print_report(rows: list[dict[str, Any]], out: TextIO) -> None:
         print(f"  {prefix}_noops={_sum_int(rows, prefix + '_noops')}", file=out)
     print(file=out)
 
-    print("H. transition examples", file=out)
+    print("G. off/record/state comparison", file=out)
+    print("  modes: " + " ".join(f"{k}={v}" for k, v in sorted(modes.items())), file=out)
+    print(
+        "  controllers: "
+        + " ".join(f"{k}={v}" for k, v in sorted(controllers.items())),
+        file=out,
+    )
+    print(
+        "  derivation_policies: "
+        + " ".join(f"{k}={v}" for k, v in sorted(policies.items())),
+        file=out,
+    )
+    grouped: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        grouped[(
+            str(row.get("authority_strength_mode") or "off"),
+            str(row.get("authority_strength_controller") or "state"),
+            str(row.get("authority_derivation_policy") or "off"),
+        )].append(row)
+    for key, group in sorted(grouped.items()):
+        mode, controller, policy = key
+        print(
+            f"  {mode}/{controller}/{policy}: "
+            f"quality_cost_mean={_mean_float(group, 'quality_cost'):.3f} "
+            f"iv_mean={_mean_float(group, 'iv'):.3f} "
+            f"full_audits_mean={_mean_float(group, 'full_audits'):.3f} "
+            f"blocked={_sum_int(group, 'derivation_gate_blocked')} "
+            f"would_block={_sum_int(group, 'derivation_gate_would_block')}",
+            file=out,
+        )
+    print(file=out)
+
+    print("H. warning when derivation gating worsens amortization", file=out)
+    off_rows = grouped.get(("off", "state", "off"), []) or [
+        row for row in rows if str(row.get("authority_strength_mode") or "off") == "off"
+    ]
+    warnings: list[str] = []
+    if off_rows:
+        off_quality = _mean_float(off_rows, "quality_cost")
+        off_iv = _mean_float(off_rows, "iv")
+        off_audits = _mean_float(off_rows, "full_audits")
+        for key, group in sorted(grouped.items()):
+            if key[0] != "assist" or _sum_int(group, "derivation_gate_blocked") <= 0:
+                continue
+            worse = (
+                _mean_float(group, "quality_cost") > off_quality
+                or _mean_float(group, "iv") > off_iv
+                or _mean_float(group, "full_audits") > off_audits
+            )
+            if worse:
+                warnings.append("/".join(key))
+    if warnings:
+        for warning in warnings:
+            print(f"  WARN: derivation gating worsened amortization for {warning}", file=out)
+    else:
+        print("  none", file=out)
+    print(file=out)
+
+    print("Supplement. transition examples", file=out)
     transitions: list[dict[str, Any]] = []
     for row in rows:
         payload = row.get("authority_strength") or {}
@@ -193,7 +336,7 @@ def print_report(rows: list[dict[str, Any]], out: TextIO) -> None:
         for item in transitions[:10]:
             print(
                 f"  x{item.get('var')}: {item.get('previous_state')} -> "
-                f"{item.get('current_state')} c{item.get('cycle')} "
+                f"{item.get('next_state') or item.get('current_state')} c{item.get('cycle')} "
                 f"{','.join(item.get('reasons') or ())}",
                 file=out,
             )
@@ -201,16 +344,7 @@ def print_report(rows: list[dict[str, Any]], out: TextIO) -> None:
         print("  none", file=out)
     print(file=out)
 
-    print("I. off/record/assist comparison", file=out)
-    print("  modes: " + " ".join(f"{k}={v}" for k, v in sorted(modes.items())), file=out)
-    print(
-        "  controllers: "
-        + " ".join(f"{k}={v}" for k, v in sorted(controllers.items())),
-        file=out,
-    )
-    print(file=out)
-
-    print("J. warning: visible-evidence state, not truth", file=out)
+    print("Supplement. warning: visible-evidence state, not truth", file=out)
     print("  No cert issuance, revocation, skip suppression, or fit replacement is implied.", file=out)
     print(file=out)
 

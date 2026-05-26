@@ -29,6 +29,13 @@ AuthorityState = Literal[
     "insufficient",
 ]
 
+AuthorityDerivationPolicy = Literal[
+    "off",
+    "quarantine_persistent",
+    "quarantine_repair_only",
+    "shadow",
+]
+
 
 @dataclass(frozen=True)
 class AuthorityStrengthRecord:
@@ -54,6 +61,7 @@ class AuthorityDebt:
     context_key: str
     current_state: AuthorityState
     active_reasons: tuple[str, ...] = ()
+    first_seen_cycle: int = 0
     persistence_count: int = 0
     last_seen_cycle: int = 0
     last_action_cycle: int = -1_000_000
@@ -61,6 +69,7 @@ class AuthorityDebt:
     evidence_paid: int = 0
     debt_score: int = 0
     derivation_allowed: bool = True
+    derivation_would_block: bool = False
     local_use_allowed: bool = True
     repair_attention_allowed: bool = False
     last_evidence_epoch: int = -1
@@ -73,8 +82,26 @@ class AuthorityStateTransition:
     cycle: int
     previous_state: AuthorityState
     current_state: AuthorityState
+    next_state: AuthorityState
+    reason: str = ""
     reasons: tuple[str, ...] = ()
     action: str = "state_update"
+
+
+@dataclass(frozen=True)
+class DerivationGateAttribution:
+    var: int
+    context_key: str
+    authority_state: AuthorityState
+    debt_score: int
+    active_reasons: tuple[str, ...]
+    blocked_handle_kind: str
+    blocked_target: str
+    cycle: int
+    local_use_allowed: bool
+    derivation_allowed: bool
+    derivation_would_block: bool
+    authority_derivation_policy: AuthorityDerivationPolicy
 
 
 @dataclass(frozen=True)
@@ -197,10 +224,7 @@ def _context_key(var: int, visible: int, parents: tuple[int, ...]) -> str:
 
 def _authority_flags(state: AuthorityState) -> tuple[bool, bool, bool]:
     local_use_allowed = state != "insufficient"
-    derivation_allowed = state not in {
-        "quarantined_for_derivation",
-        "insufficient",
-    }
+    derivation_allowed = state != "quarantined_for_derivation"
     repair_attention_allowed = state == "repair_candidate"
     return derivation_allowed, local_use_allowed, repair_attention_allowed
 
@@ -236,13 +260,31 @@ class AuthorityStateController:
         repair_budget_per_cycle: int = 2,
         preserve_budget_per_cycle: int = 3,
         cooldown_cycles: int = 50,
+        derivation_policy: AuthorityDerivationPolicy = "shadow",
+        attribution_limit: int = 1000,
     ) -> None:
+        if derivation_policy not in {
+            "off",
+            "quarantine_persistent",
+            "quarantine_repair_only",
+            "shadow",
+        }:
+            raise ValueError(
+                "derivation_policy must be off, quarantine_persistent, "
+                "quarantine_repair_only, or shadow"
+            )
         self.monitoring_budget_per_cycle = max(0, int(monitoring_budget_per_cycle))
         self.repair_budget_per_cycle = max(0, int(repair_budget_per_cycle))
         self.preserve_budget_per_cycle = max(0, int(preserve_budget_per_cycle))
         self.cooldown_cycles = max(1, int(cooldown_cycles))
+        self.derivation_policy = derivation_policy
+        self.attribution_limit = max(0, int(attribution_limit))
         self.debts: dict[tuple[int, str], AuthorityDebt] = {}
         self.transitions: list[AuthorityStateTransition] = []
+        self.derivation_gate_attributions: list[DerivationGateAttribution] = []
+        self.derivation_gate_blocked_by_state: Counter[str] = Counter()
+        self.derivation_gate_blocked_by_reason: Counter[str] = Counter()
+        self.derivation_gate_blocked_by_handle_kind: Counter[str] = Counter()
         self.metrics: Counter[str] = Counter()
         self._latest_result = AuthorityControllerResult()
 
@@ -271,6 +313,47 @@ class AuthorityStateController:
             if debt.evidence_required > debt.evidence_paid + 1:
                 return "usable"
         return proposed
+
+    @staticmethod
+    def _reason_keys(reasons: tuple[str, ...]) -> set[str]:
+        return {str(reason).split("=", 1)[0] for reason in reasons}
+
+    def _policy_would_block(
+        self,
+        state: AuthorityState,
+        reasons: tuple[str, ...],
+        policy: AuthorityDerivationPolicy | None = None,
+    ) -> bool:
+        policy = self.derivation_policy if policy is None else policy
+        if policy == "off":
+            return False
+        if policy in {"shadow", "quarantine_persistent"}:
+            return state == "quarantined_for_derivation"
+        if policy == "quarantine_repair_only":
+            keys = self._reason_keys(reasons)
+            return (
+                state == "repair_candidate"
+                or "sentinel_failures" in keys
+                or "recent_revocations" in keys
+            )
+        return False
+
+    def _effective_derivation_allowed(
+        self,
+        state: AuthorityState,
+        reasons: tuple[str, ...],
+    ) -> tuple[bool, bool]:
+        would_block = self._policy_would_block(state, reasons)
+        if self.derivation_policy == "shadow":
+            return True, would_block
+        return not would_block, would_block
+
+    @staticmethod
+    def _debt_outstanding(debt: AuthorityDebt) -> bool:
+        return (
+            debt.current_state not in {"strong", "usable"}
+            or debt.evidence_paid < debt.evidence_required
+        )
 
     def process(
         self,
@@ -317,7 +400,10 @@ class AuthorityStateController:
 
             state = self._next_state(record, previous, persistence)
             reasons = self._reasons(record)
-            derivation_allowed, local_use_allowed, repair_allowed = _authority_flags(state)
+            _, local_use_allowed, repair_allowed = _authority_flags(state)
+            derivation_allowed, derivation_would_block = (
+                self._effective_derivation_allowed(state, reasons)
+            )
             if local_use_allowed and record.best_available:
                 self.metrics["local_use_preserved"] += 1
 
@@ -350,6 +436,9 @@ class AuthorityStateController:
                     self.metrics["authority_debt_paid"] += max(0, evidence_paid - before_paid)
                     if evidence_paid >= evidence_required:
                         state = "strong" if record.strength == "strong" else "usable"
+                        derivation_allowed, derivation_would_block = (
+                            self._effective_derivation_allowed(state, reasons)
+                        )
 
             if state == "quarantined_for_derivation":
                 quarantined_vars.add(record.var)
@@ -363,6 +452,9 @@ class AuthorityStateController:
                 context_key=str(record.context_key),
                 current_state=state,
                 active_reasons=reasons,
+                first_seen_cycle=(
+                    previous.first_seen_cycle if previous is not None else int(cycle)
+                ),
                 persistence_count=persistence,
                 last_seen_cycle=int(cycle),
                 last_action_cycle=(
@@ -372,10 +464,25 @@ class AuthorityStateController:
                 evidence_paid=max(0, int(evidence_paid)),
                 debt_score=_debt_score(state, persistence, evidence_required, evidence_paid),
                 derivation_allowed=derivation_allowed,
+                derivation_would_block=derivation_would_block,
                 local_use_allowed=local_use_allowed,
                 repair_attention_allowed=repair_allowed,
                 last_evidence_epoch=int(record.evidence_epoch),
             )
+
+            previous_outstanding = (
+                previous is not None and self._debt_outstanding(previous)
+            )
+            current_outstanding = self._debt_outstanding(debt)
+            if previous_outstanding and current_outstanding:
+                self.metrics["authority_debt_persisted"] += 1
+            if previous is not None:
+                if debt.debt_score > previous.debt_score:
+                    self.metrics["authority_debt_escalated"] += 1
+                elif debt.debt_score < previous.debt_score:
+                    self.metrics["authority_debt_deescalated"] += 1
+                if previous_outstanding and not current_outstanding:
+                    self.metrics["authority_debt_paid"] += 1
 
             if previous is not None and previous.current_state != state:
                 self.transitions.append(AuthorityStateTransition(
@@ -384,6 +491,8 @@ class AuthorityStateController:
                     cycle=int(cycle),
                     previous_state=previous.current_state,
                     current_state=state,
+                    next_state=state,
+                    reason=",".join(reasons),
                     reasons=reasons,
                 ))
                 self.metrics["authority_state_transitions"] += 1
@@ -393,15 +502,19 @@ class AuthorityStateController:
             wants_repair = record.strength == "contested"
             if wants_monitoring:
                 self.metrics["monitoring_increases_from_strength_candidates"] += 1
+                self.metrics["authority_action_candidates"] += 1
             if wants_repair:
                 self.metrics["repair_priority_bumps_from_strength_candidates"] += 1
+                self.metrics["authority_action_candidates"] += 1
 
             if wants_monitoring and state != "repair_candidate":
                 self.metrics["monitoring_increases_from_strength_suppressed_by_state"] += 1
                 self.metrics["monitoring_hints_suppressed"] += 1
+                self.metrics["authority_noop_state_not_permit"] += 1
             if wants_repair and state != "repair_candidate":
                 self.metrics["repair_priority_bumps_from_strength_suppressed_by_state"] += 1
                 self.metrics["repair_hints_suppressed"] += 1
+                self.metrics["authority_noop_state_not_permit"] += 1
 
             can_act = int(cycle) - debt.last_action_cycle >= self.cooldown_cycles
             acted = False
@@ -410,9 +523,11 @@ class AuthorityStateController:
                     if wants_monitoring:
                         self.metrics["monitoring_increases_from_strength_suppressed_by_cooldown"] += 1
                         self.metrics["monitoring_hints_suppressed"] += 1
+                        self.metrics["authority_suppressed_cooldown"] += 1
                     if wants_repair:
                         self.metrics["repair_priority_bumps_from_strength_suppressed_by_cooldown"] += 1
                         self.metrics["repair_hints_suppressed"] += 1
+                        self.metrics["authority_suppressed_cooldown"] += 1
                 else:
                     if wants_monitoring:
                         if monitoring_budget > 0:
@@ -421,9 +536,11 @@ class AuthorityStateController:
                             acted = True
                             self.metrics["monitoring_increases_from_strength_applied"] += 1
                             self.metrics["monitoring_hints_applied"] += 1
+                            self.metrics["authority_actions_applied"] += 1
                         else:
                             self.metrics["monitoring_increases_from_strength_suppressed_by_budget"] += 1
                             self.metrics["monitoring_hints_suppressed"] += 1
+                            self.metrics["authority_suppressed_budget"] += 1
                     if wants_repair:
                         if repair_budget > 0:
                             repair_vars.add(record.var)
@@ -431,9 +548,11 @@ class AuthorityStateController:
                             acted = True
                             self.metrics["repair_priority_bumps_from_strength_applied"] += 1
                             self.metrics["bounded_repairs_applied"] += 1
+                            self.metrics["authority_actions_applied"] += 1
                         else:
                             self.metrics["repair_priority_bumps_from_strength_suppressed_by_budget"] += 1
                             self.metrics["repair_hints_suppressed"] += 1
+                            self.metrics["authority_suppressed_budget"] += 1
                 if acted:
                     debt.last_action_cycle = int(cycle)
 
@@ -455,14 +574,62 @@ class AuthorityStateController:
         )
         return self._latest_result
 
-    def derivation_allowed(self, var: int, context_key: str | None = None) -> bool:
+    def check_derivation_gate(
+        self,
+        var: int,
+        context_key: str | None = None,
+        *,
+        cycle: int = 0,
+        blocked_handle_kind: str = "unknown",
+        blocked_target: str | None = None,
+    ) -> bool:
+        self.metrics["derivation_gate_checks"] += 1
         matching = [
             debt for (debt_var, debt_context), debt in self.debts.items()
             if debt_var == int(var) and (context_key is None or debt_context == context_key)
         ]
         if not matching:
+            self.metrics["derivation_gate_allowed"] += 1
             return True
-        return all(debt.derivation_allowed for debt in matching)
+        debt = max(matching, key=lambda item: item.debt_score)
+        blocked = any(not item.derivation_allowed for item in matching)
+        would_block = any(item.derivation_would_block for item in matching)
+        allowed = not blocked
+        if allowed:
+            self.metrics["derivation_gate_allowed"] += 1
+        else:
+            self.metrics["derivation_gate_blocked"] += 1
+        if would_block:
+            self.metrics["derivation_gate_would_block"] += 1
+            if self.derivation_policy == "shadow":
+                self.metrics["derivation_gate_shadow_would_block"] += 1
+        if blocked:
+            self.derivation_gate_blocked_by_state[debt.current_state] += 1
+            self.derivation_gate_blocked_by_handle_kind[str(blocked_handle_kind)] += 1
+            for reason in debt.active_reasons:
+                self.derivation_gate_blocked_by_reason[str(reason).split("=", 1)[0]] += 1
+            if debt.local_use_allowed:
+                self.metrics["authority_suppressed_local_use_only"] += 1
+            self.metrics["authority_suppressed_derivation_only"] += 1
+        if (blocked or would_block) and len(self.derivation_gate_attributions) < self.attribution_limit:
+            self.derivation_gate_attributions.append(DerivationGateAttribution(
+                var=int(var),
+                context_key=str(debt.context_key),
+                authority_state=debt.current_state,
+                debt_score=int(debt.debt_score),
+                active_reasons=tuple(debt.active_reasons),
+                blocked_handle_kind=str(blocked_handle_kind),
+                blocked_target=str(blocked_target or ""),
+                cycle=int(cycle),
+                local_use_allowed=bool(debt.local_use_allowed),
+                derivation_allowed=bool(allowed),
+                derivation_would_block=bool(would_block),
+                authority_derivation_policy=self.derivation_policy,
+            ))
+        return allowed
+
+    def derivation_allowed(self, var: int, context_key: str | None = None) -> bool:
+        return self.check_derivation_gate(var, context_key)
 
     def summary(self) -> dict[str, Any]:
         state_counts = Counter(debt.current_state for debt in self.debts.values())
@@ -471,19 +638,77 @@ class AuthorityStateController:
             if debt.current_state not in {"strong", "usable"}
             or debt.evidence_paid < debt.evidence_required
         )
+        debt_ages = [
+            max(0, int(debt.last_seen_cycle) - int(debt.first_seen_cycle) + 1)
+            for debt in self.debts.values()
+            if self._debt_outstanding(debt)
+        ]
+        transitions_by_edge = Counter(
+            f"{item.previous_state}->{item.next_state}" for item in self.transitions
+        )
+        transitions_by_reason: Counter[str] = Counter()
+        for item in self.transitions:
+            for reason in item.reasons:
+                transitions_by_reason[str(reason).split("=", 1)[0]] += 1
+        paid_down_keys = {
+            (debt.var, debt.context_key)
+            for debt in self.debts.values()
+            if not self._debt_outstanding(debt)
+        }
+        transitions_later_paid_down = Counter(
+            f"{item.previous_state}->{item.next_state}"
+            for item in self.transitions
+            if (item.var, item.context_key) in paid_down_keys
+        )
         out: dict[str, Any] = {
+            "authority_derivation_policy": self.derivation_policy,
             "authority_state_counts": dict(state_counts),
             "authority_debt_outstanding": outstanding,
+            "debt_age_mean": (
+                sum(debt_ages) / len(debt_ages) if debt_ages else 0.0
+            ),
+            "debt_age_max": max(debt_ages) if debt_ages else 0,
             "authority_debts": [asdict(debt) for debt in self.debts.values()],
             "authority_state_transitions_examples": [
                 asdict(item) for item in self.transitions[-20:]
             ],
+            "authority_state_transitions_by_edge": dict(transitions_by_edge),
+            "authority_state_transitions_by_reason": dict(transitions_by_reason),
+            "authority_state_transitions_to_derivation_quarantine": int(
+                sum(
+                    1 for item in self.transitions
+                    if item.next_state == "quarantined_for_derivation"
+                )
+            ),
+            "authority_state_transitions_later_paid_down": dict(
+                transitions_later_paid_down
+            ),
+            "derivation_gate_attributions": [
+                asdict(item) for item in self.derivation_gate_attributions
+            ],
+            "derivation_gate_blocked_by_state": dict(
+                self.derivation_gate_blocked_by_state
+            ),
+            "derivation_gate_blocked_by_reason": dict(
+                self.derivation_gate_blocked_by_reason
+            ),
+            "derivation_gate_blocked_by_handle_kind": dict(
+                self.derivation_gate_blocked_by_handle_kind
+            ),
         }
         for name in (
             "authority_debt_created",
+            "authority_debt_persisted",
             "authority_debt_paid",
+            "authority_debt_escalated",
+            "authority_debt_deescalated",
             "authority_state_transitions",
             "derivation_quarantines",
+            "derivation_gate_checks",
+            "derivation_gate_allowed",
+            "derivation_gate_blocked",
+            "derivation_gate_would_block",
+            "derivation_gate_shadow_would_block",
             "local_use_preserved",
             "repair_candidates",
             "bounded_repairs_applied",
@@ -491,6 +716,13 @@ class AuthorityStateController:
             "monitoring_hints_suppressed",
             "repair_hints_suppressed",
             "debt_noops",
+            "authority_action_candidates",
+            "authority_actions_applied",
+            "authority_noop_state_not_permit",
+            "authority_suppressed_cooldown",
+            "authority_suppressed_budget",
+            "authority_suppressed_local_use_only",
+            "authority_suppressed_derivation_only",
             "monitoring_increases_from_strength_candidates",
             "monitoring_increases_from_strength_applied",
             "monitoring_increases_from_strength_suppressed_by_state",

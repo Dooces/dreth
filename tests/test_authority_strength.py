@@ -21,6 +21,7 @@ def _agent(
     *,
     repair_agenda: bool = False,
     controller: str = "state",
+    derivation_policy: str | None = None,
 ) -> ChainedAgent:
     world = CausalWorld(5, random.Random(3), noise_sigma=0.0)
     world.visible_count = 5
@@ -34,6 +35,7 @@ def _agent(
         repair_agenda_enabled=repair_agenda,
         authority_strength_mode=mode,
         authority_strength_controller=controller,
+        authority_derivation_policy=derivation_policy,
     )
     agent.initialize()
     return agent
@@ -297,8 +299,101 @@ def test_open_novelty_and_churn_quarantines_derivation() -> None:
 
     assert debt.current_state == "quarantined_for_derivation"
     assert debt.local_use_allowed
-    assert not debt.derivation_allowed
-    assert not agent._authority_strength_derivation_allowed(0)
+    assert debt.derivation_would_block
+    assert debt.derivation_allowed
+    assert agent._authority_strength_derivation_allowed(
+        0,
+        cycle=2,
+        blocked_handle_kind="route",
+        blocked_target="x0",
+    )
+    metrics = agent.authority_strength_metrics()
+    assert metrics["authority_derivation_policy"] == "shadow"
+    assert metrics["derivation_gate_shadow_would_block"] > 0
+    assert metrics["derivation_gate_blocked"] == 0
+
+
+def test_quarantine_persistent_blocks_only_after_persistence_threshold() -> None:
+    agent = _agent("assist", derivation_policy="quarantine_persistent")
+    n = agent.ledger.vars[0]
+    n.strong_observations = 3
+    n.sentinels = [(1, 0.05)]
+    agent.fit_diagnostics.clear()
+    n.full_audits = 1
+    agent.fit_diagnostics.append(_fit_diag(0, margin=1, near_ties=2, cycle=1))
+    agent.ledger.propose_novelty(1, 0, "vocabulary", "test", ["test"])
+    agent._run_authority_strength(1)
+
+    assert agent._authority_strength_derivation_allowed(
+        0,
+        cycle=1,
+        blocked_handle_kind="route",
+        blocked_target="x0",
+    )
+
+    n.full_audits = 2
+    agent.fit_diagnostics.append(
+        _fit_diag(0, margin=1, near_ties=2, cycle=2, best_parents=(1,), best_func="FIRST")
+    )
+    agent._run_authority_strength(2)
+
+    assert not agent._authority_strength_derivation_allowed(
+        0,
+        cycle=2,
+        blocked_handle_kind="route",
+        blocked_target="x0",
+    )
+    metrics = agent.authority_strength_metrics()
+    assert metrics["derivation_gate_blocked"] > 0
+    assert metrics["derivation_gate_blocked_by_handle_kind"]["route"] > 0
+
+
+def test_off_derivation_policy_never_blocks_derivation() -> None:
+    agent = _agent("assist", derivation_policy="off")
+    n = agent.ledger.vars[0]
+    n.strong_observations = 3
+    n.sentinels = [(1, 0.05)]
+    n.full_audits = 1
+    agent.fit_diagnostics.clear()
+    agent.fit_diagnostics.append(_fit_diag(0, margin=1, near_ties=2, cycle=1))
+    agent.ledger.propose_novelty(1, 0, "vocabulary", "test", ["test"])
+    agent._run_authority_strength(1)
+    n.full_audits = 2
+    agent.fit_diagnostics.append(
+        _fit_diag(0, margin=1, near_ties=2, cycle=2, best_parents=(1,), best_func="FIRST")
+    )
+    agent._run_authority_strength(2)
+
+    assert agent._authority_strength_derivation_allowed(
+        0,
+        cycle=2,
+        blocked_handle_kind="route",
+        blocked_target="x0",
+    )
+    metrics = agent.authority_strength_metrics()
+    assert metrics["authority_derivation_policy"] == "off"
+    assert metrics["derivation_gate_blocked"] == 0
+
+
+def test_quarantine_repair_only_blocks_repair_candidate() -> None:
+    agent = _agent("assist", derivation_policy="quarantine_repair_only")
+    n = agent.ledger.vars[0]
+    n.strong_observations = 3
+    n.sentinels = [(1, 0.05)]
+    n.consecutive_sentinel_failures = 1
+    agent.fit_diagnostics.clear()
+    agent.fit_diagnostics.append(_fit_diag(0, margin=5, near_ties=2))
+    agent._run_authority_strength(1)
+
+    assert not agent._authority_strength_derivation_allowed(
+        0,
+        cycle=1,
+        blocked_handle_kind="route",
+        blocked_target="x0",
+    )
+    debt = next(debt for debt in agent._authority_state_controller.debts.values() if debt.var == 0)
+    assert debt.current_state == "repair_candidate"
+    assert debt.local_use_allowed
 
 
 def test_sentinel_failure_promotes_repair_candidate_with_bounded_hint() -> None:

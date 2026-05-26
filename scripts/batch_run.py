@@ -200,6 +200,7 @@ class RunConfig:
     context_role_anchor_policy: str | None = None  # "off" | "strict" | "loose"
     authority_strength: str = "off"  # "off" | "record" | "assist"
     authority_strength_controller: str = "state"  # "legacy" | "state"
+    authority_derivation_policy: str = "shadow"
 
 
 # ── per-run result ─────────────────────────────────────────────────────────────
@@ -462,6 +463,7 @@ class ArchMetrics:
     # Authority-strength metadata metrics.
     authority_strength_mode: str = "off"
     authority_strength_controller: str = "state"
+    authority_derivation_policy: str = "off"
     authority_strength_records: int = 0
     strength_strong: int = 0
     strength_usable: int = 0
@@ -476,10 +478,23 @@ class ArchMetrics:
     future_evidence_requirements: int = 0
     repair_priority_bumps_from_strength: int = 0
     authority_debt_created: int = 0
+    authority_debt_persisted: int = 0
     authority_debt_paid: int = 0
+    authority_debt_escalated: int = 0
+    authority_debt_deescalated: int = 0
     authority_debt_outstanding: int = 0
+    debt_age_mean: float = 0.0
+    debt_age_max: int = 0
     authority_state_transitions: int = 0
     derivation_quarantines: int = 0
+    derivation_gate_checks: int = 0
+    derivation_gate_allowed: int = 0
+    derivation_gate_blocked: int = 0
+    derivation_gate_would_block: int = 0
+    derivation_gate_shadow_would_block: int = 0
+    derivation_gate_blocked_by_state: Dict[str, int] = field(default_factory=dict)
+    derivation_gate_blocked_by_reason: Dict[str, int] = field(default_factory=dict)
+    derivation_gate_blocked_by_handle_kind: Dict[str, int] = field(default_factory=dict)
     local_use_preserved: int = 0
     repair_candidates: int = 0
     bounded_repairs_applied: int = 0
@@ -487,6 +502,13 @@ class ArchMetrics:
     monitoring_hints_suppressed: int = 0
     repair_hints_suppressed: int = 0
     debt_noops: int = 0
+    authority_action_candidates: int = 0
+    authority_actions_applied: int = 0
+    authority_noop_state_not_permit: int = 0
+    authority_suppressed_cooldown: int = 0
+    authority_suppressed_budget: int = 0
+    authority_suppressed_local_use_only: int = 0
+    authority_suppressed_derivation_only: int = 0
     monitoring_increases_from_strength_candidates: int = 0
     monitoring_increases_from_strength_applied: int = 0
     monitoring_increases_from_strength_suppressed_by_state: int = 0
@@ -858,6 +880,7 @@ def _build_and_run_dreth(
         context_role_anchor_policy=cfg.context_role_anchor_policy,
         authority_strength_mode=cfg.authority_strength,
         authority_strength_controller=cfg.authority_strength_controller,
+        authority_derivation_policy=cfg.authority_derivation_policy,
     )
     if cfg.relative_authority_frontier_temporal_report:
         from dreth.relative_authority_frontier import TemporalGraphFrontierEvaluator
@@ -1247,6 +1270,9 @@ def _extract_arch_metrics(agent: ChainedAgent, world: CausalWorld) -> ArchMetric
         m.authority_strength_controller = str(
             _as.get("authority_strength_controller", "state")
         )
+        m.authority_derivation_policy = str(
+            _as.get("authority_derivation_policy", "off")
+        )
         m.authority_strength_records = int(_as.get("authority_strength_records", 0))
         m.strength_strong = int(_as.get("strength_strong", 0))
         m.strength_usable = int(_as.get("strength_usable", 0))
@@ -1268,10 +1294,19 @@ def _extract_arch_metrics(agent: ChainedAgent, world: CausalWorld) -> ArchMetric
         )
         for field_name in (
             "authority_debt_created",
+            "authority_debt_persisted",
             "authority_debt_paid",
+            "authority_debt_escalated",
+            "authority_debt_deescalated",
             "authority_debt_outstanding",
+            "debt_age_max",
             "authority_state_transitions",
             "derivation_quarantines",
+            "derivation_gate_checks",
+            "derivation_gate_allowed",
+            "derivation_gate_blocked",
+            "derivation_gate_would_block",
+            "derivation_gate_shadow_would_block",
             "local_use_preserved",
             "repair_candidates",
             "bounded_repairs_applied",
@@ -1279,6 +1314,13 @@ def _extract_arch_metrics(agent: ChainedAgent, world: CausalWorld) -> ArchMetric
             "monitoring_hints_suppressed",
             "repair_hints_suppressed",
             "debt_noops",
+            "authority_action_candidates",
+            "authority_actions_applied",
+            "authority_noop_state_not_permit",
+            "authority_suppressed_cooldown",
+            "authority_suppressed_budget",
+            "authority_suppressed_local_use_only",
+            "authority_suppressed_derivation_only",
             "monitoring_increases_from_strength_candidates",
             "monitoring_increases_from_strength_applied",
             "monitoring_increases_from_strength_suppressed_by_state",
@@ -1293,6 +1335,16 @@ def _extract_arch_metrics(agent: ChainedAgent, world: CausalWorld) -> ArchMetric
             "repair_priority_bumps_from_strength_noops",
         ):
             setattr(m, field_name, int(_as.get(field_name, 0)))
+        m.debt_age_mean = float(_as.get("debt_age_mean", 0.0))
+        m.derivation_gate_blocked_by_state = dict(
+            _as.get("derivation_gate_blocked_by_state", {})
+        )
+        m.derivation_gate_blocked_by_reason = dict(
+            _as.get("derivation_gate_blocked_by_reason", {})
+        )
+        m.derivation_gate_blocked_by_handle_kind = dict(
+            _as.get("derivation_gate_blocked_by_handle_kind", {})
+        )
         m.authority_strength_counts_by_reason = dict(
             _as.get("authority_strength_counts_by_reason", {})
         )
@@ -2963,6 +3015,18 @@ def main():
                    choices=["legacy", "state"],
                    help=("authority-strength assist controller: state is the "
                          "default; legacy reproduces earlier pressure hints"))
+    p.add_argument("--authority-derivation-policy", default="shadow",
+                   choices=[
+                       "off",
+                       "quarantine_persistent",
+                       "quarantine_repair_only",
+                       "shadow",
+                   ],
+                   help=("authority-state derivation gate policy: off records "
+                         "state/debt without gating; shadow records would-block "
+                         "without blocking; quarantine_persistent blocks only "
+                         "persistent contested quarantines; quarantine_repair_only "
+                         "blocks repair/recent failure cases"))
     p.add_argument("--shadow-residual", default="off",
                    choices=["off", "online"],
                    help="shadow residual mode: off=disabled; online=shadow learned predictor (default: off)")
@@ -3095,7 +3159,8 @@ def main():
                   context_role_index=args.context_role_index or "off",
                   context_role_anchor_policy=args.context_role_anchor_policy,
                   authority_strength=args.authority_strength,
-                  authority_strength_controller=args.authority_strength_controller)
+                  authority_strength_controller=args.authority_strength_controller,
+                  authority_derivation_policy=args.authority_derivation_policy)
         for schedule in schedule_list
         for v in var_list
         for c in cycle_list
@@ -3126,7 +3191,8 @@ def main():
     if args.authority_strength != "off":
         mode += (
             f" +authority-strength({args.authority_strength}/"
-            f"{args.authority_strength_controller})"
+            f"{args.authority_strength_controller}/"
+            f"{args.authority_derivation_policy})"
         )
     if shadow_sweep:
         mode += (f" +shadow-sweep(f={factor_list} ms={ms_list} w={window_list})")
@@ -3330,6 +3396,7 @@ def main():
                     "context_role_index": r.arch.context_role_export,
                     "authority_strength_mode": r.arch.authority_strength_mode,
                     "authority_strength_controller": r.arch.authority_strength_controller,
+                    "authority_derivation_policy": r.arch.authority_derivation_policy,
                     "authority_strength_records": r.arch.authority_strength_records,
                     "strength_strong": r.arch.strength_strong,
                     "strength_usable": r.arch.strength_usable,
@@ -3352,10 +3419,31 @@ def main():
                         r.arch.repair_priority_bumps_from_strength
                     ),
                     "authority_debt_created": r.arch.authority_debt_created,
+                    "authority_debt_persisted": r.arch.authority_debt_persisted,
                     "authority_debt_paid": r.arch.authority_debt_paid,
+                    "authority_debt_escalated": r.arch.authority_debt_escalated,
+                    "authority_debt_deescalated": r.arch.authority_debt_deescalated,
                     "authority_debt_outstanding": r.arch.authority_debt_outstanding,
+                    "debt_age_mean": r.arch.debt_age_mean,
+                    "debt_age_max": r.arch.debt_age_max,
                     "authority_state_transitions": r.arch.authority_state_transitions,
                     "derivation_quarantines": r.arch.derivation_quarantines,
+                    "derivation_gate_checks": r.arch.derivation_gate_checks,
+                    "derivation_gate_allowed": r.arch.derivation_gate_allowed,
+                    "derivation_gate_blocked": r.arch.derivation_gate_blocked,
+                    "derivation_gate_would_block": r.arch.derivation_gate_would_block,
+                    "derivation_gate_shadow_would_block": (
+                        r.arch.derivation_gate_shadow_would_block
+                    ),
+                    "derivation_gate_blocked_by_state": (
+                        r.arch.derivation_gate_blocked_by_state
+                    ),
+                    "derivation_gate_blocked_by_reason": (
+                        r.arch.derivation_gate_blocked_by_reason
+                    ),
+                    "derivation_gate_blocked_by_handle_kind": (
+                        r.arch.derivation_gate_blocked_by_handle_kind
+                    ),
                     "local_use_preserved": r.arch.local_use_preserved,
                     "repair_candidates": r.arch.repair_candidates,
                     "bounded_repairs_applied": r.arch.bounded_repairs_applied,
@@ -3363,6 +3451,23 @@ def main():
                     "monitoring_hints_suppressed": r.arch.monitoring_hints_suppressed,
                     "repair_hints_suppressed": r.arch.repair_hints_suppressed,
                     "debt_noops": r.arch.debt_noops,
+                    "authority_action_candidates": r.arch.authority_action_candidates,
+                    "authority_actions_applied": r.arch.authority_actions_applied,
+                    "authority_noop_state_not_permit": (
+                        r.arch.authority_noop_state_not_permit
+                    ),
+                    "authority_suppressed_cooldown": (
+                        r.arch.authority_suppressed_cooldown
+                    ),
+                    "authority_suppressed_budget": (
+                        r.arch.authority_suppressed_budget
+                    ),
+                    "authority_suppressed_local_use_only": (
+                        r.arch.authority_suppressed_local_use_only
+                    ),
+                    "authority_suppressed_derivation_only": (
+                        r.arch.authority_suppressed_derivation_only
+                    ),
                     "monitoring_increases_from_strength_candidates": (
                         r.arch.monitoring_increases_from_strength_candidates
                     ),

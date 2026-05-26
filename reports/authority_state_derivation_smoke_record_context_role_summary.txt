@@ -1,0 +1,51 @@
+ContextRoleIndex Report
+Warning: nethra nodes are provenance, not truth; roles are context-indexed.
+
+A. Index size
+  runs: 1
+  exported_nodes: 0
+  exported_context_roles: 0
+  runtime_nodes: 0
+  runtime_roles: 0
+
+B. Nethra nodes by kind/source
+  kind: none
+  source: none
+
+C. Context roles by role/context
+  role: none
+
+D. Nethras with multiple roles across contexts
+  none
+
+E. Trass-in-one-context / tareth-in-another examples
+  none
+
+F. Match pressure and anchor admission
+  context_role_index_matches=0
+  context_role_raw_matches=0
+  context_role_deduped_matches=0
+  suppressions: weak=0 duplicate=0 cap=0
+  context_role_matches_used_as_local_anchor=0
+  context_role_assist_feature_hits=0
+  context_role_assist_pressure_per_cycle=0.000000
+  top_match_reasons: none
+
+G. Role transition examples
+  none
+
+H. Post-hoc interpretation
+  Uses manifest relation_type only after index matching/reporting.
+  context_role_anchor_precision_posthoc is report-only; runtime never reads it.
+  none
+
+
+I. Four-way comparison
+  off: quality_cost=39489.000 d=+0.000 iv=1489.000 d=+0.000 audits=29.000 d=+0.000 revocations=1.000 d=+0.000 unique_fails=2.000 d=+0.000 regime_sentinel_fail=0.000 d=+0.000 passive_stress=25.000 d=+0.000 dormant=0.000 d=+0.000 raw_match_pressure=0.000 d=+0.000 anchor_pressure=0.000 d=+0.000 assist_pressure=0.000 d=+0.000
+  record: none
+  assist_feature+loose: none
+  assist_feature+strict: none
+
+J. Warning
+  ContextRoleIndex is provenance and locality memory, not runtime truth.
+  A trass role is not deletion and a tareth role is not global identity.
