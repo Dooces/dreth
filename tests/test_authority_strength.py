@@ -4,6 +4,7 @@ import inspect
 import random
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -211,10 +212,65 @@ def test_contested_once_creates_debt_but_no_monitoring_spam() -> None:
     metrics = agent.authority_strength_metrics()
     assert agent._authority_strength_budget_bonus.get(0, 0) == 0
     assert metrics["authority_debt_created"] > 0
-    assert metrics["monitoring_increases_from_strength_suppressed_by_state"] > 0
+    assert metrics["monitoring_increases_from_strength_candidates"] == 0
+    assert metrics["generic_contested_noop"] > 0
     assert metrics["local_use_preserved"] > 0
     assert n.role_for("skip") == role_before
     assert _operational_snapshot(agent) == before
+
+
+def test_giant_uncertainty_cluster_alone_creates_debt_not_action() -> None:
+    agent = _agent("assist")
+    agent._uncertainty_latest_clusters = [
+        SimpleNamespace(
+            shared_signals=(),
+            is_giant_cluster=True,
+            cluster_size=4,
+            vars=(0, 1, 2, 3),
+        )
+    ]
+    agent.fit_diagnostics.clear()
+
+    agent._run_authority_strength(1)
+    metrics = agent.authority_strength_metrics()
+
+    assert metrics["authority_debt_created"] > 0
+    assert metrics["authority_action_candidates"] == 0
+    assert metrics["authority_actions_applied"] == 0
+    assert metrics["generic_contested_noop"] > 0
+
+
+def test_non_giant_local_uncertainty_cluster_can_trigger_bounded_action() -> None:
+    agent = _agent("assist")
+    agent._uncertainty_latest_clusters = [
+        SimpleNamespace(
+            shared_signals=(),
+            is_giant_cluster=False,
+            cluster_size=2,
+            vars=(0, 1),
+        )
+    ]
+    agent.fit_diagnostics.clear()
+
+    agent._run_authority_strength(1)
+    metrics = agent.authority_strength_metrics()
+
+    assert metrics["action_reason_specificity"]["non_giant_local_uncertainty_cluster"] > 0
+    assert metrics["authority_action_candidates"] > 0
+    assert metrics["monitoring_hints_applied"] > 0
+
+
+def test_regime_sentinel_failure_attribution_for_authority_action() -> None:
+    agent = _agent("assist")
+    agent._last_regime_failed_vars = {0}
+    agent.fit_diagnostics.clear()
+
+    agent._run_authority_strength(1)
+    metrics = agent.authority_strength_metrics()
+
+    assert metrics["action_reason_specificity"]["regime_sentinel_failure"] > 0
+    assert metrics["authority_action_regime_sentinel_failure_attribution"] > 0
+    assert metrics["authority_action_activated_failing_regime_sentinel"] > 0
 
 
 def test_persistent_contested_requires_evidence_and_preserves_alternatives() -> None:

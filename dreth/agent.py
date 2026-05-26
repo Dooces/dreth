@@ -415,6 +415,7 @@ class ChainedAgent:
         self._regime_sentinel_passes = 0
         self._regime_sentinel_fails = 0
         self._regime_no_sentinel = 0
+        self._last_regime_failed_vars: Set[int] = set()
 
         # Sentinel parking counters.
         self._parked_skip_count = 0   # cycles where parked var was skipped
@@ -1237,6 +1238,7 @@ class ChainedAgent:
             "derivation_gate_blocked_by_state": {},
             "derivation_gate_blocked_by_reason": {},
             "derivation_gate_blocked_by_handle_kind": {},
+            "action_reason_specificity": {},
             "local_use_preserved": 0,
             "repair_candidates": 0,
             "bounded_repairs_applied": 0,
@@ -1251,6 +1253,9 @@ class ChainedAgent:
             "authority_suppressed_budget": 0,
             "authority_suppressed_local_use_only": 0,
             "authority_suppressed_derivation_only": 0,
+            "generic_contested_noop": 0,
+            "authority_action_regime_sentinel_failure_attribution": 0,
+            "authority_action_activated_failing_regime_sentinel": 0,
             "monitoring_increases_from_strength_candidates": 0,
             "monitoring_increases_from_strength_applied": 0,
             "monitoring_increases_from_strength_suppressed_by_state": 0,
@@ -3766,6 +3771,7 @@ class ChainedAgent:
         self._regime_sentinel_passes += _rpass
         self._regime_sentinel_fails += _rfail
         self._regime_no_sentinel += _rno
+        self._last_regime_failed_vars = {int(v) for v in _regime_failed_vars}
         self.total_interventions += 2 * (_rpass + _rfail)
         regime_stable = _regime_covered
 

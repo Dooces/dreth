@@ -200,6 +200,13 @@ def _cluster_signals_by_var(agent: Any) -> dict[int, set[str]]:
     return out
 
 
+def _regime_sentinel_failure_vars(agent: Any) -> set[int]:
+    return {
+        int(var)
+        for var in getattr(agent, "_last_regime_failed_vars", set()) or set()
+    }
+
+
 def _open_novelty_vars(agent: Any) -> set[int]:
     ledger = getattr(agent, "ledger", None)
     if ledger is None:
@@ -355,6 +362,34 @@ class AuthorityStateController:
             or debt.evidence_paid < debt.evidence_required
         )
 
+    @staticmethod
+    def _action_reason_specificity(
+        reasons: tuple[str, ...],
+        persistence_count: int,
+    ) -> tuple[str, ...]:
+        keys = {str(reason).split("=", 1)[0] for reason in reasons}
+        out: list[str] = []
+        if "sentinel_failures" in keys:
+            out.append("sentinel_failure")
+        if "recent_revocations" in keys:
+            out.append("recent_revocation")
+        if "repeated_fit_churn" in keys:
+            out.append("repeated_same_var_fit_churn")
+        if "regime_sentinel_failure" in keys:
+            out.append("regime_sentinel_failure")
+        if "uncertainty_cluster" in keys and "uncertainty_giant_cluster" not in keys:
+            out.append("non_giant_local_uncertainty_cluster")
+        if persistence_count >= 2 and keys & {
+            "low_fit_margin",
+            "near_ties",
+            "tied_frontier",
+            "passive_stress",
+            "dormant_alternatives",
+            "open_novelty",
+        }:
+            out.append("repeated_same_context_failure")
+        return tuple(dict.fromkeys(out))
+
     def process(
         self,
         records: list[AuthorityStrengthRecord],
@@ -498,8 +533,16 @@ class AuthorityStateController:
                 self.metrics["authority_state_transitions"] += 1
 
             # Split legacy pressure candidates from bounded controller effects.
-            wants_monitoring = record.strength in {"weak", "contested"}
-            wants_repair = record.strength == "contested"
+            # Generic contested authority only creates debt; attention work needs
+            # a specific local failure signal.
+            specificity = self._action_reason_specificity(reasons, persistence)
+            for item in specificity:
+                self.metrics[f"action_reason_specificity:{item}"] += 1
+            if state == "contested_best_available" and not specificity:
+                self.metrics["generic_contested_noop"] += 1
+
+            wants_monitoring = bool(specificity)
+            wants_repair = bool(specificity) and record.strength == "contested"
             if wants_monitoring:
                 self.metrics["monitoring_increases_from_strength_candidates"] += 1
                 self.metrics["authority_action_candidates"] += 1
@@ -507,18 +550,20 @@ class AuthorityStateController:
                 self.metrics["repair_priority_bumps_from_strength_candidates"] += 1
                 self.metrics["authority_action_candidates"] += 1
 
-            if wants_monitoring and state != "repair_candidate":
+            action_allowed = state == "repair_candidate" or bool(specificity)
+
+            if wants_monitoring and not action_allowed:
                 self.metrics["monitoring_increases_from_strength_suppressed_by_state"] += 1
                 self.metrics["monitoring_hints_suppressed"] += 1
                 self.metrics["authority_noop_state_not_permit"] += 1
-            if wants_repair and state != "repair_candidate":
+            if wants_repair and not action_allowed:
                 self.metrics["repair_priority_bumps_from_strength_suppressed_by_state"] += 1
                 self.metrics["repair_hints_suppressed"] += 1
                 self.metrics["authority_noop_state_not_permit"] += 1
 
             can_act = int(cycle) - debt.last_action_cycle >= self.cooldown_cycles
             acted = False
-            if state == "repair_candidate":
+            if action_allowed:
                 if not can_act:
                     if wants_monitoring:
                         self.metrics["monitoring_increases_from_strength_suppressed_by_cooldown"] += 1
@@ -537,6 +582,9 @@ class AuthorityStateController:
                             self.metrics["monitoring_increases_from_strength_applied"] += 1
                             self.metrics["monitoring_hints_applied"] += 1
                             self.metrics["authority_actions_applied"] += 1
+                            if "regime_sentinel_failure" in specificity:
+                                self.metrics["authority_action_regime_sentinel_failure_attribution"] += 1
+                                self.metrics["authority_action_activated_failing_regime_sentinel"] += 1
                         else:
                             self.metrics["monitoring_increases_from_strength_suppressed_by_budget"] += 1
                             self.metrics["monitoring_hints_suppressed"] += 1
@@ -549,6 +597,9 @@ class AuthorityStateController:
                             self.metrics["repair_priority_bumps_from_strength_applied"] += 1
                             self.metrics["bounded_repairs_applied"] += 1
                             self.metrics["authority_actions_applied"] += 1
+                            if "regime_sentinel_failure" in specificity:
+                                self.metrics["authority_action_regime_sentinel_failure_attribution"] += 1
+                                self.metrics["authority_action_activated_failing_regime_sentinel"] += 1
                         else:
                             self.metrics["repair_priority_bumps_from_strength_suppressed_by_budget"] += 1
                             self.metrics["repair_hints_suppressed"] += 1
@@ -556,9 +607,9 @@ class AuthorityStateController:
                 if acted:
                     debt.last_action_cycle = int(cycle)
 
-            if wants_monitoring and record.var not in monitoring_bonus and state == "repair_candidate":
+            if wants_monitoring and record.var not in monitoring_bonus and action_allowed:
                 self.metrics["monitoring_increases_from_strength_noops"] += int(not acted)
-            if wants_repair and record.var not in repair_vars and state == "repair_candidate":
+            if wants_repair and record.var not in repair_vars and action_allowed:
                 self.metrics["repair_priority_bumps_from_strength_noops"] += int(not acted)
             if not acted:
                 self.metrics["debt_noops"] += 1
@@ -695,6 +746,11 @@ class AuthorityStateController:
             "derivation_gate_blocked_by_handle_kind": dict(
                 self.derivation_gate_blocked_by_handle_kind
             ),
+            "action_reason_specificity": {
+                key.split(":", 1)[1]: int(value)
+                for key, value in self.metrics.items()
+                if key.startswith("action_reason_specificity:")
+            },
         }
         for name in (
             "authority_debt_created",
@@ -723,6 +779,9 @@ class AuthorityStateController:
             "authority_suppressed_budget",
             "authority_suppressed_local_use_only",
             "authority_suppressed_derivation_only",
+            "generic_contested_noop",
+            "authority_action_regime_sentinel_failure_attribution",
+            "authority_action_activated_failing_regime_sentinel",
             "monitoring_increases_from_strength_candidates",
             "monitoring_increases_from_strength_applied",
             "monitoring_increases_from_strength_suppressed_by_state",
@@ -822,6 +881,7 @@ def _classify(
         "repeated_fit_churn",
         "uncertainty_cluster",
         "uncertainty_giant_cluster",
+        "regime_sentinel_failure",
     }
     has_contested_marker = (
         any(item.split("=", 1)[0] in contested_markers for item in contradictory)
@@ -894,6 +954,7 @@ def compute_authority_strength_records(agent: Any, cycle: int) -> list[Authority
     fit_by_var = _latest_fit_by_var(agent)
     novelty_vars = _open_novelty_vars(agent)
     cluster_signals = _cluster_signals_by_var(agent)
+    regime_failed_vars = _regime_sentinel_failure_vars(agent)
     records: list[AuthorityStrengthRecord] = []
 
     for var in range(visible):
@@ -913,6 +974,9 @@ def compute_authority_strength_records(agent: Any, cycle: int) -> list[Authority
         if frontier is not None:
             tie_count = max(tie_count, len(getattr(frontier, "candidates", ()) or ()))
         nid = _var_nethra_id(var, parents, func)
+        var_cluster_signals = set(cluster_signals.get(var, set()))
+        if var in regime_failed_vars:
+            var_cluster_signals.add("regime_sentinel_failure")
         strength, reason, active, contradictory, future = _classify(
             strong_observations=_as_int(getattr(n, "strong_observations", 0)),
             sentinel_count=len(getattr(n, "sentinels", ()) or ()),
@@ -926,7 +990,7 @@ def compute_authority_strength_records(agent: Any, cycle: int) -> list[Authority
             sentinel_failures=_as_int(getattr(n, "consecutive_sentinel_failures", 0)),
             passive_stress=_as_int(getattr(getattr(n, "envelope", None), "out_of_band_count", 0)),
             dormant_alternatives=len(getattr(n, "dormant_alternatives", ()) or ()),
-            cluster_signals=cluster_signals.get(var, set()),
+            cluster_signals=var_cluster_signals,
             best_available=True,
         )
         authority_state = proposed_authority_state(
@@ -948,7 +1012,7 @@ def compute_authority_strength_records(agent: Any, cycle: int) -> list[Authority
             active_evidence=active,
             contradictory_evidence=contradictory,
             required_future_evidence=future,
-            uncertainty_signals=tuple(sorted(cluster_signals.get(var, set()))),
+            uncertainty_signals=tuple(sorted(var_cluster_signals)),
             prior_role=_recent_role_for_nethra(agent, nid),
             best_available=True,
             authority_state=authority_state,

@@ -226,6 +226,24 @@ def print_report(rows: list[dict[str, Any]], out: TextIO) -> None:
     print(f"  authority_suppressed_budget={_sum_int(rows, 'authority_suppressed_budget')}", file=out)
     print(f"  authority_suppressed_local_use_only={_sum_int(rows, 'authority_suppressed_local_use_only')}", file=out)
     print(f"  authority_suppressed_derivation_only={_sum_int(rows, 'authority_suppressed_derivation_only')}", file=out)
+    print(f"  generic_contested_noop={_sum_int(rows, 'generic_contested_noop')}", file=out)
+    print(
+        "  authority_action_regime_sentinel_failure_attribution="
+        f"{_sum_int(rows, 'authority_action_regime_sentinel_failure_attribution')}",
+        file=out,
+    )
+    print(
+        "  authority_action_activated_failing_regime_sentinel="
+        f"{_sum_int(rows, 'authority_action_activated_failing_regime_sentinel')}",
+        file=out,
+    )
+    specificity = _counter_field(rows, "action_reason_specificity")
+    print("  action_reason_specificity:", file=out)
+    if specificity:
+        for key, count in specificity.most_common():
+            print(f"    {key}: {count}", file=out)
+    else:
+        print("    none", file=out)
     print(f"  local_use_preserved={_sum_int(rows, 'local_use_preserved')}", file=out)
     if records:
         print("  best_available by strength:", file=out)

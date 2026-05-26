@@ -514,6 +514,7 @@ class ArchMetrics:
     derivation_gate_blocked_by_state: Dict[str, int] = field(default_factory=dict)
     derivation_gate_blocked_by_reason: Dict[str, int] = field(default_factory=dict)
     derivation_gate_blocked_by_handle_kind: Dict[str, int] = field(default_factory=dict)
+    action_reason_specificity: Dict[str, int] = field(default_factory=dict)
     local_use_preserved: int = 0
     repair_candidates: int = 0
     bounded_repairs_applied: int = 0
@@ -528,6 +529,9 @@ class ArchMetrics:
     authority_suppressed_budget: int = 0
     authority_suppressed_local_use_only: int = 0
     authority_suppressed_derivation_only: int = 0
+    generic_contested_noop: int = 0
+    authority_action_regime_sentinel_failure_attribution: int = 0
+    authority_action_activated_failing_regime_sentinel: int = 0
     monitoring_increases_from_strength_candidates: int = 0
     monitoring_increases_from_strength_applied: int = 0
     monitoring_increases_from_strength_suppressed_by_state: int = 0
@@ -1340,6 +1344,9 @@ def _extract_arch_metrics(agent: ChainedAgent, world: CausalWorld) -> ArchMetric
             "authority_suppressed_budget",
             "authority_suppressed_local_use_only",
             "authority_suppressed_derivation_only",
+            "generic_contested_noop",
+            "authority_action_regime_sentinel_failure_attribution",
+            "authority_action_activated_failing_regime_sentinel",
             "monitoring_increases_from_strength_candidates",
             "monitoring_increases_from_strength_applied",
             "monitoring_increases_from_strength_suppressed_by_state",
@@ -1364,6 +1371,7 @@ def _extract_arch_metrics(agent: ChainedAgent, world: CausalWorld) -> ArchMetric
         m.derivation_gate_blocked_by_handle_kind = dict(
             _as.get("derivation_gate_blocked_by_handle_kind", {})
         )
+        m.action_reason_specificity = dict(_as.get("action_reason_specificity", {}))
         m.authority_strength_counts_by_reason = dict(
             _as.get("authority_strength_counts_by_reason", {})
         )
@@ -3468,6 +3476,7 @@ def main():
                     "derivation_gate_blocked_by_handle_kind": (
                         r.arch.derivation_gate_blocked_by_handle_kind
                     ),
+                    "action_reason_specificity": r.arch.action_reason_specificity,
                     "local_use_preserved": r.arch.local_use_preserved,
                     "repair_candidates": r.arch.repair_candidates,
                     "bounded_repairs_applied": r.arch.bounded_repairs_applied,
@@ -3491,6 +3500,13 @@ def main():
                     ),
                     "authority_suppressed_derivation_only": (
                         r.arch.authority_suppressed_derivation_only
+                    ),
+                    "generic_contested_noop": r.arch.generic_contested_noop,
+                    "authority_action_regime_sentinel_failure_attribution": (
+                        r.arch.authority_action_regime_sentinel_failure_attribution
+                    ),
+                    "authority_action_activated_failing_regime_sentinel": (
+                        r.arch.authority_action_activated_failing_regime_sentinel
                     ),
                     "monitoring_increases_from_strength_candidates": (
                         r.arch.monitoring_increases_from_strength_candidates
