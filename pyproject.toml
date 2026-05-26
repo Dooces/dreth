@@ -52,7 +52,8 @@ exclude = ["tests*", "reports*", "docs*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-python_files = ["test_*.py"]norecursedirs = [".git", ".git-data", ".pytest_cache", "reports", "docs"]
+python_files = ["test_*.py"]
+norecursedirs = [".git", ".git-data", ".pytest_cache", "reports", "docs"]
 addopts = ["-ra"]
 
 [tool.ruff]
