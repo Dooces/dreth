@@ -104,6 +104,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--nethra-reservoir", dest="context_role_index", default=None,
                    choices=["off", "record", "assist_feature"],
                    help=argparse.SUPPRESS)
+    p.add_argument("--background-nethra", default="off",
+                   choices=["off", "record", "assist_feature"],
+                   help=("Passive background-familiarity index: off=disabled; "
+                         "record=record learned trass/unresolved/quarantined patterns "
+                         "without behavioral effect; assist_feature=may expose passive "
+                         "features to uncertainty consolidation as familiarity metadata "
+                         "(no authority, no skip suppression, no monitoring increase). "
+                         "Default: off"))
     return p.parse_args()
 
 
@@ -405,6 +413,7 @@ def run() -> None:
         uncertainty_assist_policy=args.uncertainty_assist_policy,
         context_role_index_mode=args.context_role_index or "off",
         context_role_anchor_policy=args.context_role_anchor_policy,
+        background_nethra_mode=args.background_nethra,
     )
     agent.probe_retention_per_var = args.probe_retention
 

@@ -120,6 +120,7 @@ from .learned_residual import (
     ShadowLearnedResidualPredictor,
     ShadowResidualKeyAuthority,
 )
+from .background_nethra import BackgroundNethraIndex
 
 # ── Trass authority thresholds ────────────────────────────────────────────────
 # A trass cert suppresses future sentinel monitoring — the strongest operational
@@ -256,6 +257,7 @@ class ChainedAgent:
         authority_strength_mode: str = "off",
         authority_strength_controller: str = "state",
         authority_derivation_policy: Optional[str] = None,
+        background_nethra_mode: str = "off",
     ):
         """Construct agent. Initializes empty ledger, zero counters, and
         applies any provided per-var cost weight overrides."""
@@ -637,6 +639,18 @@ class ChainedAgent:
         self._authority_strength_future_requirements_total = 0
         self._authority_strength_repair_priority_bumps_total = 0
 
+        # Passive background-familiarity index.  Default off preserves behavior.
+        if background_nethra_mode not in {"off", "record", "assist_feature"}:
+            raise ValueError(
+                "background_nethra_mode must be off, record, or assist_feature"
+            )
+        self._background_nethra_mode = background_nethra_mode
+        self._background_nethra_index: Optional[BackgroundNethraIndex] = (
+            BackgroundNethraIndex(mode=background_nethra_mode)
+            if background_nethra_mode != "off"
+            else None
+        )
+
     def _context_role_index_enabled(self) -> bool:
         return self._context_role_index is not None
 
@@ -682,6 +696,27 @@ class ChainedAgent:
         uncertainty_signals: Tuple[str, ...] = (),
         validity_scope: Tuple[int, ...] = (),
     ) -> None:
+        # Passive background observation: runs independently of context_role_index.
+        if nethra_id and self._background_nethra_index is not None:
+            n = self.ledger.vars[var]
+            self._background_nethra_index.add_or_update_from_context_role(
+                nethra_id=nethra_id,
+                role=role,
+                var=var,
+                context_key=nethra_context_key(
+                    operation=operation,
+                    var=var,
+                    visible=self.world.visible_count,
+                    parents=tuple(n.parents),
+                ),
+                cycle=cycle,
+                operation_role=operation,
+                fit_signature=(
+                    f"x{var}:{n.func}({','.join(map(str, n.parents))})"
+                ),
+                parents=tuple(n.parents),
+                signals=uncertainty_signals,
+            )
         if self._context_role_index is None or not nethra_id:
             return
         if operation in {"route", "composite", "regime", "compression"}:
@@ -845,6 +880,26 @@ class ChainedAgent:
                 for matches in index_matches_by_cluster.values()
                 for match in matches
             ]
+        # Passive background observation of uncertainty clusters.
+        if self._background_nethra_index is not None:
+            for cluster in clusters:
+                bg_nid = (
+                    f"bg_uc:{cluster.proposed_handle_kind}:"
+                    f"{','.join(map(str, cluster.shared_parents or cluster.vars[:4]))}"
+                )
+                self._background_nethra_index.add_or_update_from_uncertainty_cluster(
+                    nethra_id=bg_nid,
+                    vars=cluster.vars,
+                    context_key=nethra_context_key(
+                        operation="uncertainty_cluster",
+                        visible=self.world.visible_count,
+                    ),
+                    cycle=cycle,
+                    is_giant=cluster.is_giant_cluster,
+                    signals=cluster.shared_signals,
+                    parents=cluster.shared_parents,
+                )
+
         self._uncertainty_cases_seen_total += len(cases)
         self._uncertainty_clusters_total += len(clusters)
         for cluster in clusters:
@@ -1214,6 +1269,114 @@ class ChainedAgent:
             monitoring_increases=self._authority_strength_monitoring_increases_total,
             alternatives_preserved=self._authority_strength_alternatives_preserved_total,
         )
+
+    def _run_background_nethra(self, cycle: int) -> None:
+        """Passive per-cycle background-familiarity scan.
+
+        Observes tied frontiers, dormant alternatives, and authority states
+        from the current ledger snapshot. Never issues authority, revokes,
+        suppresses skips, forces probes, or increases monitoring.
+        """
+        bgi = self._background_nethra_index
+        if bgi is None:
+            return
+        visible = getattr(self.world, "visible_count", 0)
+        ctx_key = nethra_context_key(
+            operation="background_scan",
+            visible=visible,
+        )
+        for var in range(visible):
+            n = self.ledger.vars[var]
+            parents = tuple(sorted(int(p) for p in (n.parents or ())))
+
+            # Tied frontiers
+            frontier = getattr(n, "tied_frontier", None)
+            if frontier is not None:
+                candidates = getattr(frontier, "candidates", ())
+                nid = f"bg_frontier:x{var}:{n.func}({','.join(map(str, parents))})"
+                bgi.add_or_update_from_tied_frontier(
+                    nethra_id=nid,
+                    var=var,
+                    context_key=ctx_key,
+                    cycle=cycle,
+                    candidate_count=len(candidates),
+                    stable_count=int(getattr(frontier, "stable_count", 0)),
+                    parents=parents,
+                )
+
+            # Dormant alternatives
+            for alt in getattr(n, "dormant_alternatives", ()) or ():
+                alt_parents = tuple(sorted(
+                    int(p) for p in (getattr(alt, "parents", ()) or ())
+                ))
+                alt_func = str(getattr(alt, "func", ""))
+                nid = (
+                    f"bg_dormant:x{var}:{alt_func}"
+                    f"({','.join(map(str, alt_parents))})"
+                )
+                bgi.add_or_update_from_dormant_alternative(
+                    nethra_id=nid,
+                    var=var,
+                    context_key=ctx_key,
+                    cycle=cycle,
+                    revival_count=int(getattr(alt, "revival_count", 0)),
+                    parents=alt_parents,
+                )
+
+        # Authority state patterns (only if authority_strength ran)
+        if self._authority_strength_mode != "off":
+            for record in self._authority_strength_latest_records:
+                if record.authority_state not in {
+                    "contested_best_available",
+                    "quarantined_for_derivation",
+                    "repair_candidate",
+                }:
+                    continue
+                var = record.var
+                parents = tuple(sorted(
+                    int(p) for p in (self.ledger.vars[var].parents or ())
+                ))
+                bgi.add_or_update_from_authority_debt(
+                    nethra_id=f"bg_auth:{record.nethra_id}",
+                    var=var,
+                    context_key=str(record.context_key),
+                    cycle=cycle,
+                    authority_state=str(record.authority_state),
+                    parents=parents,
+                    signals=tuple(record.uncertainty_signals),
+                )
+
+    def background_nethra_metrics(self) -> Dict[str, Any]:
+        if self._background_nethra_index is None:
+            return {
+                "background_nethra_mode": self._background_nethra_mode,
+                "background_nethra_records": 0,
+                "background_nethra_by_kind": {},
+                "background_nethra_edges": 0,
+                "background_contexts_seen": 0,
+                "background_role_shift_examples": 0,
+                "background_trass_patterns": 0,
+                "background_unresolved_patterns": 0,
+                "background_quarantined_patterns": 0,
+                "background_giant_cluster_patterns": 0,
+                "background_dormant_patterns": 0,
+                "background_tied_frontier_patterns": 0,
+                "background_recognition_score_mean": 0.0,
+                "background_action_relevance_score_mean": 0.0,
+                "background_records_used_as_features": 0,
+                "background_feature_hits": 0,
+                "background_feature_noops": 0,
+                "familiar_background_count": 0,
+                "operational_authority_count": 0,
+            }
+        summary = self._background_nethra_index.summarize()
+        summary["background_nethra_mode"] = self._background_nethra_mode
+        return summary
+
+    def background_nethra_export(self, limit: int = 200) -> Dict[str, Any]:
+        if self._background_nethra_index is None:
+            return {"records": [], "edges": [], "role_shift_examples": []}
+        return self._background_nethra_index.export_records(limit=limit)
 
     def authority_strength_metrics(self) -> Dict[str, Any]:
         zero_controller_metrics: Dict[str, Any] = {
@@ -3703,6 +3866,7 @@ class ChainedAgent:
         self._uncertain_this_cycle.clear()
         self._run_uncertainty_consolidation(cycle)
         self._run_authority_strength(cycle)
+        self._run_background_nethra(cycle)
 
         skipped: List[int] = []
         audited: List[int] = []

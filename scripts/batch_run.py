@@ -201,6 +201,7 @@ class RunConfig:
     authority_strength: str = "off"  # "off" | "record" | "assist"
     authority_strength_controller: str = "state"  # "legacy" | "state"
     authority_derivation_policy: Optional[str] = None
+    background_nethra: str = "off"  # "off" | "record" | "assist_feature"
 
     def __post_init__(self) -> None:
         self.authority_derivation_policy = resolve_authority_derivation_policy(
@@ -546,6 +547,28 @@ class ArchMetrics:
     repair_priority_bumps_from_strength_noops: int = 0
     authority_strength_counts_by_reason: Dict[str, int] = field(default_factory=dict)
     authority_strength_export: Dict[str, Any] = field(default_factory=dict)
+
+    # BackgroundNethraIndex metrics.
+    background_nethra_mode: str = "off"
+    background_nethra_records: int = 0
+    background_nethra_by_kind: Dict[str, int] = field(default_factory=dict)
+    background_nethra_edges: int = 0
+    background_contexts_seen: int = 0
+    background_role_shift_examples: int = 0
+    background_trass_patterns: int = 0
+    background_unresolved_patterns: int = 0
+    background_quarantined_patterns: int = 0
+    background_giant_cluster_patterns: int = 0
+    background_dormant_patterns: int = 0
+    background_tied_frontier_patterns: int = 0
+    background_recognition_score_mean: float = 0.0
+    background_action_relevance_score_mean: float = 0.0
+    background_records_used_as_features: int = 0
+    background_feature_hits: int = 0
+    background_feature_noops: int = 0
+    familiar_background_count: int = 0
+    operational_authority_count: int = 0
+    background_nethra_export: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -904,6 +927,7 @@ def _build_and_run_dreth(
         authority_strength_mode=cfg.authority_strength,
         authority_strength_controller=cfg.authority_strength_controller,
         authority_derivation_policy=cfg.authority_derivation_policy,
+        background_nethra_mode=cfg.background_nethra,
     )
     if cfg.relative_authority_frontier_temporal_report:
         from dreth.relative_authority_frontier import TemporalGraphFrontierEvaluator
@@ -1377,6 +1401,35 @@ def _extract_arch_metrics(agent: ChainedAgent, world: CausalWorld) -> ArchMetric
         )
         if hasattr(agent, "authority_strength_export"):
             m.authority_strength_export = agent.authority_strength_export(limit=300)
+    if hasattr(agent, "background_nethra_metrics"):
+        _bn = agent.background_nethra_metrics()
+        m.background_nethra_mode = str(_bn.get("background_nethra_mode", "off"))
+        m.background_nethra_records = int(_bn.get("background_nethra_records", 0))
+        m.background_nethra_by_kind = dict(_bn.get("background_nethra_by_kind", {}))
+        m.background_nethra_edges = int(_bn.get("background_nethra_edges", 0))
+        m.background_contexts_seen = int(_bn.get("background_contexts_seen", 0))
+        m.background_role_shift_examples = int(_bn.get("background_role_shift_examples", 0))
+        m.background_trass_patterns = int(_bn.get("background_trass_patterns", 0))
+        m.background_unresolved_patterns = int(_bn.get("background_unresolved_patterns", 0))
+        m.background_quarantined_patterns = int(_bn.get("background_quarantined_patterns", 0))
+        m.background_giant_cluster_patterns = int(_bn.get("background_giant_cluster_patterns", 0))
+        m.background_dormant_patterns = int(_bn.get("background_dormant_patterns", 0))
+        m.background_tied_frontier_patterns = int(_bn.get("background_tied_frontier_patterns", 0))
+        m.background_recognition_score_mean = float(
+            _bn.get("background_recognition_score_mean", 0.0)
+        )
+        m.background_action_relevance_score_mean = float(
+            _bn.get("background_action_relevance_score_mean", 0.0)
+        )
+        m.background_records_used_as_features = int(
+            _bn.get("background_records_used_as_features", 0)
+        )
+        m.background_feature_hits = int(_bn.get("background_feature_hits", 0))
+        m.background_feature_noops = int(_bn.get("background_feature_noops", 0))
+        m.familiar_background_count = int(_bn.get("familiar_background_count", 0))
+        m.operational_authority_count = int(_bn.get("operational_authority_count", 0))
+        if hasattr(agent, "background_nethra_export"):
+            m.background_nethra_export = agent.background_nethra_export(limit=200)
     _temporal_frontier = getattr(agent, "_diagnostic_audit_observer", None)
     if _temporal_frontier is not None and hasattr(_temporal_frontier, "summary"):
         _tfs = _temporal_frontier.summary()
@@ -3034,6 +3087,13 @@ def main():
     p.add_argument("--nethra-reservoir", dest="context_role_index", default=None,
                    choices=["off", "record", "assist_feature"],
                    help=argparse.SUPPRESS)
+    p.add_argument("--background-nethra", default="off",
+                   choices=["off", "record", "assist_feature"],
+                   help=("Passive background-familiarity index: off=disabled; "
+                         "record=record trass/unresolved/quarantined/dormant/frontier "
+                         "patterns without any behavioral effect; "
+                         "assist_feature=may expose familiarity metadata (no authority, "
+                         "no skip suppression, no monitoring increase). Default: off"))
     p.add_argument("--authority-strength", default="off",
                    choices=["off", "record", "assist"],
                    help=("visible-evidence authority-strength metadata: "
@@ -3192,7 +3252,8 @@ def main():
                   context_role_anchor_policy=args.context_role_anchor_policy,
                   authority_strength=args.authority_strength,
                   authority_strength_controller=args.authority_strength_controller,
-                  authority_derivation_policy=authority_derivation_policy)
+                  authority_derivation_policy=authority_derivation_policy,
+                  background_nethra=args.background_nethra)
         for schedule in schedule_list
         for v in var_list
         for c in cycle_list
