@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import subprocess
 import sys
 from pathlib import Path
 
@@ -8,6 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import run_comparison_suite as suite
+import batch_run
 
 
 def _args(tmp_path: Path):
@@ -50,7 +52,7 @@ def test_command_construction_for_authority_strength_suite(tmp_path: Path) -> No
     assert [job.label for job in jobs] == [
         "off",
         "record",
-        "assist",
+        "assist_state_shadow",
         "assist_quarantine_persistent",
         "assist_quarantine_repair_only",
         "assist_legacy",
@@ -81,7 +83,10 @@ def test_output_filenames_are_deterministic(tmp_path: Path) -> None:
     assert paths["off"]["jsonl"].name == "authority_strength_compare_off.jsonl"
     assert paths["off"]["log"].name == "authority_strength_compare_off.log"
     assert paths["record"]["jsonl"].name == "authority_strength_compare_record.jsonl"
-    assert paths["assist"]["log"].name == "authority_strength_compare_assist.log"
+    assert (
+        paths["assist_state_shadow"]["log"].name
+        == "authority_strength_compare_assist_state_shadow.log"
+    )
     assert (
         paths["assist_quarantine_repair_only"]["jsonl"].name
         == "authority_strength_compare_assist_quarantine_repair_only.jsonl"
@@ -94,6 +99,51 @@ def test_output_filenames_are_deterministic(tmp_path: Path) -> None:
         ).name
         == "authority_strength_compare_record_authority_evidence.txt"
     )
+
+
+def test_batch_cli_exposes_authority_derivation_policy() -> None:
+    proc = subprocess.run(
+        [sys.executable, str(suite.SCRIPTS / "batch_run.py"), "--help"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert "--authority-derivation-policy" in proc.stdout
+    assert "quarantine_repair_only" in proc.stdout
+
+
+def test_run_config_resolves_authority_derivation_policy_defaults() -> None:
+    base = {
+        "n_vars": 3,
+        "cycles": 1,
+        "seed": 1,
+        "schedule": "blind_challenge",
+        "settle_cycles": 0,
+        "noise_sigma": 0.0,
+    }
+    off = batch_run.RunConfig(**base)
+    assist = batch_run.RunConfig(
+        **base,
+        authority_strength="assist",
+        authority_strength_controller="state",
+    )
+    legacy = batch_run.RunConfig(
+        **base,
+        authority_strength="assist",
+        authority_strength_controller="legacy",
+    )
+    explicit = batch_run.RunConfig(
+        **base,
+        authority_strength="assist",
+        authority_strength_controller="state",
+        authority_derivation_policy="quarantine_repair_only",
+    )
+
+    assert off.authority_derivation_policy == "off"
+    assert assist.authority_derivation_policy == "shadow"
+    assert legacy.authority_derivation_policy == "off"
+    assert explicit.authority_derivation_policy == "quarantine_repair_only"
 
 
 def test_summaries_are_invoked_after_runs(tmp_path: Path, monkeypatch) -> None:
@@ -188,7 +238,11 @@ def test_off_vs_record_equality_check_works() -> None:
     record["unique_fails"] = 2.0
     assert not suite.behavior_equal(off, record)
     assert "FAIL: record differs" in "\n".join(
-        suite.decision_lines({"off": off, "record": record, "assist": dict(off)})
+        suite.decision_lines({
+            "off": off,
+            "record": record,
+            "assist_state_shadow": dict(off),
+        })
     )
 
 
@@ -199,7 +253,11 @@ def test_assist_worse_warning_works() -> None:
     assist["quality_cost"] = 2.0
     assist["contradicted_authority"] = 1
 
-    lines = suite.decision_lines({"off": off, "record": dict(off), "assist": assist})
+    lines = suite.decision_lines({
+        "off": off,
+        "record": dict(off),
+        "assist_state_shadow": assist,
+    })
 
     assert any(line.startswith("WARN: assist worsens") for line in lines)
     assert any(line.startswith("WARN: assist helps hidden mismatch") for line in lines)
@@ -338,7 +396,7 @@ def test_final_comparison_waits_for_all_summaries(tmp_path: Path, monkeypatch) -
     seen_summary_outputs = []
 
     def fake_run(jobs, *, max_workers, sequential=False, terminal=None, popen_factory=None):
-        if jobs and jobs[0].label in {"off", "record", "assist"}:
+        if jobs and jobs[0].label in set(suite.AUTHORITY_STRENGTH_MODES):
             for mode_paths in suite.suite_paths(args.out_prefix).values():
                 mode_paths["jsonl"].parent.mkdir(parents=True, exist_ok=True)
                 mode_paths["jsonl"].write_text("")

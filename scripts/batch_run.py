@@ -200,7 +200,26 @@ class RunConfig:
     context_role_anchor_policy: str | None = None  # "off" | "strict" | "loose"
     authority_strength: str = "off"  # "off" | "record" | "assist"
     authority_strength_controller: str = "state"  # "legacy" | "state"
-    authority_derivation_policy: str = "shadow"
+    authority_derivation_policy: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        self.authority_derivation_policy = resolve_authority_derivation_policy(
+            self.authority_strength,
+            self.authority_strength_controller,
+            self.authority_derivation_policy,
+        )
+
+
+def resolve_authority_derivation_policy(
+    authority_strength: str,
+    authority_strength_controller: str,
+    authority_derivation_policy: Optional[str],
+) -> str:
+    if authority_derivation_policy is not None:
+        return authority_derivation_policy
+    if authority_strength == "assist" and authority_strength_controller == "state":
+        return "shadow"
+    return "off"
 
 
 # ── per-run result ─────────────────────────────────────────────────────────────
@@ -3015,7 +3034,7 @@ def main():
                    choices=["legacy", "state"],
                    help=("authority-strength assist controller: state is the "
                          "default; legacy reproduces earlier pressure hints"))
-    p.add_argument("--authority-derivation-policy", default="shadow",
+    p.add_argument("--authority-derivation-policy", default=None,
                    choices=[
                        "off",
                        "quarantine_persistent",
@@ -3082,6 +3101,11 @@ def main():
         raise SystemExit("--relative-authority-frontier-report requires --relative-authority-report")
     if args.relative_authority_frontier_temporal_report and not args.relative_authority_report:
         raise SystemExit("--relative-authority-frontier-temporal-report requires --relative-authority-report")
+    authority_derivation_policy = resolve_authority_derivation_policy(
+        args.authority_strength,
+        args.authority_strength_controller,
+        args.authority_derivation_policy,
+    )
 
     parent_ranker_arg = args.parent_ranker
     probe_proposer_arg = args.probe_proposer
@@ -3160,7 +3184,7 @@ def main():
                   context_role_anchor_policy=args.context_role_anchor_policy,
                   authority_strength=args.authority_strength,
                   authority_strength_controller=args.authority_strength_controller,
-                  authority_derivation_policy=args.authority_derivation_policy)
+                  authority_derivation_policy=authority_derivation_policy)
         for schedule in schedule_list
         for v in var_list
         for c in cycle_list
@@ -3192,7 +3216,7 @@ def main():
         mode += (
             f" +authority-strength({args.authority_strength}/"
             f"{args.authority_strength_controller}/"
-            f"{args.authority_derivation_policy})"
+            f"{authority_derivation_policy})"
         )
     if shadow_sweep:
         mode += (f" +shadow-sweep(f={factor_list} ms={ms_list} w={window_list})")

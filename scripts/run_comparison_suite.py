@@ -19,7 +19,7 @@ SCRIPTS = ROOT / "scripts"
 AUTHORITY_STRENGTH_JOBS = (
     ("off", "off", "state", "off"),
     ("record", "record", "state", "off"),
-    ("assist", "assist", "state", "shadow"),
+    ("assist_state_shadow", "assist", "state", "shadow"),
     ("assist_quarantine_persistent", "assist", "state", "quarantine_persistent"),
     ("assist_quarantine_repair_only", "assist", "state", "quarantine_repair_only"),
     ("assist_legacy", "assist", "legacy", "off"),
@@ -503,7 +503,7 @@ def behavior_equal(off: dict[str, Any], record: dict[str, Any]) -> bool:
 def decision_lines(metrics: dict[str, dict[str, Any]]) -> list[str]:
     off = metrics.get("off", {})
     record = metrics.get("record", {})
-    assist = metrics.get("assist", {})
+    assist = metrics.get("assist_state_shadow", {})
     lines: list[str] = []
     if behavior_equal(off, record):
         lines.append("PASS: off and record match on behavior metrics.")
@@ -642,7 +642,10 @@ def render_comparison(metrics: dict[str, dict[str, Any]]) -> str:
             f"{_fmt(row.get('supported_surrogates_preserved'))}"
         )
     off = metrics.get("off", {})
-    for label, mode in (("assist_delta_vs_off", "assist"), ("record_delta_vs_off", "record")):
+    for label, mode in (
+        ("assist_state_shadow_delta_vs_off", "assist_state_shadow"),
+        ("record_delta_vs_off", "record"),
+    ):
         row = metrics.get(mode, {})
         lines.append(
             f"{label:<11} "
