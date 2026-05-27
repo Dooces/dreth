@@ -3267,7 +3267,11 @@ def main():
                          "records and apply use-right limited candidate/probe ordering"))
     p.add_argument("--nethra-memory-path", default="reports/nethra_memory_store.jsonl",
                    metavar="PATH",
-                   help="path for persistent Nethra memory JSONL")
+                   help="path for persistent Nethra compact mind JSONL (read-only during runs)")
+    p.add_argument("--nethra-delta-path", default=None,
+                   metavar="PATH",
+                   help="path for per-run Nethra memory delta JSONL (write path); "
+                        "defaults to --nethra-memory-path if not set")
     p.add_argument("--auto-sleep", default="off",
                    choices=["off", "run_end", "threshold"],
                    help=("automatic offline sleep scheduling. run_end and threshold "
@@ -3538,14 +3542,15 @@ def main():
             flush=True,
         )
 
+    _nethra_write_path = args.nethra_delta_path or args.nethra_memory_path
     memory_store: Optional[NethraMemoryStore] = None
     if args.nethra_memory != "off" or args.auto_sleep != "off":
-        memory_store = NethraMemoryStore(args.nethra_memory_path)
+        memory_store = NethraMemoryStore(_nethra_write_path)
 
     auto_sleep_scheduler = AutoSleepScheduler()
     auto_sleep_config = AutoSleepConfig(
         enabled=args.auto_sleep != "off",
-        memory_path=args.nethra_memory_path,
+        memory_path=_nethra_write_path,
         proposals_path=args.auto_sleep_proposals,
         summary_path=args.auto_sleep_summary,
         cycle_threshold=args.auto_sleep_cycle_threshold if args.auto_sleep == "threshold" else 0,

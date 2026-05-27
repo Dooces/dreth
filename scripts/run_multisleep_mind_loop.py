@@ -76,6 +76,7 @@ def batch_cmd(
     schedule: str,
     memory_mode: str,
     memory_path: Path,
+    delta_path: Path,
     out_path: Path,
     workers: int | None,
     extra_flags: list[str],
@@ -101,6 +102,8 @@ def batch_cmd(
         memory_mode,
         "--nethra-memory-path",
         str(memory_path),
+        "--nethra-delta-path",
+        str(delta_path),
         "--out",
         str(out_path),
     ]
@@ -108,6 +111,30 @@ def batch_cmd(
         cmd.extend(["--workers", str(workers)])
     cmd.extend(extra_flags)
     return cmd
+
+
+_PROPOSAL_DELTA_USE_RIGHTS = frozenset({"ranking_hint", "probe_hint"})
+
+
+def _proposal_as_sleep_product(p: dict[str, Any]) -> dict[str, Any]:
+    """Convert an eligible ScaffoldProposal dict into a sleep_product delta entry."""
+    vars_ = [int(v) for v in (p.get("vars") or [])]
+    contexts = [str(c) for c in (p.get("contexts") or [])]
+    return {
+        "entry_kind": "sleep_product",
+        "record_type": "sleep_product",
+        "proposal_id": str(p.get("proposal_id", "")),
+        "member_nethras": [],
+        "touched_atoms": [f"x{v}" for v in vars_],
+        "touched_structure_refs": [],
+        "proposed_use_right": str(p.get("suggested_runtime_use", "record_only")),
+        "proposed_context_scope": contexts[0] if contexts else "",
+        "salience_delta": float(p.get("action_relevance_score", 0.0)),
+        "evidence_summary": str(p.get("evidence_summary", "")),
+        "invalidators": [],
+        "reason": "proposal_promoted_to_delta",
+        "authority_allowed": False,
+    }
 
 
 def build_run_sleep_delta(
@@ -148,23 +175,30 @@ def build_run_sleep_delta(
     proposals = c.build_proposals(bg, cr, unc, auth, temp, min_sources=min_sources)
     products = c.build_sleep_products(mem, exp)
 
+    # Proposals eligible for delta inclusion (ranking_hint / probe_hint only)
+    proposal_dicts = [
+        p.to_dict() if hasattr(p, "to_dict") else vars(p) for p in proposals
+    ]
+    delta_proposals = [
+        _proposal_as_sleep_product(d)
+        for d in proposal_dicts
+        if d.get("suggested_runtime_use") in _PROPOSAL_DELTA_USE_RIGHTS
+    ]
+
     # Write proposals to proposal_path
     with proposal_path.open("w", encoding="utf-8") as fh:
-        for p in proposals:
-            d = p.to_dict() if hasattr(p, "to_dict") else vars(p)
+        for d in proposal_dicts:
             fh.write(json.dumps(d, sort_keys=True) + "\n")
 
-    # Build delta: copy run_path lines + append sleep product lines
+    # Append sleep products and promoted proposals to delta.
+    # Run memory records were already written to delta by NethraMemoryStore during
+    # the batch run (via --nethra-delta-path). We only add the derived sleep outputs.
     delta_path.parent.mkdir(parents=True, exist_ok=True)
-    with delta_path.open("w", encoding="utf-8") as fh:
-        # Copy all world-backed run records
-        if run_path.exists():
-            with run_path.open(encoding="utf-8") as src:
-                for line in src:
-                    fh.write(line)
-        # Append sleep products as fresh delta evidence
+    with delta_path.open("a", encoding="utf-8") as fh:
         for p in products:
             d = p.to_dict() if hasattr(p, "to_dict") else vars(p)
+            fh.write(json.dumps(d, sort_keys=True) + "\n")
+        for d in delta_proposals:
             fh.write(json.dumps(d, sort_keys=True) + "\n")
 
     # Optionally append to cumulative archive (for debug only, never compacted)
@@ -182,6 +216,7 @@ def build_run_sleep_delta(
         "mem": len(mem),
         "proposals": len(proposals),
         "products": len(products),
+        "delta_proposals": len(delta_proposals),
         "authority_allowed_products": sum(
             1 for p in products if bool(getattr(p, "authority_allowed", False))
         ),
@@ -196,7 +231,8 @@ def build_run_sleep_delta(
         f"auth={result['auth']} temp={result['temp']} exp={result['exp']} mem={result['mem']}"
     )
     print(
-        f"sleep_output: proposals={result['proposals']} products={result['products']}"
+        f"sleep_output: proposals={result['proposals']} products={result['products']} "
+        f"delta_proposals={result['delta_proposals']}"
     )
     print(
         f"authority_allowed: products={result['authority_allowed_products']} "
@@ -287,14 +323,17 @@ def _kb(n: int) -> str:
 
 def write_summary(
     *,
-    paths: dict[str, Path],
+    run_records: list[dict],
     archive_store_path: Path | None,
-    mind_paths: dict[str, Path],
-    delta_paths: dict[str, Path],
+    compaction_records: list[dict],
     summary_path: Path,
 ) -> None:
-    data = {name: totals(path) for name, path in paths.items()}
-    mind_summaries = {name: _read_mind_summary(path) for name, path in mind_paths.items()}
+    """Write multi-generation summary.
+
+    run_records: list of {"label": str, "data": totals_dict} — captured right after each run.
+    compaction_records: list of {"gen": str, "summary": dict, "mind_size_bytes": int}
+    """
+    data = {rec["label"]: rec["data"] for rec in run_records}
 
     with summary_path.open("w", encoding="utf-8") as fh:
         def emit(s: str = "") -> None:
@@ -325,11 +364,12 @@ def write_summary(
         comp_header = f"{'gen':<8} {'nodes_before':>12} {'nodes_after':>11} {'exact':>6} {'struct':>7} {'assim':>6} {'pruned':>7} {'residuals':>9} {'mind_kB':>8}"
         emit(comp_header)
         emit("-" * len(comp_header))
-        for gen_name, ms in sorted(mind_summaries.items()):
+        for rec in compaction_records:
+            ms = rec.get("summary") or {}
             if not ms:
                 continue
             emit(
-                f"{gen_name:<8} "
+                f"{rec['gen']:<8} "
                 f"{int(ms.get('nodes_before', 0)):>12} "
                 f"{int(ms.get('nodes_after', 0)):>11} "
                 f"{int(ms.get('exact_folds', 0)):>6} "
@@ -337,7 +377,7 @@ def write_summary(
                 f"{int(ms.get('assimilation_folds', 0)):>6} "
                 f"{int(ms.get('nodes_pruned', 0)):>7} "
                 f"{int(ms.get('residuals_kept', 0)):>9} "
-                f"{file_size(mind_paths[gen_name]) // 1024:>8}"
+                f"{rec.get('mind_size_bytes', 0) // 1024:>8}"
             )
 
         # ── file sizes ──────────────────────────────────────────────────────
@@ -345,10 +385,8 @@ def write_summary(
         emit("=== sizes ===")
         if archive_store_path:
             emit(f"  raw_archive        {_kb(file_size(archive_store_path)):>10}")
-        for name, path in sorted(delta_paths.items()):
-            emit(f"  delta_{name:<10} {_kb(file_size(path)):>10}")
-        for name, path in sorted(mind_paths.items()):
-            emit(f"  mind_{name:<11} {_kb(file_size(path)):>10}")
+        for rec in compaction_records:
+            emit(f"  mind_after_{rec['gen']:<6} {_kb(rec.get('mind_size_bytes', 0)):>10}")
 
         # ── gates ───────────────────────────────────────────────────────────
         off = data.get("control_off", {})
@@ -374,9 +412,8 @@ def write_summary(
             if "assist" in name
         )
         mind_sizes_bounded = all(
-            file_size(p) < 50 * 1024 * 1024  # 50MB hard cap
-            for p in mind_paths.values()
-            if p.exists()
+            rec.get("mind_size_bytes", 0) < 50 * 1024 * 1024  # 50MB hard cap
+            for rec in compaction_records
         )
 
         def gate(label: str, passed: bool) -> str:
@@ -468,19 +505,42 @@ def main() -> None:
             if path.is_file():
                 path.unlink()
 
-    paths: dict[str, Path] = {}
-    mind_paths: dict[str, Path] = {}
-    delta_paths: dict[str, Path] = {}
+    # Fixed filenames — overwritten each generation so total file count does not grow with N.
+    # Two persistent state files: mind (carry-forward) and delta (cleared after each compaction).
+    mind_path = prefix.with_name(prefix.name + "_mind.jsonl")
+    delta_path = prefix.with_name(prefix.name + "_delta.jsonl")
+    mind_tmp = prefix.with_name(prefix.name + "_mind.tmp.jsonl")
+    # Ephemeral per-cycle files — overwritten each generation.
+    run_path = prefix.with_name(prefix.name + "_run.jsonl")
+    run_log = prefix.with_name(prefix.name + "_run.log")
+    proposal_path = prefix.with_name(prefix.name + "_proposals.jsonl")
+    report_path = prefix.with_name(prefix.name + "_mind_report.txt")
+    # Controls and summary — written once at the end.
+    off_path = prefix.with_name(prefix.name + "_control_off.jsonl")
+    record_path = prefix.with_name(prefix.name + "_control_record.jsonl")
+
+    run_records: list[dict] = []
+    compaction_records: list[dict] = []
+
+    def _compact_and_rotate(gen_label: str, previous_mind: Path | None) -> None:
+        """Compact delta into mind via temp-swap, then clear delta."""
+        compact_mind(
+            delta_input_path=delta_path,
+            mind_path=mind_tmp,
+            report_path=report_path,
+            cwd=cwd,
+            previous_mind_path=previous_mind,
+        )
+        mind_tmp.replace(mind_path)
+        compaction_records.append({
+            "gen": gen_label,
+            "summary": _read_mind_summary(mind_path),
+            "mind_size_bytes": mind_path.stat().st_size if mind_path.exists() else 0,
+        })
+        delta_path.write_text("", encoding="utf-8")
 
     # ── GEN 0: record-only bootstrap ────────────────────────────────────────
     print("=== RUN 0: record-only bootstrap writes raw evidence ===")
-    run0 = prefix.with_name(prefix.name + "_run0_record.jsonl")
-    paths["run0_record"] = run0
-
-    # For gen0, --nethra-memory-path is unused (record mode writes to --out)
-    # Pass a throwaway path since batch_run requires it
-    _scratch0 = prefix.with_name(prefix.name + "_scratch0.tmp")
-
     run_and_tee(
         batch_cmd(
             vars_=args.vars,
@@ -488,46 +548,31 @@ def main() -> None:
             seeds=args.seeds,
             schedule=args.schedule,
             memory_mode="record",
-            memory_path=_scratch0,
-            out_path=run0,
+            memory_path=mind_path,
+            delta_path=delta_path,
+            out_path=run_path,
             workers=args.workers,
             extra_flags=extra_flags,
         ),
-        prefix.with_name(prefix.name + "_run0_record.log"),
+        run_log,
         cwd=cwd,
     )
+    run_records.append({"label": "run0_record", "data": totals(run_path)})
 
-    delta0 = prefix.with_name(prefix.name + "_delta_gen0.jsonl")
-    delta_paths["gen0"] = delta0
     build_run_sleep_delta(
-        run_path=run0,
-        delta_path=delta0,
-        proposal_path=prefix.with_name(prefix.name + "_sleep0_proposals.jsonl"),
+        run_path=run_path,
+        delta_path=delta_path,
+        proposal_path=proposal_path,
         min_sources=args.min_sources,
         label="0",
         cwd=cwd,
         archive_store_path=archive_store,
     )
+    _compact_and_rotate("gen0", previous_mind=None)
 
-    mind0 = prefix.with_name(prefix.name + "_mind_gen0.jsonl")
-    mind_paths["gen0"] = mind0
-    compact_mind(
-        delta_input_path=delta0,
-        mind_path=mind0,
-        report_path=prefix.with_name(prefix.name + "_mind_gen0_report.txt"),
-        cwd=cwd,
-        previous_mind_path=None,
-    )
-
-    current_mind: Path = mind0
-
-    # ── GEN 1..N: assist loads compact mind genN-1 ──────────────────────────
+    # ── GEN 1..N: assist loads compact mind, then delta-compact ─────────────
     for gen in range(1, args.gens + 1):
-        print(f"\n=== RUN {gen}: assist loads compact mind gen{gen - 1} ===")
-
-        run_path = prefix.with_name(prefix.name + f"_run{gen}_assist.jsonl")
-        paths[f"run{gen}_assist"] = run_path
-
+        print(f"\n=== RUN {gen}: assist loads compact mind (gen{gen - 1} state) ===")
         run_and_tee(
             batch_cmd(
                 vars_=args.vars,
@@ -535,44 +580,31 @@ def main() -> None:
                 seeds=args.seeds,
                 schedule=args.schedule,
                 memory_mode="assist",
-                memory_path=current_mind,
+                memory_path=mind_path,
+                delta_path=delta_path,
                 out_path=run_path,
                 workers=args.workers,
                 extra_flags=extra_flags,
             ),
-            prefix.with_name(prefix.name + f"_run{gen}_assist.log"),
+            run_log,
             cwd=cwd,
         )
+        run_records.append({"label": f"run{gen}_assist", "data": totals(run_path)})
 
-        print(f"\n=== SLEEP {gen}: build delta from gen{gen} run ===")
-        delta_path = prefix.with_name(prefix.name + f"_delta_gen{gen}.jsonl")
-        delta_paths[f"gen{gen}"] = delta_path
+        print(f"\n=== SLEEP {gen}: append sleep products to delta, then compact ===")
         build_run_sleep_delta(
             run_path=run_path,
             delta_path=delta_path,
-            proposal_path=prefix.with_name(prefix.name + f"_sleep{gen}_proposals.jsonl"),
+            proposal_path=proposal_path,
             min_sources=args.min_sources,
             label=str(gen),
             cwd=cwd,
             archive_store_path=archive_store,
         )
-
-        next_mind = prefix.with_name(prefix.name + f"_mind_gen{gen}.jsonl")
-        mind_paths[f"gen{gen}"] = next_mind
-        compact_mind(
-            delta_input_path=delta_path,
-            mind_path=next_mind,
-            report_path=prefix.with_name(prefix.name + f"_mind_gen{gen}_report.txt"),
-            cwd=cwd,
-            previous_mind_path=current_mind,
-        )
-        current_mind = next_mind
+        _compact_and_rotate(f"gen{gen}", previous_mind=mind_path)
 
     # ── CONTROLS ─────────────────────────────────────────────────────────────
     print("\n=== CONTROL: off ignores compact mind ===")
-    off_path = prefix.with_name(prefix.name + "_control_off.jsonl")
-    paths["control_off"] = off_path
-
     run_and_tee(
         batch_cmd(
             vars_=args.vars,
@@ -580,7 +612,8 @@ def main() -> None:
             seeds=args.seeds,
             schedule=args.schedule,
             memory_mode="off",
-            memory_path=current_mind,
+            memory_path=mind_path,
+            delta_path=delta_path,
             out_path=off_path,
             workers=args.workers,
             extra_flags=extra_flags,
@@ -588,11 +621,9 @@ def main() -> None:
         prefix.with_name(prefix.name + "_control_off.log"),
         cwd=cwd,
     )
+    run_records.append({"label": "control_off", "data": totals(off_path)})
 
     print("\n=== CONTROL: record loads compact mind but must not change behavior ===")
-    record_path = prefix.with_name(prefix.name + "_control_record.jsonl")
-    paths["control_record"] = record_path
-
     run_and_tee(
         batch_cmd(
             vars_=args.vars,
@@ -600,7 +631,8 @@ def main() -> None:
             seeds=args.seeds,
             schedule=args.schedule,
             memory_mode="record",
-            memory_path=current_mind,
+            memory_path=mind_path,
+            delta_path=delta_path,
             out_path=record_path,
             workers=args.workers,
             extra_flags=extra_flags,
@@ -608,22 +640,22 @@ def main() -> None:
         prefix.with_name(prefix.name + "_control_record.log"),
         cwd=cwd,
     )
+    run_records.append({"label": "control_record", "data": totals(record_path)})
 
     # ── SUMMARY ──────────────────────────────────────────────────────────────
     print("\n=== SUMMARY ===")
     write_summary(
-        paths=paths,
+        run_records=run_records,
         archive_store_path=archive_store,
-        mind_paths=mind_paths,
-        delta_paths=delta_paths,
+        compaction_records=compaction_records,
         summary_path=summary,
     )
 
     print("\nDone.")
-    print(f"current mind: {current_mind}")
-    print(f"summary:      {summary}")
+    print(f"mind:    {mind_path}")
+    print(f"summary: {summary}")
     if archive_store:
-        print(f"raw archive:  {archive_store}")
+        print(f"raw archive: {archive_store}")
 
 
 if __name__ == "__main__":

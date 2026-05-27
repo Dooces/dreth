@@ -1872,6 +1872,8 @@ class ChainedAgent:
             self._parent_proposal_diagnostics.record_fit(_ranked, tuple(result[0]), _sources)
             if hasattr(self._parent_ranker, "observe_fit_result"):
                 self._parent_ranker.observe_fit_result(var, tuple(result[0]), int(fd.margin))  # type: ignore[attr-defined]
+            if hasattr(self._parent_ranker, "observe_probe_results"):
+                self._parent_ranker.observe_probe_results(var, fd.probes, fd.actuals)  # type: ignore[attr-defined]
         if self._probe_proposer is not None:
             self._probe_proposal_diagnostics.record_fit(
                 _provider_probes,

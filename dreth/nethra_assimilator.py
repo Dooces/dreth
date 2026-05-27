@@ -455,7 +455,8 @@ class NethraAssimilator:
 
         # ── Step 5: assign disposition ────────────────────────────────────────
         node = nodes[best_id]
-        node_ctx_prefix = (node.contexts[0] if node.contexts else "").split("|")[0]
+        node_ctx_full = node.contexts[0] if node.contexts else ""
+        node_ctx_prefix = node_ctx_full.split("|")[0]
 
         # Contradiction: row carries failure against a success-dominant node
         row_failure = (
@@ -471,13 +472,23 @@ class NethraAssimilator:
             return self._emit(Disposition.CONTRADICTION, best_id, best_score, evidence_ref,
                               internal_disp=InternalDisposition.CONTRADICTION_TO_ACCOUNT)
 
-        # Split candidate: good overlap, incompatible context root
-        if (
-            best_score >= _ASSIMILATION_THRESHOLD
-            and row_ctx_prefix
-            and node_ctx_prefix
-            and row_ctx_prefix != node_ctx_prefix
-        ):
+        # Split candidate: incompatible context.
+        # Triggers when the hook prefix differs (e.g. parent_candidates vs probe_hint),
+        # OR when the same hook is used for a different specific target variable
+        # (e.g. parent_candidates|x7 vs parent_candidates|x2).
+        # Without the second clause, atom-only Jaccard would silently collapse
+        # target-specific contexts that share atoms but serve different variables.
+        _ctx_split = (
+            (row_ctx_prefix and node_ctx_prefix and row_ctx_prefix != node_ctx_prefix)
+            or (
+                row_context
+                and node_ctx_full
+                and row_context != node_ctx_full
+                and "|" in row_context
+                and "|" in node_ctx_full
+            )
+        )
+        if best_score >= _ASSIMILATION_THRESHOLD and _ctx_split:
             return self._emit(Disposition.SPLIT_CANDIDATE, best_id, best_score, evidence_ref,
                               internal_disp=InternalDisposition.FRACTURE_IDENTITY)
 

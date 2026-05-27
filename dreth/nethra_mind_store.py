@@ -299,6 +299,7 @@ class NethraMindStore:
         if not path.exists():
             return 0
         loaded = 0
+        pending_residuals: list[dict[str, Any]] = []
         with open(path) as fh:
             for line in fh:
                 line = line.strip()
@@ -333,6 +334,11 @@ class NethraMindStore:
                         self._edges[key] = edge
                         self._assimilator.index_edge(edge.src, edge.dst)
                         loaded += 1
+                elif entry_kind == "nethra_residual":
+                    pending_residuals.append(row)
+                    loaded += 1
+        if pending_residuals:
+            self._assimilator.residuals.load_rows(pending_residuals)
         return loaded
 
     def ingest_record(self, row: dict[str, Any], line_no: int, generation: int) -> str | None:

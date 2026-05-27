@@ -676,6 +676,157 @@ class HistoryProbeProposer:
         return ProbeProposal(var=var, probes=tuple(out))
 
 
+class NeuralHistoryParentRanker:
+    """ParentRanker with online-learned per-variable embeddings over observation/intervention history.
+
+    Learns from three sources supplied by ChainedAgent:
+      - interventional probe results (observe_probe_results): direct causal evidence
+        from Dreth audits — the spread of target actuals when each candidate was probed
+      - completed Dreth fit results (observe_fit_result): confirmed parent structure
+      - residual co-stress events (observe_residual_event): correlated instability
+
+    Score(target, candidate) =
+        w_embed  * W[target] · W[candidate]           (learned embedding similarity)
+      + w_fit    * fit_count(target, candidate)        (confirmed-parent frequency)
+      + w_iv     * spread(actuals | iv_var=candidate)  (interventional response range)
+      + w_co     * co_stress_count(target, candidate)  (co-stress co-occurrence)
+
+    Embeddings W are updated online from fit results: confirmed parents are pulled toward
+    the target embedding; non-parents in the candidate set are lightly repelled.
+
+    CONTRACT: no certs, no ledger mutations, no hidden-truth access.
+    All inputs come from agent-visible surfaces only.
+    """
+
+    _W_EMBED = 5.0
+    _W_FIT   = 10.0
+    _W_IV    = 8.0
+    _W_CO    = 2.0
+    _NEG_FACTOR = 0.05   # repulsion weight for non-parents (kept small to avoid thrash)
+
+    def __init__(self, n_vars: int, embed_dim: int = 16, lr: float = 0.05) -> None:
+        import numpy as _np
+        self._np = _np
+        self.n_vars = n_vars
+        self.embed_dim = embed_dim
+        self.lr = lr
+        rng = _np.random.default_rng(seed=0)
+        self.W = rng.normal(0.0, 1.0 / embed_dim ** 0.5, (n_vars, embed_dim)).astype(_np.float32)
+        norms = _np.linalg.norm(self.W, axis=1, keepdims=True)
+        self.W /= _np.where(norms > 1e-9, norms, 1.0)
+        # Fit counts: (target, candidate) -> weighted count of confirmed parent observations
+        self._fit_counts: Dict[Tuple[int, int], int] = defaultdict(int)
+        # Probe actuals: (target, iv_var) -> deque of observed target values when iv_var was probed
+        self._probe_actuals: Dict[Tuple[int, int], "deque[float]"] = {}
+        # Co-stress: (target, candidate) -> count of co-stressed cycles
+        self._co_stress: Dict[Tuple[int, int], int] = defaultdict(int)
+        self._stressed_this_cycle: Set[int] = set()
+        self._current_cycle: Optional[int] = None
+        self._recent_stressed: "deque[int]" = deque(maxlen=128)
+        # Diagnostics
+        self.call_count: int = 0
+        self.fit_observations: int = 0
+        self.probe_observations: int = 0
+
+    def observe_fit_result(self, target: int, parents: Tuple[int, ...], margin: int = 0) -> None:
+        """Update from a completed Dreth fit (called by ChainedAgent after _install_var)."""
+        self.fit_observations += 1
+        weight = max(1, margin)
+        for parent in parents:
+            self._fit_counts[(target, parent)] += weight
+        if not parents or target >= self.n_vars:
+            return
+        np = self._np
+        t_emb = self.W[target].copy()
+        for parent in parents:
+            if parent >= self.n_vars:
+                continue
+            self.W[parent] += self.lr * (t_emb - self.W[parent])
+            n = float(np.linalg.norm(self.W[parent]))
+            if n > 1e-9:
+                self.W[parent] /= n
+
+    def observe_probe_results(
+        self,
+        target: int,
+        probes: Tuple[Tuple[int, float], ...],
+        actuals: Tuple[float, ...],
+    ) -> None:
+        """Update from probe responses in a Dreth audit.
+
+        Each (iv_var, iv_val) probe with its corresponding observed target value
+        provides direct interventional evidence about causal influence.
+        Called by ChainedAgent after each full audit, before _install_var returns.
+        """
+        if not probes or not actuals:
+            return
+        self.probe_observations += 1
+        for (iv_var, _iv_val), actual in zip(probes, actuals):
+            if iv_var == target or iv_var >= self.n_vars:
+                continue
+            key = (target, iv_var)
+            if key not in self._probe_actuals:
+                self._probe_actuals[key] = deque(maxlen=64)
+            self._probe_actuals[key].append(actual)
+
+    def observe_residual_event(self, var: int, cycle: int, stressed: bool) -> None:
+        """Track co-stress patterns between variables."""
+        if self._current_cycle != cycle:
+            self._current_cycle = cycle
+            self._stressed_this_cycle = set()
+        if not stressed:
+            return
+        for other in self._stressed_this_cycle:
+            self._co_stress[(var, other)] += 1
+            self._co_stress[(other, var)] += 1
+        self._stressed_this_cycle.add(var)
+        self._recent_stressed.append(var)
+
+    def observe_route_exclusions(self, target: int, excluded: Tuple[int, ...]) -> None:
+        pass  # route exclusion belongs to Dreth; no action here
+
+    def rank_parents(self, target: int, candidates: Set[int], top_m: int) -> ParentRanking:
+        self.call_count += 1
+        eligible = [c for c in candidates if c != target and c < self.n_vars]
+        if not eligible or top_m <= 0:
+            return ParentRanking(
+                target=target,
+                ranked=(),
+                scores={},
+                source_by_candidate={},
+                diagnostics={"neural_history_ranker_calls": 1},
+            )
+        np = self._np
+        t_emb = self.W[target] if target < self.n_vars else np.zeros(self.embed_dim, dtype=np.float32)
+        scores: Dict[int, float] = {}
+        for cand in eligible:
+            embed_sim = float(np.dot(t_emb, self.W[cand]))
+            fit_freq = float(self._fit_counts.get((target, cand), 0))
+            iv_hist = self._probe_actuals.get((target, cand))
+            if iv_hist and len(iv_hist) >= 2:
+                arr = list(iv_hist)
+                iv_spread = float(max(arr) - min(arr))
+            elif iv_hist:
+                iv_spread = float(iv_hist[0])
+            else:
+                iv_spread = 0.0
+            co = float(self._co_stress.get((target, cand), 0))
+            scores[cand] = (
+                self._W_EMBED * embed_sim
+                + self._W_FIT  * fit_freq
+                + self._W_IV   * iv_spread
+                + self._W_CO   * co
+            )
+        ranked = tuple(sorted(eligible, key=lambda c: (-scores[c], c))[:top_m])
+        return ParentRanking(
+            target=target,
+            ranked=ranked,
+            scores=scores,
+            source_by_candidate={c: "neural_history" for c in ranked},
+            diagnostics={"neural_history_ranker_calls": 1},
+        )
+
+
 class HistoryRescueProbeProposer(HistoryProbeProposer):
     """History probe proposer that appends one probe from a rescue parent."""
 
