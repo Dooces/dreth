@@ -55,6 +55,7 @@ from dreth.hybrid import (
     SensitivityParentRanker,
     HistoryParentRanker,
     HistoryRescueParentRanker,
+    NeuralHistoryParentRanker,
     DiscriminationProbeProposer,
     HistoryProbeProposer,
     HistoryRescueProbeProposer,
@@ -94,9 +95,9 @@ _ALLOWED_SCHEDULES = (
     "false_trass",
     "blind_challenge",
 )
-_DEFAULT_PARENT_RANKER = "sensitivity"
+_DEFAULT_PARENT_RANKER = "neural_history"
 _DEFAULT_PROBE_PROPOSER = "none"
-_POLICY_REPORT_PARENT_RANKERS = "sensitivity,history,history_rescue"
+_POLICY_REPORT_PARENT_RANKERS = "sensitivity,history,history_rescue,neural_history"
 _POLICY_REPORT_PROBE_PROPOSERS = "none,history,history_rescue"
 _POLICY_REPORT_BASELINE = "sensitivity/none"
 # Shadow selector fields appended to TSV only (not to the printed table).
@@ -152,7 +153,7 @@ def _parse_schedule_list(s: str) -> List[str]:
 
 def _provider_policy_pairs(parent_arg: str, probe_arg: str) -> List[Tuple[str, str]]:
     parents = _parse_choice_list(
-        parent_arg, ("sensitivity", "history", "history_rescue"), "--parent-ranker"
+        parent_arg, ("sensitivity", "history", "history_rescue", "neural_history"), "--parent-ranker"
     )
     probes = _parse_choice_list(
         probe_arg, ("none", "history", "history_rescue"), "--probe-proposer"
@@ -193,7 +194,7 @@ class RunConfig:
     shadow_key_min_ok: int = 100
     shadow_key_min_clean_streak: int = 100
     shadow_key_symbolic_false_ok_tolerance: int = 0
-    parent_ranker: str = "sensitivity"  # "sensitivity" | "history" | "history_rescue"
+    parent_ranker: str = "neural_history"  # "sensitivity" | "history" | "history_rescue" | "neural_history"
     probe_proposer: str = "none"        # "none" | "history" | "history_rescue"
     relative_authority_report: bool = False
     relative_authority_frontier_report: bool = False
@@ -896,7 +897,9 @@ def _build_and_run_dreth(
     _expert_router = None
     if cfg.hybrid_control == "interfaces":
         _residual_predictor = SymbolicResidualPredictor()
-        if cfg.parent_ranker == "history_rescue":
+        if cfg.parent_ranker == "neural_history":
+            _parent_ranker = NeuralHistoryParentRanker(n_vars=world.n_vars)
+        elif cfg.parent_ranker == "history_rescue":
             _parent_ranker = HistoryRescueParentRanker(world)
         elif cfg.parent_ranker == "history":
             _parent_ranker = HistoryParentRanker()
@@ -3196,7 +3199,7 @@ def main():
     p.add_argument("--parent-ranker", default=None,
                    help=("parent ranker provider(s) for --hybrid-control interfaces. "
                          "Use comma-separated values to compare policies: "
-                         "sensitivity,history,history_rescue (default: sensitivity)"))
+                         "sensitivity,history,history_rescue,neural_history (default: neural_history)"))
     p.add_argument("--probe-proposer", default=None,
                    help=("probe proposer provider(s) for --hybrid-control interfaces. "
                          "Use comma-separated values to compare policies: "
