@@ -216,3 +216,28 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Generated Dreth experiment outputs
+reports/*.jsonl
+reports/*.jsonl.gz
+reports/*.csv
+reports/*.parquet
+reports/*.npz
+reports/*.npy
+reports/*.pkl
+reports/*.pickle
+reports/*.pt
+reports/*.pth
+reports/*.db
+reports/*.sqlite
+reports/*memory*
+reports/*record*
+reports/*assist*
+reports/*control*
+reports/*scale*
+reports/*sleep*
+reports/*summary.txt
+reports/*comparison.txt
+
+# Broken placeholder from prior detached gitdir repair
+.git.broken-empty.*

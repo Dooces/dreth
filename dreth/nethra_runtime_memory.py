@@ -15,6 +15,7 @@ from typing import Any, Iterable
 
 from .memory_sleep import HIDDEN_TRUTH_LIKE_FIELDS
 from .nethra_memory_store import ExperienceEvent, NethraMemoryRecord, USE_RIGHTS
+from .nethra_projection import ProjectionIndex
 
 
 BEHAVIOR_USE_RIGHTS: frozenset[str] = frozenset({
@@ -157,6 +158,8 @@ class PersistentNethraIndex:
         self.seed = int(seed)
         self.records: list[NethraMemoryRecord] = []
         self._by_atom: dict[str, list[NethraMemoryRecord]] = defaultdict(list)
+        self._by_id: dict[str, NethraMemoryRecord] = {}
+        self._projection: ProjectionIndex = ProjectionIndex()
         self.metrics = RuntimeMemoryMetrics()
         self.events: list[ExperienceEvent] = []
 
@@ -224,7 +227,25 @@ class PersistentNethraIndex:
         if self.mode == "off":
             return candidates
         active_atoms = [f"x{int(var)}", *(f"x{int(c)}" for c in original if _intlike(c))]
-        scored_handles = self.query(active_atoms, context_key, cycle=cycle)
+        target_var_atom = f"x{int(var)}"
+        if self._projection.size() > 0:
+            proj_entries = self._projection.query(target_var_atom, context_key, hook, top_k=20)
+            proj_ids = {e.nethra_id for e in proj_entries}
+            projected_records = [r for r in self.records if r.record_id in proj_ids or r.nethra_id in proj_ids]
+            if projected_records:
+                scorer = SalienceScorer(current_cycle=cycle)
+                atoms_set = set(active_atoms)
+                scored_handles = [
+                    (r, scorer.score(r, active_atoms=atoms_set, context_key=context_key))
+                    for r in projected_records
+                    if r.use_right != "block"
+                ]
+                scored_handles = [item for item in scored_handles if item[1].score > -1.0]
+                scored_handles.sort(key=lambda item: (-item[1].score, item[0].record_id))
+            else:
+                scored_handles = self.query(active_atoms, context_key, cycle=cycle)
+        else:
+            scored_handles = self.query(active_atoms, context_key, cycle=cycle)
         usable = [
             (record, explanation)
             for record, explanation in scored_handles
@@ -307,9 +328,28 @@ class PersistentNethraIndex:
         if self.mode == "off":
             return original
         active_atoms = [f"x{int(var)}", *(f"x{int(p[0])}" for p in original)]
+        target_var_atom = f"x{int(var)}"
+        if self._projection.size() > 0:
+            proj_entries = self._projection.query(target_var_atom, context_key, "probe_hint", top_k=20)
+            proj_ids = {e.nethra_id for e in proj_entries}
+            projected_records = [r for r in self.records if r.record_id in proj_ids or r.nethra_id in proj_ids]
+            if projected_records:
+                scorer = SalienceScorer(current_cycle=cycle)
+                atoms_set = set(active_atoms)
+                scored_all = [
+                    (r, scorer.score(r, active_atoms=atoms_set, context_key=context_key))
+                    for r in projected_records
+                    if r.use_right != "block"
+                ]
+                scored_all = [item for item in scored_all if item[1].score > -1.0]
+                scored_all.sort(key=lambda item: (-item[1].score, item[0].record_id))
+            else:
+                scored_all = self.query(active_atoms, context_key, cycle=cycle)
+        else:
+            scored_all = self.query(active_atoms, context_key, cycle=cycle)
         usable = [
             (record, explanation)
-            for record, explanation in self.query(active_atoms, context_key, cycle=cycle)
+            for record, explanation in scored_all
             if record.use_right == "probe_hint" or self.mode == "record"
         ]
         self._record_event(
@@ -374,9 +414,51 @@ class PersistentNethraIndex:
             atoms = [record.nethra_id]
         for atom in atoms:
             self._by_atom[str(atom)].append(record)
+        if record.record_id:
+            self._by_id[record.record_id] = record
+        # Index mind nodes into the projection for fast context/hook filtering
+        if isinstance(record.payload, dict) and str(record.payload.get("entry_kind", "")) == "nethra_mind_node":
+            self._projection.index_node_from_row(record.payload)
 
     def _record_from_row(self, row: dict[str, Any]) -> NethraMemoryRecord | None:
         entry_kind = str(row.get("entry_kind", ""))
+        if entry_kind == "nethra_mind_node":
+            nethra_id = str(row.get("nethra_id", ""))
+            if not nethra_id:
+                return None
+            use_rights_seen = [str(r) for r in (row.get("use_rights_seen") or [])]
+            use_right = _effective_mind_use_right(use_rights_seen)
+            invalidators = [str(i) for i in (row.get("invalidators") or [])]
+            contexts = list(row.get("contexts") or [])
+            context_scope = str(contexts[0]) if contexts else ""
+            return NethraMemoryRecord(
+                record_id=nethra_id,
+                record_type="nethra_handle",
+                run_id="mind",
+                seed=0,
+                schedule="",
+                n_vars=0,
+                cycle_start=int(row.get("first_seen_cycle", 0) or 0),
+                cycle_end=int(row.get("last_seen_cycle", 0) or 0),
+                nethra_id=nethra_id,
+                touched_atoms=[str(a) for a in (row.get("touched_atoms") or [])],
+                touched_structure_refs=[str(r) for r in (row.get("touched_structure_refs") or [])],
+                member_nethras=[str(n) for n in (row.get("member_nethras") or [])],
+                context_scope=context_scope,
+                evidence_refs=[str(r) for r in (row.get("sample_evidence_refs") or [])],
+                use_right=use_right,
+                salience=float(row.get("salience", 0.0) or 0.0),
+                source="mind",
+                created_cycle=int(row.get("first_seen_cycle", 0) or 0),
+                last_used_cycle=int(row.get("last_seen_cycle", 0) or 0),
+                success_count=int(row.get("success_count", 0) or 0),
+                failure_count=int(row.get("failure_count", 0) or 0),
+                lift_history=[r for r in (row.get("lift_history") or []) if isinstance(r, dict)],
+                invalidators=invalidators,
+                payload=row,
+            )
+        if entry_kind == "nethra_mind_edge":
+            return None
         if entry_kind == "record":
             try:
                 return NethraMemoryRecord.from_dict(row)
@@ -523,3 +605,12 @@ def _label(value: Any) -> str:
     if _intlike(value):
         return f"x{int(value)}"
     return str(value)
+
+
+def _effective_mind_use_right(use_rights_seen: list[str]) -> str:
+    _rank = {"soft_filter": 4, "ranking_hint": 3, "probe_hint": 2, "feature_only": 1, "record_only": 0}
+    best = "record_only"
+    for right in use_rights_seen:
+        if _rank.get(right, -1) > _rank.get(best, -1):
+            best = right
+    return best
