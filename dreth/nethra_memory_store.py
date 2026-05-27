@@ -24,6 +24,17 @@ MEMORY_RECORD_TYPES: frozenset[str] = frozenset({
     "authority_strength",
     "scaffold_proposal",
     "temporal_event",
+    "nethra_handle",
+})
+
+USE_RIGHTS: frozenset[str] = frozenset({
+    "record_only",
+    "feature_only",
+    "ranking_hint",
+    "probe_hint",
+    "soft_filter",
+    "hard_filter",
+    "block",
 })
 
 
@@ -42,6 +53,23 @@ class NethraMemoryRecord:
     source_kind: str = ""
     payload: dict[str, Any] = field(default_factory=dict)
     authority_allowed: bool = False
+    nethra_id: str = ""
+    touched_atoms: list[str] = field(default_factory=list)
+    touched_structure_refs: list[str] = field(default_factory=list)
+    member_nethras: list[str] = field(default_factory=list)
+    context_scope: str = ""
+    role_history: list[dict[str, Any]] = field(default_factory=list)
+    evidence_refs: list[str] = field(default_factory=list)
+    use_right: str = "record_only"
+    salience: float = 0.0
+    source: str = "runtime"
+    created_cycle: int = 0
+    last_used_cycle: int = 0
+    last_success_cycle: int = 0
+    success_count: int = 0
+    failure_count: int = 0
+    lift_history: list[dict[str, Any]] = field(default_factory=list)
+    invalidators: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if self.record_type not in MEMORY_RECORD_TYPES:
@@ -50,6 +78,30 @@ class NethraMemoryRecord:
         self.vars = [int(v) for v in (self.vars or [])]
         self.contexts = [str(c) for c in (self.contexts or [])]
         self.payload = _sanitize_payload(self.payload)
+        self.nethra_id = self.nethra_id or self.record_id
+        self.touched_atoms = [str(a) for a in (self.touched_atoms or [])]
+        self.touched_structure_refs = [str(r) for r in (self.touched_structure_refs or [])]
+        self.member_nethras = [str(n) for n in (self.member_nethras or [])]
+        self.context_scope = str(self.context_scope or (self.contexts[0] if self.contexts else ""))
+        self.role_history = [
+            _sanitize_payload(r) for r in (self.role_history or []) if isinstance(r, dict)
+        ]
+        self.evidence_refs = [str(e) for e in (self.evidence_refs or [])]
+        if self.use_right not in USE_RIGHTS:
+            self.use_right = "record_only"
+        if self.use_right == "hard_filter" and self.source != "runtime_local_evidence":
+            self.use_right = "record_only"
+        self.salience = float(self.salience or 0.0)
+        self.source = str(self.source or "runtime")
+        self.created_cycle = int(self.created_cycle or self.cycle_start or 0)
+        self.last_used_cycle = int(self.last_used_cycle or 0)
+        self.last_success_cycle = int(self.last_success_cycle or 0)
+        self.success_count = int(self.success_count or 0)
+        self.failure_count = int(self.failure_count or 0)
+        self.lift_history = [
+            _sanitize_payload(r) for r in (self.lift_history or []) if isinstance(r, dict)
+        ]
+        self.invalidators = [str(i) for i in (self.invalidators or [])]
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
@@ -74,7 +126,137 @@ class NethraMemoryRecord:
             source_kind=str(d.get("source_kind", "")),
             payload=_sanitize_payload(d.get("payload") or {}),
             authority_allowed=False,
+            nethra_id=str(d.get("nethra_id", "")),
+            touched_atoms=[str(a) for a in (d.get("touched_atoms") or [])],
+            touched_structure_refs=[
+                str(r) for r in (d.get("touched_structure_refs") or [])
+            ],
+            member_nethras=[str(n) for n in (d.get("member_nethras") or [])],
+            context_scope=str(d.get("context_scope", "")),
+            role_history=[
+                _sanitize_payload(r)
+                for r in (d.get("role_history") or [])
+                if isinstance(r, dict)
+            ],
+            evidence_refs=[str(e) for e in (d.get("evidence_refs") or [])],
+            use_right=str(d.get("use_right", "record_only")),
+            salience=float(d.get("salience", 0.0) or 0.0),
+            source=str(d.get("source", "runtime")),
+            created_cycle=int(d.get("created_cycle", 0) or 0),
+            last_used_cycle=int(d.get("last_used_cycle", 0) or 0),
+            last_success_cycle=int(d.get("last_success_cycle", 0) or 0),
+            success_count=int(d.get("success_count", 0) or 0),
+            failure_count=int(d.get("failure_count", 0) or 0),
+            lift_history=[
+                _sanitize_payload(r)
+                for r in (d.get("lift_history") or [])
+                if isinstance(r, dict)
+            ],
+            invalidators=[str(i) for i in (d.get("invalidators") or [])],
         )
+
+
+@dataclass
+class ExperienceEvent:
+    run_id: str
+    seed: int
+    cycle: int
+    context_key: str
+    active_atoms: list[str]
+    active_nethras: list[str]
+    hook: str
+    use_right: str
+    candidates_before: list[Any] = field(default_factory=list)
+    candidates_after: list[Any] = field(default_factory=list)
+    probes_before: list[Any] = field(default_factory=list)
+    probes_after: list[Any] = field(default_factory=list)
+    selected_candidate: Any = None
+    selected_probe: Any = None
+    behavior_effect: int = 0
+    authority_effect: int = 0
+    full_audit_delta: int = 0
+    intervention_delta: int = 0
+    candidate_reduction_delta: int = 0
+    quality_delta: float = 0.0
+    success: bool = False
+    failure_reason: str = ""
+    evidence_refs: list[str] = field(default_factory=list)
+    hidden_truth_used: bool = False
+
+    def __post_init__(self) -> None:
+        self.hidden_truth_used = False
+        if self.use_right not in USE_RIGHTS:
+            self.use_right = "record_only"
+        self.active_atoms = [str(a) for a in (self.active_atoms or [])]
+        self.active_nethras = [str(n) for n in (self.active_nethras or [])]
+        self.evidence_refs = [str(e) for e in (self.evidence_refs or [])]
+
+    def to_dict(self) -> dict[str, Any]:
+        d = asdict(self)
+        d["entry_kind"] = "experience_event"
+        d["hidden_truth_used"] = False
+        return _sanitize_payload(d)
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> "ExperienceEvent":
+        return cls(
+            run_id=str(d.get("run_id", "")),
+            seed=int(d.get("seed", 0) or 0),
+            cycle=int(d.get("cycle", 0) or 0),
+            context_key=str(d.get("context_key", "")),
+            active_atoms=[str(a) for a in (d.get("active_atoms") or [])],
+            active_nethras=[str(n) for n in (d.get("active_nethras") or [])],
+            hook=str(d.get("hook", "")),
+            use_right=str(d.get("use_right", "record_only")),
+            candidates_before=list(d.get("candidates_before") or []),
+            candidates_after=list(d.get("candidates_after") or []),
+            probes_before=list(d.get("probes_before") or []),
+            probes_after=list(d.get("probes_after") or []),
+            selected_candidate=d.get("selected_candidate"),
+            selected_probe=d.get("selected_probe"),
+            behavior_effect=int(d.get("behavior_effect", 0) or 0),
+            authority_effect=int(d.get("authority_effect", 0) or 0),
+            full_audit_delta=int(d.get("full_audit_delta", 0) or 0),
+            intervention_delta=int(d.get("intervention_delta", 0) or 0),
+            candidate_reduction_delta=int(d.get("candidate_reduction_delta", 0) or 0),
+            quality_delta=float(d.get("quality_delta", 0.0) or 0.0),
+            success=bool(d.get("success", False)),
+            failure_reason=str(d.get("failure_reason", "")),
+            evidence_refs=[str(e) for e in (d.get("evidence_refs") or [])],
+            hidden_truth_used=False,
+        )
+
+
+@dataclass
+class SleepProduct:
+    proposal_id: str
+    member_nethras: list[str]
+    touched_atoms: list[str]
+    touched_structure_refs: list[str]
+    proposed_use_right: str
+    proposed_context_scope: str
+    salience_delta: float
+    evidence_summary: str
+    invalidators: list[str]
+    reason: str
+    authority_allowed: bool = False
+
+    def __post_init__(self) -> None:
+        self.authority_allowed = False
+        if self.proposed_use_right == "hard_filter":
+            self.proposed_use_right = "record_only"
+            self.invalidators = list(dict.fromkeys(
+                list(self.invalidators) + ["sleep_hard_filter_rejected"]
+            ))
+        if self.proposed_use_right not in USE_RIGHTS:
+            self.proposed_use_right = "feature_only"
+
+    def to_dict(self) -> dict[str, Any]:
+        d = asdict(self)
+        d["entry_kind"] = "sleep_product"
+        d["record_type"] = "sleep_product"
+        d["authority_allowed"] = False
+        return _sanitize_payload(d)
 
 
 def _sanitize_payload(value: Any) -> Any:
@@ -141,6 +323,54 @@ class NethraMemoryStore:
                 fh.write(json.dumps(row, sort_keys=True) + "\n")
         return len(rows)
 
+    def append_experience_events(self, events: Iterable[ExperienceEvent | dict[str, Any]]) -> int:
+        rows: list[dict[str, Any]] = []
+        for event in events:
+            if isinstance(event, ExperienceEvent):
+                rows.append(event.to_dict())
+            elif isinstance(event, dict):
+                rows.append(ExperienceEvent.from_dict(event).to_dict())
+            else:
+                raise TypeError(f"unsupported experience event type: {type(event)!r}")
+        if not rows:
+            return 0
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with open(self.path, "a") as fh:
+            for row in rows:
+                fh.write(json.dumps(row, sort_keys=True) + "\n")
+        return len(rows)
+
+    def append_sleep_products(self, products: Iterable[SleepProduct | dict[str, Any]]) -> int:
+        rows: list[dict[str, Any]] = []
+        for product in products:
+            if hasattr(product, "to_dict") and not isinstance(product, dict):
+                rows.append(product.to_dict())
+            elif isinstance(product, dict):
+                rows.append(SleepProduct(
+                    proposal_id=str(product.get("proposal_id", "")),
+                    member_nethras=[str(n) for n in (product.get("member_nethras") or [])],
+                    touched_atoms=[str(a) for a in (product.get("touched_atoms") or [])],
+                    touched_structure_refs=[
+                        str(r) for r in (product.get("touched_structure_refs") or [])
+                    ],
+                    proposed_use_right=str(product.get("proposed_use_right", "feature_only")),
+                    proposed_context_scope=str(product.get("proposed_context_scope", "")),
+                    salience_delta=float(product.get("salience_delta", 0.0) or 0.0),
+                    evidence_summary=str(product.get("evidence_summary", "")),
+                    invalidators=[str(i) for i in (product.get("invalidators") or [])],
+                    reason=str(product.get("reason", "")),
+                    authority_allowed=False,
+                ).to_dict())
+            else:
+                raise TypeError(f"unsupported sleep product type: {type(product)!r}")
+        if not rows:
+            return 0
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with open(self.path, "a") as fh:
+            for row in rows:
+                fh.write(json.dumps(row, sort_keys=True) + "\n")
+        return len(rows)
+
     def append_run_summary(self, summary: dict[str, Any]) -> None:
         row = {
             "entry_kind": "run_summary",
@@ -180,6 +410,16 @@ class NethraMemoryStore:
                 break
         return records
 
+    def load_experience_events(self, limit: int | None = None) -> list[ExperienceEvent]:
+        events: list[ExperienceEvent] = []
+        for row in self._iter_rows():
+            if row.get("entry_kind") != "experience_event":
+                continue
+            events.append(ExperienceEvent.from_dict(row))
+            if limit is not None and len(events) >= max(0, int(limit)):
+                break
+        return events
+
     def load_scaffold_proposals(self, limit: int | None = None) -> list[dict[str, Any]]:
         proposals: list[dict[str, Any]] = []
         for record in self.load_records("scaffold_proposal", limit=limit):
@@ -205,6 +445,8 @@ class NethraMemoryStore:
                     authority_allowed += 1
             elif row.get("entry_kind") == "sleep_result":
                 sleep_runs += 1
+            elif row.get("entry_kind") == "experience_event":
+                by_type["experience_event"] += 1
         return {
             "path": str(self.path),
             "records": total,
@@ -288,6 +530,7 @@ def records_from_batch_record(row: dict[str, Any]) -> list[NethraMemoryRecord]:
     for i, payload in enumerate(((row.get("background_nethra_export") or {}).get("records") or [])):
         if not isinstance(payload, dict):
             continue
+        nid = str(payload.get("nethra_id", ""))
         out.append(NethraMemoryRecord(
             record_id=f"{run_id}:background:{i}:{payload.get('nethra_id', '')}",
             record_type="background_nethra",
@@ -295,12 +538,32 @@ def records_from_batch_record(row: dict[str, Any]) -> list[NethraMemoryRecord]:
             vars=_vars_from_payload(payload),
             contexts=_contexts_from_payload(payload),
             payload=payload,
+            nethra_id=nid,
+            touched_atoms=[f"x{v}" for v in _vars_from_payload(payload)],
+            touched_structure_refs=[
+                f"parents:{','.join(str(int(p)) for p in ps)}"
+                for ps in (payload.get("parent_sets") or [])
+                if isinstance(ps, list)
+            ] + [str(sig) for sig in (payload.get("fit_signatures") or [])],
+            member_nethras=[nid] if nid else [],
+            context_scope=(_contexts_from_payload(payload) or [""])[0],
+            role_history=[
+                {"role": str(role), "cycle": int(payload.get("last_seen_cycle", 0) or 0)}
+                for role in (payload.get("source_roles") or [])
+            ],
+            evidence_refs=[nid] if nid else [],
+            use_right="ranking_hint" if payload.get("parent_sets") else "feature_only",
+            salience=float(payload.get("salience_score", payload.get("cheap_recognition_score", 0.0)) or 0.0),
+            source="runtime",
+            created_cycle=int(payload.get("first_seen_cycle", 0) or 0),
+            last_used_cycle=int(payload.get("last_seen_cycle", 0) or 0),
             **base,
         ))
 
     for i, payload in enumerate(((row.get("context_role_index") or {}).get("records") or [])):
         if not isinstance(payload, dict):
             continue
+        nid = str(payload.get("nethra_id", ""))
         out.append(NethraMemoryRecord(
             record_id=f"{run_id}:context_role:{i}:{payload.get('nethra_id', '')}",
             record_type="context_role",
@@ -308,6 +571,24 @@ def records_from_batch_record(row: dict[str, Any]) -> list[NethraMemoryRecord]:
             vars=_vars_from_payload(payload),
             contexts=_contexts_from_payload(payload),
             payload=payload,
+            nethra_id=nid,
+            touched_atoms=[f"x{v}" for v in _vars_from_payload(payload)],
+            touched_structure_refs=[
+                f"parents:{','.join(str(int(p)) for p in (payload.get('learned_parents') or []))}",
+                str(payload.get("signature", "")),
+            ],
+            member_nethras=[nid] if nid else [],
+            context_scope=(_contexts_from_payload(payload) or [str(payload.get("context_key", ""))])[0],
+            role_history=[{
+                "role": str(payload.get("kind", "")),
+                "cycle": int(payload.get("last_seen_cycle", payload.get("cycle", 0)) or 0),
+            }],
+            evidence_refs=[nid] if nid else [],
+            use_right="ranking_hint" if payload.get("learned_parents") else "feature_only",
+            salience=0.2,
+            source="runtime",
+            created_cycle=int(payload.get("first_seen_cycle", payload.get("cycle", 0)) or 0),
+            last_used_cycle=int(payload.get("last_seen_cycle", payload.get("cycle", 0)) or 0),
             **base,
         ))
 

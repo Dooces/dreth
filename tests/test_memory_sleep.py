@@ -260,6 +260,78 @@ def test_extract_temporal_records_if_available_present():
     assert result[0].rec["kind"] == "temporal_cohort_pattern"
 
 
+def test_sleep_consumes_experience_events_and_emits_proposal_only_product():
+    c = _consolidator()
+    rows = [
+        {
+            "entry_kind": "record",
+            "record_type": "nethra_handle",
+            "record_id": "h1",
+            "nethra_id": "h1",
+            "seed": 1,
+            "touched_atoms": ["x1"],
+            "touched_structure_refs": ["x0:MAX(1)", "parents:1"],
+            "member_nethras": ["h1"],
+            "context_scope": "parent_candidates|x0|vis=2",
+            "use_right": "ranking_hint",
+            "authority_allowed": False,
+        },
+        {
+            "entry_kind": "experience_event",
+            "run_id": "run-b",
+            "seed": 1,
+            "cycle": 5,
+            "context_key": "parent_candidates|x0|vis=2",
+            "active_atoms": ["x0", "x1"],
+            "active_nethras": ["h1"],
+            "hook": "parent_candidates",
+            "use_right": "ranking_hint",
+            "candidates_before": [0, 1],
+            "candidates_after": [1, 0],
+            "behavior_effect": 1,
+            "authority_effect": 0,
+            "success": True,
+            "hidden_truth_used": False,
+        },
+    ]
+    mem = c.extract_nethra_memory_records(rows)
+    exp = c.extract_experience_events(rows)
+    products = c.build_sleep_products(mem, exp)
+    assert len(products) >= 1
+    product = next(p.to_dict() for p in products if "parents:1" in p.to_dict()["touched_structure_refs"])
+    assert product["entry_kind"] == "sleep_product"
+    assert product["authority_allowed"] is False
+    assert product["proposed_use_right"] != "hard_filter"
+    assert "h1" in product["member_nethras"]
+    assert "x1" in product["touched_atoms"]
+    assert "parents:1" in product["touched_structure_refs"]
+
+
+def test_sleep_negative_gate_requires_visible_failure_association():
+    c = _consolidator()
+    rows = [{
+        "entry_kind": "experience_event",
+        "run_id": "run-b",
+        "seed": 1,
+        "cycle": 5,
+        "context_key": "parent_candidates|x0|vis=2",
+        "active_atoms": ["x0", "x1"],
+        "active_nethras": ["h1"],
+        "hook": "parent_candidates",
+        "use_right": "ranking_hint",
+        "failure_reason": "quality_regression",
+        "hidden_truth_used": False,
+    }]
+    products = c.build_sleep_products(
+        c.extract_nethra_memory_records(rows),
+        c.extract_experience_events(rows),
+    )
+    assert products
+    product = products[0].to_dict()
+    assert product["proposed_use_right"] == "feature_only"
+    assert "visible_failure_association" in product["invalidators"]
+
+
 # ── Tests: build_proposals ────────────────────────────────────────────────────
 
 def test_visible_background_records_produce_proposals():

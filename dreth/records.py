@@ -101,6 +101,11 @@ class FitDiagnostic:
     best_parents: Tuple[int, ...]
     best_func: str
     failure_class: str
+    true_parents: Tuple[int, ...] = field(default_factory=tuple)
+    true_func: str = ""
+    true_present: bool = False
+    true_rank: int = -1
+    true_score: int = -1
     status_after: str = "unknown"
     role_after: str = "unknown"
     probes: Tuple[Tuple[int, float], ...] = field(default_factory=tuple)

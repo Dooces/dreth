@@ -69,6 +69,18 @@ class _TempObs(NamedTuple):
     seed: int
 
 
+class _MemObs(NamedTuple):
+    rec: dict[str, Any]
+    run_idx: int
+    seed: int
+
+
+class _ExpObs(NamedTuple):
+    rec: dict[str, Any]
+    run_idx: int
+    seed: int
+
+
 # ── Proposal and summary dataclasses ──────────────────────────────────────────
 
 @dataclass
@@ -141,6 +153,43 @@ class MemorySleepSummary:
     warning_count: int
 
 
+@dataclass
+class SleepProduct:
+    proposal_id: str
+    member_nethras: list[str]
+    touched_atoms: list[str]
+    touched_structure_refs: list[str]
+    proposed_use_right: str
+    proposed_context_scope: str
+    salience_delta: float
+    evidence_summary: str
+    invalidators: list[str]
+    reason: str
+    authority_allowed: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        use_right = self.proposed_use_right
+        invalidators = list(self.invalidators)
+        if use_right == "hard_filter":
+            use_right = "record_only"
+            invalidators.append("sleep_hard_filter_rejected")
+        return {
+            "entry_kind": "sleep_product",
+            "record_type": "sleep_product",
+            "proposal_id": self.proposal_id,
+            "member_nethras": self.member_nethras,
+            "touched_atoms": self.touched_atoms,
+            "touched_structure_refs": self.touched_structure_refs,
+            "proposed_use_right": use_right,
+            "proposed_context_scope": self.proposed_context_scope,
+            "salience_delta": round(float(self.salience_delta), 6),
+            "evidence_summary": self.evidence_summary,
+            "invalidators": list(dict.fromkeys(invalidators)),
+            "reason": self.reason,
+            "authority_allowed": False,
+        }
+
+
 # ── Helper functions ───────────────────────────────────────────────────────────
 
 def _parse_sig_parents(sig: str) -> frozenset[int]:
@@ -159,6 +208,14 @@ def _parse_sig_parents(sig: str) -> frozenset[int]:
         return frozenset(parts)
     except (ValueError, AttributeError):
         return frozenset()
+
+
+def _intlike(value: Any) -> bool:
+    try:
+        int(value)
+        return value is not None and not isinstance(value, bool)
+    except (TypeError, ValueError):
+        return False
 
 
 def _bg_anchor_key(rec: dict[str, Any]) -> tuple | None:
@@ -436,6 +493,142 @@ class MemorySleepConsolidator:
                 if isinstance(rec, dict) and str(rec.get('kind', '')) == 'temporal_cohort_pattern':
                     result.append(_TempObs(rec=rec, run_idx=run_idx, seed=seed))
         return result
+
+    def extract_nethra_memory_records(self, rows: list[dict[str, Any]]) -> list[_MemObs]:
+        result: list[_MemObs] = []
+        for run_idx, row in enumerate(rows):
+            if row.get("entry_kind") != "record":
+                continue
+            if any(k in HIDDEN_TRUTH_LIKE_FIELDS or str(k).startswith("debug_") for k in row):
+                continue
+            result.append(_MemObs(
+                rec=row,
+                run_idx=run_idx,
+                seed=int(row.get("seed", run_idx) or run_idx),
+            ))
+        return result
+
+    def extract_experience_events(self, rows: list[dict[str, Any]]) -> list[_ExpObs]:
+        result: list[_ExpObs] = []
+        for run_idx, row in enumerate(rows):
+            if row.get("entry_kind") == "experience_event":
+                if bool(row.get("hidden_truth_used", False)):
+                    continue
+                if any(k in HIDDEN_TRUTH_LIKE_FIELDS or str(k).startswith("debug_") for k in row):
+                    continue
+                result.append(_ExpObs(
+                    rec=row,
+                    run_idx=run_idx,
+                    seed=int(row.get("seed", run_idx) or run_idx),
+                ))
+            for event in row.get("nethra_memory_experience_events") or []:
+                if not isinstance(event, dict) or bool(event.get("hidden_truth_used", False)):
+                    continue
+                result.append(_ExpObs(
+                    rec=event,
+                    run_idx=run_idx,
+                    seed=int(row.get("seed", run_idx) or run_idx),
+                ))
+        return result
+
+    def build_sleep_products(
+        self,
+        memory_records: list[_MemObs],
+        experience_events: list[_ExpObs],
+        *,
+        min_sources: int = 1,
+        max_products: int = 2000,
+    ) -> list[SleepProduct]:
+        by_context_atom: dict[tuple[str, str], dict[str, Any]] = defaultdict(
+            lambda: {
+                "members": set(),
+                "atoms": set(),
+                "refs": set(),
+                "events": [],
+                "records": [],
+                "failures": 0,
+                "successes": 0,
+                "behavior_effects": 0,
+            }
+        )
+        for obs in memory_records:
+            rec = obs.rec
+            context = str(rec.get("context_scope") or (rec.get("contexts") or [""])[0])
+            atoms = [str(a) for a in (rec.get("touched_atoms") or [])]
+            if not atoms:
+                atoms = [f"x{int(v)}" for v in (rec.get("vars") or []) if _intlike(v)]
+            refs = [str(r) for r in (rec.get("touched_structure_refs") or [])]
+            members = [str(n) for n in (rec.get("member_nethras") or [])]
+            if rec.get("nethra_id"):
+                members.append(str(rec["nethra_id"]))
+            for atom in atoms or [""]:
+                bucket = by_context_atom[(context, atom)]
+                bucket["members"].update(members)
+                bucket["atoms"].update(atoms)
+                bucket["refs"].update(refs)
+                bucket["records"].append(rec)
+                bucket["failures"] += int(rec.get("failure_count", 0) or 0)
+                bucket["successes"] += int(rec.get("success_count", 0) or 0)
+        for obs in experience_events:
+            rec = obs.rec
+            context = str(rec.get("context_key", ""))
+            atoms = [str(a) for a in (rec.get("active_atoms") or [])]
+            members = [str(n) for n in (rec.get("active_nethras") or [])]
+            for atom in atoms or [""]:
+                bucket = by_context_atom[(context, atom)]
+                bucket["members"].update(members)
+                bucket["atoms"].update(atoms)
+                bucket["events"].append(rec)
+                bucket["behavior_effects"] += int(rec.get("behavior_effect", 0) or 0)
+                if rec.get("success"):
+                    bucket["successes"] += 1
+                if rec.get("failure_reason"):
+                    bucket["failures"] += 1
+
+        products: list[SleepProduct] = []
+        for i, ((context, atom), bucket) in enumerate(
+            sorted(by_context_atom.items(), key=lambda item: (-len(item[1]["events"]), item[0]))
+        ):
+            if len(products) >= max_products:
+                break
+            source_count = len(bucket["records"]) + len(bucket["events"])
+            if source_count < min_sources:
+                continue
+            failures = int(bucket["failures"])
+            successes = int(bucket["successes"])
+            behavior_effects = int(bucket["behavior_effects"])
+            if failures and not successes:
+                use_right = "feature_only"
+                reason = "negative gate from visible failure association"
+                salience_delta = -0.5 * failures
+                invalidators = ["visible_failure_association"]
+            elif behavior_effects > 0:
+                use_right = "ranking_hint"
+                reason = "prior assist behavior effect survived visible audit path"
+                salience_delta = 0.4 + 0.1 * successes
+                invalidators = []
+            else:
+                use_right = "feature_only"
+                reason = "familiar structure recurrence"
+                salience_delta = 0.1 * max(1, successes)
+                invalidators = []
+            products.append(SleepProduct(
+                proposal_id=f"sleep_{i:06d}_{abs(hash((context, atom))) % 10_000_000}",
+                member_nethras=sorted(bucket["members"]),
+                touched_atoms=sorted(bucket["atoms"]),
+                touched_structure_refs=sorted(bucket["refs"]),
+                proposed_use_right=use_right,
+                proposed_context_scope=context,
+                salience_delta=salience_delta,
+                evidence_summary=(
+                    f"{source_count} visible source(s), successes={successes}, "
+                    f"failures={failures}, behavior_effects={behavior_effects}"
+                ),
+                invalidators=invalidators,
+                reason=reason,
+                authority_allowed=False,
+            ))
+        return products
 
     def build_proposals(
         self,

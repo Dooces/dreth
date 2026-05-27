@@ -2,11 +2,12 @@ from __future__ import annotations
 
 """ScaffoldMemoryIndex: loads offline sleep proposals, matches runtime records.
 
-Familiarity/provenance telemetry only. No behavior effects.
+Familiarity/provenance plus bounded assist-feature ordering.
 
 Hard invariants:
   - authority_allowed=False on every loaded proposal
-  - behavior_effects=0 always
+  - record mode has no behavior effects
+  - assist_feature may reorder existing candidate lists only
   - No authority issuance, revocation, skip suppression, fit replacement,
     monitoring increase, repair priority increase, derivation support
   - No hidden truth/debug manifest reads or use
@@ -66,6 +67,40 @@ class ScaffoldMemoryProposal:
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "ScaffoldMemoryProposal":
+        if d.get("entry_kind") == "sleep_product" or d.get("record_type") == "sleep_product":
+            use = str(d.get("proposed_use_right", "feature_only"))
+            warnings = [str(w) for w in (d.get("invalidators") or [])]
+            if use == "hard_filter":
+                use = "record_only"
+                warnings.append("sleep_hard_filter_rejected")
+            return cls(
+                proposal_id=str(d.get("proposal_id", "")),
+                kind="sleep_product",
+                source_record_ids=[str(s) for s in (d.get("member_nethras") or [])],
+                source_kinds=["sleep_product"],
+                vars=[
+                    int(str(a)[1:])
+                    for a in (d.get("touched_atoms") or [])
+                    if str(a).startswith("x") and str(a)[1:].isdigit()
+                ],
+                contexts=[str(d.get("proposed_context_scope", ""))] if d.get("proposed_context_scope") else [],
+                common_signatures=[
+                    str(r) for r in (d.get("touched_structure_refs") or [])
+                    if not str(r).startswith("parents:")
+                ],
+                common_parents=[
+                    [int(p) for p in str(r).split(":", 1)[1].split(",") if p.strip().isdigit()]
+                    for r in (d.get("touched_structure_refs") or [])
+                    if str(r).startswith("parents:")
+                ],
+                role_patterns=[],
+                recurring_signals=[str(d.get("reason", ""))] if d.get("reason") else [],
+                confidence_as_familiarity=float(d.get("salience_delta", 0.0) or 0.0),
+                authority_allowed=False,
+                suggested_runtime_use=use,
+                warnings=warnings,
+                broad_generic_debt=False,
+            )
         vars_list = [int(v) for v in (d.get("vars") or [])]
         contexts = [str(c) for c in (d.get("contexts") or [])]
         signatures = [str(s) for s in (d.get("common_signatures") or [])]
@@ -107,7 +142,7 @@ class ScaffoldMemoryProposal:
 class ScaffoldMemoryIndex:
     """Load offline scaffold proposals and match against runtime records.
 
-    Familiarity/provenance telemetry. No behavior effects of any kind.
+    Familiarity/provenance telemetry plus bounded assist-feature ranking.
 
     Usage:
         index = ScaffoldMemoryIndex()

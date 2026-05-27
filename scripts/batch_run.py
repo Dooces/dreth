@@ -74,6 +74,7 @@ from dreth.scaffold_memory import (
 )
 from dreth.auto_sleep import AutoSleepConfig, AutoSleepScheduler, empty_auto_sleep_metrics
 from dreth.nethra_memory_store import NethraMemoryStore, records_from_batch_record
+from dreth.nethra_runtime_memory import PersistentNethraIndex
 from dreth.shadow_policy import (
     ShadowPolicySelector,
     SHADOW_ROW_FIELDS,
@@ -211,6 +212,8 @@ class RunConfig:
     background_nethra: str = "off"  # "off" | "record" | "assist_feature"
     scaffold_memory_mode: str = "off"  # "off" | "record" | "assist_feature"
     scaffold_memory_path: Optional[str] = None
+    nethra_memory: str = "off"  # "off" | "record" | "assist"
+    nethra_memory_path: Optional[str] = None
 
     def __post_init__(self) -> None:
         self.authority_derivation_policy = resolve_authority_derivation_policy(
@@ -587,6 +590,16 @@ class ArchMetrics:
     scaffold_memory_broad_generic_noops: int = 0
     scaffold_memory_no_runtime_hook_available: int = 0
     scaffold_memory_feature_examples: List[Dict[str, Any]] = field(default_factory=list)
+    persistent_nethras_loaded: int = 0
+    persistent_nethras_used: int = 0
+    sleep_products_loaded: int = 0
+    sleep_products_used: int = 0
+    nethra_memory_behavior_effects: int = 0
+    nethra_memory_authority_effects: int = 0
+    nethra_memory_candidate_reorders: int = 0
+    nethra_memory_probe_reorders: int = 0
+    nethra_memory_hard_filter_rejected: int = 0
+    nethra_memory_experience_events: List[Dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -928,6 +941,17 @@ def _build_and_run_dreth(
     if cfg.scaffold_memory_mode != "off" and cfg.scaffold_memory_path:
         _scaffold_index = ScaffoldMemoryIndex()
         _scaffold_index.load_proposals(cfg.scaffold_memory_path)
+    _nethra_memory_index = None
+    if cfg.nethra_memory != "off" and cfg.nethra_memory_path:
+        _nethra_memory_index = PersistentNethraIndex(
+            mode=cfg.nethra_memory,
+            run_id=(
+                f"{cfg.schedule}:n{cfg.n_vars}:c{cfg.cycles}:"
+                f"seed{cfg.seed}:{cfg.parent_ranker}/{cfg.probe_proposer}"
+            ),
+            seed=cfg.seed,
+        )
+        _nethra_memory_index.load_path(cfg.nethra_memory_path)
 
     agent = ChainedAgent(
         world=world, rng=rng_a,
@@ -953,6 +977,8 @@ def _build_and_run_dreth(
         background_nethra_mode=cfg.background_nethra,
         scaffold_memory_mode=cfg.scaffold_memory_mode,
         scaffold_memory_index=_scaffold_index,
+        nethra_memory_mode=cfg.nethra_memory,
+        nethra_memory_index=_nethra_memory_index,
     )
     if cfg.relative_authority_frontier_temporal_report:
         from dreth.relative_authority_frontier import TemporalGraphFrontierEvaluator
@@ -1478,6 +1504,19 @@ def _extract_arch_metrics(agent: ChainedAgent, world: CausalWorld) -> ArchMetric
         m.scaffold_memory_feature_examples = list(
             _sm.get("scaffold_memory_feature_examples", []) or []
         )
+    if hasattr(agent, "nethra_memory_metrics"):
+        _nm = agent.nethra_memory_metrics()
+        m.persistent_nethras_loaded = int(_nm.get("persistent_nethras_loaded", 0))
+        m.persistent_nethras_used = int(_nm.get("persistent_nethras_used", 0))
+        m.sleep_products_loaded = int(_nm.get("sleep_products_loaded", 0))
+        m.sleep_products_used = int(_nm.get("sleep_products_used", 0))
+        m.nethra_memory_behavior_effects = int(_nm.get("nethra_memory_behavior_effects", 0))
+        m.nethra_memory_authority_effects = int(_nm.get("nethra_memory_authority_effects", 0))
+        m.nethra_memory_candidate_reorders = int(_nm.get("nethra_memory_candidate_reorders", 0))
+        m.nethra_memory_probe_reorders = int(_nm.get("nethra_memory_probe_reorders", 0))
+        m.nethra_memory_hard_filter_rejected = int(_nm.get("nethra_memory_hard_filter_rejected", 0))
+        if hasattr(agent, "nethra_memory_experience_export"):
+            m.nethra_memory_experience_events = agent.nethra_memory_experience_export()
     _temporal_frontier = getattr(agent, "_diagnostic_audit_observer", None)
     if _temporal_frontier is not None and hasattr(_temporal_frontier, "summary"):
         _tfs = _temporal_frontier.summary()
@@ -2038,6 +2077,9 @@ def _append_memory_records_for_result(
         ))
     memory_records = records_from_batch_record(rec)
     written = memory_store.append_records(memory_records)
+    events_written = memory_store.append_experience_events(
+        r.arch.nethra_memory_experience_events
+    )
     memory_store.append_run_summary({
         "run_id": rec["run_id"],
         "seed": r.config.seed,
@@ -2045,6 +2087,7 @@ def _append_memory_records_for_result(
         "n_vars": r.config.n_vars,
         "cycles": r.config.cycles,
         "nethra_memory_records_written": written,
+        "experience_events_written": events_written,
         "authority_allowed": False,
     })
     return written
@@ -3218,9 +3261,10 @@ def main():
                          "report match telemetry; assist_feature may reorder existing "
                          "candidate lists only (default: off)"))
     p.add_argument("--nethra-memory", default="off",
-                   choices=["off", "record"],
-                   help=("persistent Nethra memory: off=disabled; record=append "
-                         "runtime-visible familiarity/provenance records only"))
+                   choices=["off", "record", "assist"],
+                   help=("persistent Nethra memory: off=disabled; record=load/write "
+                         "runtime-visible records without behavior changes; assist=load "
+                         "records and apply use-right limited candidate/probe ordering"))
     p.add_argument("--nethra-memory-path", default="reports/nethra_memory_store.jsonl",
                    metavar="PATH",
                    help="path for persistent Nethra memory JSONL")
@@ -3241,7 +3285,7 @@ def main():
     p.add_argument("--auto-load-scaffold-memory", default="off",
                    choices=["off", "record"],
                    help=("load --auto-sleep-proposals as scaffold memory in record mode "
-                         "if the file exists; no behavior effects"))
+                         "if the file exists; record mode has no behavior effects"))
     p.add_argument("--authority-derivation-policy", default=None,
                    choices=[
                        "off",
@@ -3395,7 +3439,9 @@ def main():
                   authority_derivation_policy=authority_derivation_policy,
                   background_nethra=args.background_nethra,
                   scaffold_memory_mode=args.scaffold_memory_mode,
-                  scaffold_memory_path=args.scaffold_memory)
+                  scaffold_memory_path=args.scaffold_memory,
+                  nethra_memory=args.nethra_memory,
+                  nethra_memory_path=args.nethra_memory_path)
         for schedule in schedule_list
         for v in var_list
         for c in cycle_list
@@ -3493,7 +3539,7 @@ def main():
         )
 
     memory_store: Optional[NethraMemoryStore] = None
-    if args.nethra_memory == "record" or args.auto_sleep != "off":
+    if args.nethra_memory != "off" or args.auto_sleep != "off":
         memory_store = NethraMemoryStore(args.nethra_memory_path)
 
     auto_sleep_scheduler = AutoSleepScheduler()
@@ -3955,6 +4001,18 @@ def main():
                 else:
                     rec["auto_loaded_scaffold_proposals"] = 0
                     rec["auto_loaded_scaffold_matches"] = 0
+                rec.update({
+                    "persistent_nethras_loaded": r.arch.persistent_nethras_loaded,
+                    "persistent_nethras_used": r.arch.persistent_nethras_used,
+                    "sleep_products_loaded": r.arch.sleep_products_loaded,
+                    "sleep_products_used": r.arch.sleep_products_used,
+                    "nethra_memory_behavior_effects": r.arch.nethra_memory_behavior_effects,
+                    "nethra_memory_authority_effects": r.arch.nethra_memory_authority_effects,
+                    "nethra_memory_candidate_reorders": r.arch.nethra_memory_candidate_reorders,
+                    "nethra_memory_probe_reorders": r.arch.nethra_memory_probe_reorders,
+                    "nethra_memory_hard_filter_rejected": r.arch.nethra_memory_hard_filter_rejected,
+                    "nethra_memory_experience_events": r.arch.nethra_memory_experience_events,
+                })
                 rec.update(empty_auto_sleep_metrics())
                 rec["run_id"] = (
                     f"{r.config.schedule}:n{r.config.n_vars}:c{r.config.cycles}:"
@@ -3963,6 +4021,9 @@ def main():
                 if memory_store is not None:
                     memory_records = records_from_batch_record(rec)
                     written = memory_store.append_records(memory_records)
+                    events_written = memory_store.append_experience_events(
+                        r.arch.nethra_memory_experience_events
+                    )
                     memory_store.append_run_summary({
                         "run_id": rec["run_id"],
                         "seed": r.config.seed,
@@ -3970,9 +4031,11 @@ def main():
                         "n_vars": r.config.n_vars,
                         "cycles": r.config.cycles,
                         "nethra_memory_records_written": written,
+                        "experience_events_written": events_written,
                         "authority_allowed": False,
                     })
                     rec["nethra_memory_records_written"] = written
+                    rec["experience_events_written"] = events_written
                     rec["nethra_memory_backlog_count"] = memory_store.count_backlog()
                     rec["nethra_memory_store_path"] = str(memory_store.path)
                 else:

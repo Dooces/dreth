@@ -205,8 +205,11 @@ def main() -> None:
     unc = consolidator.extract_uncertainty_records(rows)
     auth = consolidator.extract_authority_records(rows)
     temp = consolidator.extract_temporal_records_if_available(rows)
+    mem = consolidator.extract_nethra_memory_records(rows)
+    exp = consolidator.extract_experience_events(rows)
     print(f"  background: {len(bg)}  context-role: {len(cr)}  "
-          f"uncertainty: {len(unc)}  authority: {len(auth)}  temporal: {len(temp)}")
+          f"uncertainty: {len(unc)}  authority: {len(auth)}  temporal: {len(temp)} "
+          f"memory: {len(mem)}  experience: {len(exp)}")
 
     print("Building proposals ...")
     proposals = consolidator.build_proposals(
@@ -216,7 +219,14 @@ def main() -> None:
         max_sources_per_proposal=args.max_sources_per_proposal,
         posthoc_relation_type=args.posthoc_relation_type_report,
     )
-    print(f"  {len(proposals)} proposal(s) built.")
+    sleep_products = consolidator.build_sleep_products(
+        mem,
+        exp,
+        min_sources=1,
+        max_products=args.max_proposals,
+    )
+    print(f"  {len(proposals)} scaffold proposal(s) built.")
+    print(f"  {len(sleep_products)} sleep product(s) built.")
 
     print("Summarizing ...")
     summary = consolidator.summarize(rows, bg, cr, unc, auth, temp, proposals)
@@ -227,7 +237,12 @@ def main() -> None:
     with open(out_path, 'w') as fh:
         for prop in proposals:
             fh.write(json.dumps(prop.to_dict()) + "\n")
-    print(f"  Proposals written to {out_path}  ({len(proposals)} proposals)")
+        for product in sleep_products:
+            fh.write(json.dumps(product.to_dict()) + "\n")
+    print(
+        f"  Proposals written to {out_path}  "
+        f"({len(proposals)} scaffold proposals, {len(sleep_products)} sleep products)"
+    )
 
     # Write summary TXT
     summary_path = Path(args.summary)
@@ -246,6 +261,7 @@ def main() -> None:
         sys.exit(2)
     print(f"compression_ratio: {summary.compression_ratio:.4f}")
     print(f"proposals: {len(proposals)}")
+    print(f"sleep_products: {len(sleep_products)}")
     if summary.zero_or_flat_source_fields:
         print("source field diagnostics:")
         for f in summary.zero_or_flat_source_fields:

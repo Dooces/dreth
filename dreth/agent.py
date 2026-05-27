@@ -122,6 +122,7 @@ from .learned_residual import (
 )
 from .background_nethra import BackgroundNethraIndex
 from .scaffold_memory import ScaffoldMemoryIndex
+from .nethra_runtime_memory import PersistentNethraIndex
 
 # ── Trass authority thresholds ────────────────────────────────────────────────
 # A trass cert suppresses future sentinel monitoring — the strongest operational
@@ -261,6 +262,8 @@ class ChainedAgent:
         background_nethra_mode: str = "off",
         scaffold_memory_mode: str = "off",
         scaffold_memory_index: Optional[ScaffoldMemoryIndex] = None,
+        nethra_memory_mode: str = "off",
+        nethra_memory_index: Optional[PersistentNethraIndex] = None,
     ):
         """Construct agent. Initializes empty ledger, zero counters, and
         applies any provided per-var cost weight overrides."""
@@ -661,6 +664,13 @@ class ChainedAgent:
         self._scaffold_memory_index = (
             scaffold_memory_index if scaffold_memory_mode != "off" else None
         )
+        self._current_cycle_for_memory = 0
+        if nethra_memory_mode not in {"off", "record", "assist"}:
+            raise ValueError("nethra_memory_mode must be off, record, or assist")
+        self._nethra_memory_mode = nethra_memory_mode
+        self._nethra_memory_index = (
+            nethra_memory_index if nethra_memory_mode != "off" else None
+        )
 
     def scaffold_memory_metrics(self) -> Dict[str, Any]:
         if self._scaffold_memory_index is None:
@@ -674,6 +684,32 @@ class ChainedAgent:
                 "scaffold_memory_feature_examples": [],
             }
         return self._scaffold_memory_index.runtime_metrics()
+
+    def nethra_memory_metrics(self) -> Dict[str, Any]:
+        if self._nethra_memory_index is None:
+            return {
+                "persistent_nethras_loaded": 0,
+                "persistent_nethras_used": 0,
+                "sleep_products_loaded": 0,
+                "sleep_products_used": 0,
+                "nethra_memory_behavior_effects": 0,
+                "nethra_memory_authority_effects": 0,
+                "nethra_memory_candidate_reorders": 0,
+                "nethra_memory_probe_reorders": 0,
+                "nethra_memory_soft_filter_fallbacks": 0,
+                "nethra_memory_hard_filter_rejected": 0,
+                "nethra_memory_block_events": 0,
+                "nethra_memory_lookups": 0,
+                "nethra_memory_matches": 0,
+                "nethra_memory_use_right_counts": {},
+                "nethra_memory_examples": [],
+            }
+        return self._nethra_memory_index.runtime_metrics()
+
+    def nethra_memory_experience_export(self) -> List[Dict[str, Any]]:
+        if self._nethra_memory_index is None:
+            return []
+        return self._nethra_memory_index.export_experience_events()
 
     def _context_role_index_enabled(self) -> bool:
         return self._context_role_index is not None
@@ -1620,6 +1656,7 @@ class ChainedAgent:
         Returns (best_parents, best_func, best_score, second_score, fit_diag).
         fit_diag is passed explicitly to _install_var — no side-channel.
         Increments full_audit_count and total_interventions."""
+        cycle = int(getattr(cycle, "cycle", cycle))
         self.full_audit_count += 1
         n = self.ledger.vars[var]
         # available_parents: either from a per-target sensitivity screen (sparse
@@ -1729,6 +1766,21 @@ class ChainedAgent:
         )
         if _provider_probes or _frontier_probes or _consolidation_probes:
             _merged_probes = _provider_probes + _frontier_probes + _consolidation_probes
+        if (
+            self._nethra_memory_index is not None
+            and _merged_probes
+        ):
+            _merged_probes = self._nethra_memory_index.rank_probes(
+                var=var,
+                context_key=nethra_context_key(
+                    operation="probe_candidates",
+                    var=var,
+                    visible=self.world.visible_count,
+                    parents=tuple(sorted(available)),
+                ),
+                probes=tuple(_merged_probes),
+                cycle=cycle,
+            )
 
         result = fit_var(var, self.world, self.rng, budget,
                          n.current_tolerance, available_parents=available, diag=diag_dict,
@@ -1912,9 +1964,9 @@ class ChainedAgent:
         state_snapshot = tuple(saved)  # immutable snapshot for witness storage
         var_tol = self.ledger.vars[var].current_tolerance
         for iv_val in spread_perturbs:
+            n_trials += 1
             if abs(iv_val - saved[var]) <= var_tol:
                 continue
-            n_trials += 1
             baseline_sum = [0.0] * self.world.visible_count
             perturbed_sum = [0.0] * self.world.visible_count
             for _ in range(n_samples_per):
@@ -2064,6 +2116,7 @@ class ChainedAgent:
         total_trials = 0
         # First interacting probe — stored as the composite sentinel probe.
         first_probe: Optional[Tuple[float, float, int, float]] = None  # val_a, val_b, j, tol_j
+        first_joint_values: Optional[Tuple[float, float, float, float]] = None
 
         for val_a, val_b in zip(spread, spread):
             if abs(val_a - saved[var_a]) <= self.ledger.vars[var_a].current_tolerance:
@@ -2081,6 +2134,8 @@ class ChainedAgent:
 
             interaction = False
             for j in sentinel_vars:
+                if first_joint_values is None:
+                    first_joint_values = (R0[j], RA[j], RB[j], RAB[j])
                 jt = self.ledger.vars[j].current_tolerance
                 if (abs(RAB[j] - R0[j]) > jt
                         and abs(RA[j] - R0[j]) <= jt
@@ -2159,11 +2214,33 @@ class ChainedAgent:
                          "interactions": f"{interaction_trials}/{total_trials}"},
             ))
 
-        # Individual certs are left unchanged. xA and xB proved individually trass
-        # before this test ran — that evidence is still accurate. The composite
-        # cert is the authority for the joint relationship; the individual trass
-        # certs remain correct as individual claims. Writing false_trass on the
-        # individual certs would conflate individual and joint evidence.
+        # Joint evidence invalidates the shortcut authority of the individual
+        # trass certs in this composition scope. The composite carries the joint
+        # witness; individual certs must be retested before they shortcut again.
+        r0, ra, rb, rab = first_joint_values or (None, None, None, None)
+        for _member in (var_a, var_b):
+            _cert = self.ledger.vars[_member].certificates.get("skip")
+            if _cert is not None:
+                _joint_updates: Dict[str, Any] = {
+                    "role": _cert.role,
+                    "revoked_by": _cert.revoked_by,
+                }
+                if not _cert.context_parents:
+                    _joint_updates = {
+                        "role": "untested",
+                        "revoked_by": "composite_failure",
+                        "changes": interaction_trials,
+                        "trials": total_trials,
+                    }
+                self.ledger.vars[_member].certificates["skip"] = dataclasses.replace(
+                    _cert,
+                    joint_members=(var_a, var_b),
+                    joint_R0=r0,
+                    joint_RA=ra,
+                    joint_RB=rb,
+                    joint_RAB=rab,
+                    **_joint_updates,
+                )
         return "tareth"
 
     def _is_ancestor(self, v: int, target: int, _visited: Optional[Set[int]] = None) -> bool:
@@ -2784,6 +2861,8 @@ class ChainedAgent:
         tie_set = frozenset()
         near_tie_candidates: Tuple = ()
         near_tie_context_key: int = 0
+        if fit_diag is None:
+            fit_diag = getattr(self, "_last_fit_diag", None)
         if fit_diag is not None:
             tie_set = fit_diag.tie_set
             near_tie_candidates = fit_diag.near_tie_candidates
@@ -3777,6 +3856,20 @@ class ChainedAgent:
                         post_route,
                     )
                 )
+            if self._nethra_memory_index is not None:
+                post_route = tuple(
+                    self._nethra_memory_index.rank_candidates(
+                        var=target,
+                        context_key=nethra_context_key(
+                            operation="parent_candidates",
+                            var=target,
+                            visible=self.world.visible_count,
+                        ),
+                        candidates=post_route,
+                        hook="parent_candidates",
+                        cycle=getattr(self, "_current_cycle_for_memory", 0),
+                    )
+                )
             excluded = tuple(x for x in ranking.ranked if x not in post_route)
             source_by_candidate = getattr(ranking, "source_by_candidate", {})
             post_route_sources = {
@@ -3840,6 +3933,23 @@ class ChainedAgent:
             scored.sort(key=lambda row: (-row[0], -scaffold_scores.get(row[1], 0), row[1]))
         else:
             scored.sort(reverse=True)
+        if self._nethra_memory_index is not None:
+            context = nethra_context_key(
+                operation="parent_candidates",
+                var=target,
+                visible=self.world.visible_count,
+            )
+            ranked_candidates = tuple(
+                self._nethra_memory_index.rank_candidates(
+                    var=target,
+                    context_key=context,
+                    candidates=tuple(x for _, x in scored),
+                    hook="parent_candidates",
+                    cycle=getattr(self, "_current_cycle_for_memory", 0),
+                )
+            )
+            rank_pos = {x: i for i, x in enumerate(ranked_candidates)}
+            scored.sort(key=lambda row: (rank_pos.get(row[1], len(scored)), -row[0], row[1]))
         return {
             x for _, x in scored[:m]
             if n.route_certs.get(x) is None or n.route_certs[x].role != "trass"
@@ -3879,6 +3989,7 @@ class ChainedAgent:
         + uncertainty_age        time since last change, if never audited (novel vars age in)
         - clean_passes           skip count × 0.1 (penalises boring stable vars)
         """
+        cycle = int(getattr(cycle, "cycle", cycle))
         n = self.ledger.vars[var]
         failure_signal = n.consecutive_sentinel_failures * 2.0
         consequence = n.cost_weight
@@ -3965,6 +4076,8 @@ class ChainedAgent:
           4. Append a CycleRecord with skipped/audited/deferred lists for
              offline diagnostic comparison.
         """
+        cycle = int(getattr(cycle, "cycle", cycle))
+        self._current_cycle_for_memory = cycle
         self._uncertain_this_cycle.clear()
         self._run_uncertainty_consolidation(cycle)
         self._run_authority_strength(cycle)
