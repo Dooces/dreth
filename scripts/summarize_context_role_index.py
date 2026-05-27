@@ -309,6 +309,65 @@ def print_report(rows: list[dict[str, Any]], out: TextIO) -> None:
     print("J. Warning", file=out)
     print("  ContextRoleIndex is provenance and locality memory, not runtime truth.", file=out)
     print("  A trass role is not deletion and a tareth role is not global identity.", file=out)
+    print(file=out)
+
+    _print_surface_report(rows, out)
+
+
+def _iter_role_surfaces(rows: Iterable[dict[str, Any]]) -> Iterable[dict[str, Any]]:
+    for row in rows:
+        index = row.get("context_role_index") or row.get("nethra_reservoir") or {}
+        for s in index.get("role_surfaces") or ():
+            if isinstance(s, dict):
+                yield s
+
+
+def _iter_residual_buckets(rows: Iterable[dict[str, Any]]) -> Iterable[dict[str, Any]]:
+    for row in rows:
+        index = row.get("context_role_index") or row.get("nethra_reservoir") or {}
+        for b in index.get("residual_buckets") or ():
+            if isinstance(b, dict):
+                yield b
+
+
+def _print_surface_report(rows: list[dict[str, Any]], out: TextIO) -> None:
+    surfaces = list(_iter_role_surfaces(rows))
+    buckets = list(_iter_residual_buckets(rows))
+
+    surface_count = _sum_int(rows, "role_surface_count")
+    load_bearing = _sum_int(rows, "load_bearing_surface_count")
+    residual_surfaces = _sum_int(rows, "residual_surface_count")
+    bucket_count = _sum_int(rows, "residual_bucket_count")
+    pressure_total = sum(_as_float(row.get("residual_pressure_total")) for row in rows)
+    unresolved_total = _sum_int(rows, "residual_unresolved_count")
+    absorbed_total = _sum_int(rows, "residual_absorbed_count")
+    regime_candidates = _sum_int(rows, "regime_transition_candidates_from_residuals")
+    growth_windows = _sum_int(rows, "residual_pressure_persistent_growth_windows")
+
+    print("K. Role surfaces (record-only)", file=out)
+    print(f"  exported_surfaces: {len(surfaces)}", file=out)
+    print(f"  runtime_role_surface_count: {surface_count}", file=out)
+    print(f"  load_bearing_surface_count: {load_bearing}", file=out)
+    print(f"  residual_surface_count: {residual_surfaces}", file=out)
+    role_counts: Counter[str] = Counter(str(s.get("role_state") or "unknown") for s in surfaces)
+    print("  by_role_state:", " ".join(f"{k}={v}" for k, v in role_counts.most_common()) or "none", file=out)
+    print(file=out)
+
+    print("L. Residual buckets (record-only)", file=out)
+    print(f"  exported_buckets: {len(buckets)}", file=out)
+    print(f"  runtime_bucket_count: {bucket_count}", file=out)
+    print(f"  residual_pressure_total: {pressure_total:.4f}", file=out)
+    print(f"  residual_unresolved_count: {unresolved_total}", file=out)
+    print(f"  residual_absorbed_count: {absorbed_total}", file=out)
+    print(f"  regime_transition_candidates: {regime_candidates}", file=out)
+    print(f"  persistent_growth_windows: {growth_windows}", file=out)
+    pressures = [_as_float(b.get("pressure")) for b in buckets]
+    if pressures:
+        print(
+            f"  exported_pressure: max={max(pressures):.4f} mean={sum(pressures)/len(pressures):.4f}",
+            file=out,
+        )
+    print("  Note: residual pressure is not authority. Pressure alone may not trigger any action.", file=out)
 
 
 def main() -> None:

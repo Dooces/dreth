@@ -237,3 +237,76 @@ def test_projection_populated_after_upsert(tmp_path):
     assert store._projection.size() == 1
     result = store._projection.query("x1", "ctx_A", "ranking_hint")
     assert any(e.nethra_id == "n1" for e in result)
+
+
+# ── Step 2: role-surface gating ───────────────────────────────────────────────
+
+def test_projection_index_gates_primary_projection_by_surface_role():
+    """A trass-role node is not returned for primary projection hooks."""
+    pi = ProjectionIndex()
+    node = make_node("n_trass", atoms=["x1"], use_rights=["ranking_hint"])
+    # Override via direct entry to set role_state
+    pi.index_node(node)
+    # Manually set the role_state to trass after indexing to simulate surface-gating
+    pi._entries["n_trass"].role_state = "trass"
+
+    result = pi.query("x1", "", "ranking_hint")
+    assert not any(e.nethra_id == "n_trass" for e in result), \
+        "trass surface must not emit primary ranking_hint projection"
+
+
+def test_trass_surface_does_not_alter_primary_candidate_projection():
+    """Trass surface node is excluded from parent_candidates projection."""
+    pi = ProjectionIndex()
+    node = make_node("n_trass2", atoms=["x2"], use_rights=["ranking_hint"])
+    pi.index_node(node)
+    pi._entries["n_trass2"].role_state = "trass"
+
+    result_parent = pi.query("x2", "", "parent_candidates")
+    assert not any(e.nethra_id == "n_trass2" for e in result_parent)
+
+    result_probe = pi.query("x2", "", "probe_hint")
+    assert not any(e.nethra_id == "n_trass2" for e in result_probe)
+
+
+def test_best_available_projection_is_bounded():
+    """Best-available surface nodes are NOT blocked; they can emit bounded weak projections."""
+    pi = ProjectionIndex()
+    node = make_node("n_ba", atoms=["x3"], use_rights=["ranking_hint"])
+    pi.index_node(node)
+    pi._entries["n_ba"].role_state = "best_available"
+
+    result = pi.query("x3", "", "ranking_hint")
+    assert any(e.nethra_id == "n_ba" for e in result), \
+        "best_available must still emit for ranking_hint"
+
+
+def test_tareth_surface_emits_normally():
+    """Tareth-role nodes always emit for primary hooks."""
+    pi = ProjectionIndex()
+    node = make_node("n_ta", atoms=["x4"], use_rights=["ranking_hint"])
+    pi.index_node(node)
+    pi._entries["n_ta"].role_state = "tareth"
+
+    result = pi.query("x4", "", "ranking_hint")
+    assert any(e.nethra_id == "n_ta" for e in result)
+
+
+def test_role_state_set_from_node_roles_by_context():
+    """index_node reads roles_by_context and sets role_state on the entry."""
+    pi = ProjectionIndex()
+    node = make_node("n_rbc", atoms=["x5"], use_rights=["ranking_hint"])
+    node.roles_by_context = {"ctx_X": ["trass"]}
+    pi.index_node(node)
+    assert pi._entries["n_rbc"].role_state == "trass"
+
+
+def test_unresolved_surface_blocked_from_primary_hooks():
+    """Unresolved surface is also blocked from primary projection hooks."""
+    pi = ProjectionIndex()
+    node = make_node("n_unres", atoms=["x6"], use_rights=["probe_hint"])
+    pi.index_node(node)
+    pi._entries["n_unres"].role_state = "unresolved"
+
+    result = pi.query("x6", "", "probe_hint")
+    assert not any(e.nethra_id == "n_unres" for e in result)

@@ -46,6 +46,16 @@ class Disposition(str, Enum):
     NOISE = "noise"
 
 
+class InternalDisposition(str, Enum):
+    """Dreth-native decision layer.  Maps to the public Disposition for compatibility."""
+    ABSORB = "absorb"                               # -> ASSIMILATED
+    CHARGE_RESIDUAL = "charge_residual"             # -> RESIDUAL (trass/unresolved/best_available target)
+    FRACTURE_IDENTITY = "fracture_identity"         # -> SPLIT_CANDIDATE
+    SPAWN_RESIDUAL = "spawn_residual"               # -> RESIDUAL (no organizing handle)
+    CONTRADICTION_TO_ACCOUNT = "contradiction_to_account"  # -> CONTRADICTION
+    NOISE = "noise"                                 # -> NOISE
+
+
 @dataclass
 class AssimilationResult:
     disposition: Disposition
@@ -53,6 +63,7 @@ class AssimilationResult:
     match_score: float         # Jaccard similarity (0.0 if no match)
     evidence_ref: str          # primary identifier from the incoming row
     has_candidates: bool = False  # True when at least one candidate node was found
+    internal_disposition: str = ""  # InternalDisposition value for Dreth-native routing
 
 
 # ── sub-indexes ───────────────────────────────────────────────────────────────
@@ -314,6 +325,7 @@ class NethraAssimilator:
         self._topology = TopologyIndex()
         self.residuals = ResidualIndex()
         self._stats: dict[str, int] = {d.value: 0 for d in Disposition}
+        self._internal_stats: dict[str, int] = {d.value: 0 for d in InternalDisposition}
         self.total_calls: int = 0
 
     # ── index management ──────────────────────────────────────────────────────
@@ -396,7 +408,8 @@ class NethraAssimilator:
             or row.get("member_nethras")
         )
         if not has_signal:
-            return self._emit(Disposition.NOISE, None, 0.0, evidence_ref)
+            return self._emit(Disposition.NOISE, None, 0.0, evidence_ref,
+                              internal_disp=InternalDisposition.NOISE)
 
         # ── Step 2: gather candidates via all four sub-indexes ────────────────
         candidates: set[str] = set()
@@ -412,7 +425,8 @@ class NethraAssimilator:
 
         if not candidates:
             # No overlapping structures at all → genuinely new pattern, not residual
-            return self._emit(Disposition.RESIDUAL, None, 0.0, evidence_ref, has_candidates=False)
+            return self._emit(Disposition.RESIDUAL, None, 0.0, evidence_ref, has_candidates=False,
+                              internal_disp=InternalDisposition.SPAWN_RESIDUAL)
 
         # ── Step 4: score by Jaccard atom overlap ────────────────────────────
         best_id: str | None = None
@@ -436,7 +450,8 @@ class NethraAssimilator:
         if best_score < _PARTIAL_THRESHOLD or best_id is None:
             # has_candidates only if there was real atom overlap; score=0 means no atom match
             return self._emit(Disposition.RESIDUAL, None, best_score, evidence_ref,
-                              has_candidates=best_score > 0.0)
+                              has_candidates=best_score > 0.0,
+                              internal_disp=InternalDisposition.SPAWN_RESIDUAL)
 
         # ── Step 5: assign disposition ────────────────────────────────────────
         node = nodes[best_id]
@@ -453,7 +468,8 @@ class NethraAssimilator:
             and node.success_count > node.failure_count * 3
         )
         if row_failure and node_success_dominant:
-            return self._emit(Disposition.CONTRADICTION, best_id, best_score, evidence_ref)
+            return self._emit(Disposition.CONTRADICTION, best_id, best_score, evidence_ref,
+                              internal_disp=InternalDisposition.CONTRADICTION_TO_ACCOUNT)
 
         # Split candidate: good overlap, incompatible context root
         if (
@@ -462,22 +478,35 @@ class NethraAssimilator:
             and node_ctx_prefix
             and row_ctx_prefix != node_ctx_prefix
         ):
-            return self._emit(Disposition.SPLIT_CANDIDATE, best_id, best_score, evidence_ref)
+            return self._emit(Disposition.SPLIT_CANDIDATE, best_id, best_score, evidence_ref,
+                              internal_disp=InternalDisposition.FRACTURE_IDENTITY)
 
         # Full assimilation
         if best_score >= _ASSIMILATION_THRESHOLD:
-            return self._emit(Disposition.ASSIMILATED, best_id, best_score, evidence_ref)
+            return self._emit(Disposition.ASSIMILATED, best_id, best_score, evidence_ref,
+                              internal_disp=InternalDisposition.ABSORB)
 
-        # Partial overlap but insufficient for assimilation → residual
-        return self._emit(Disposition.RESIDUAL, None, best_score, evidence_ref)
+        # Partial overlap but insufficient for assimilation.
+        # If the best matching node has a residual-collection surface role, this is
+        # a CHARGE_RESIDUAL rather than a plain SPAWN_RESIDUAL.
+        node = nodes[best_id]
+        if _has_residual_surface_role(getattr(node, "roles_by_context", {})):
+            return self._emit(Disposition.RESIDUAL, None, best_score, evidence_ref,
+                              internal_disp=InternalDisposition.CHARGE_RESIDUAL)
+        return self._emit(Disposition.RESIDUAL, None, best_score, evidence_ref,
+                          internal_disp=InternalDisposition.SPAWN_RESIDUAL)
 
     # ── stats ─────────────────────────────────────────────────────────────────
 
     def stats(self) -> dict[str, int]:
         return dict(self._stats)
 
+    def internal_stats(self) -> dict[str, int]:
+        return dict(self._internal_stats)
+
     def reset_stats(self) -> None:
         self._stats = {d.value: 0 for d in Disposition}
+        self._internal_stats = {d.value: 0 for d in InternalDisposition}
         self.total_calls = 0
 
     # ── internal ──────────────────────────────────────────────────────────────
@@ -490,12 +519,33 @@ class NethraAssimilator:
         evidence_ref: str,
         *,
         has_candidates: bool = True,
+        internal_disp: InternalDisposition | None = None,
     ) -> AssimilationResult:
         self._stats[disp.value] = self._stats.get(disp.value, 0) + 1
+        internal_str = internal_disp.value if internal_disp is not None else ""
+        if internal_str:
+            self._internal_stats[internal_str] = self._internal_stats.get(internal_str, 0) + 1
         return AssimilationResult(
             disposition=disp,
             explained_by=explained_by,
             match_score=score,
             evidence_ref=evidence_ref,
             has_candidates=has_candidates,
+            internal_disposition=internal_str,
         )
+
+
+# ---------------------------------------------------------------------------
+# Module-level helpers
+# ---------------------------------------------------------------------------
+
+_RESIDUAL_SURFACE_ROLES: frozenset[str] = frozenset({"trass", "unresolved", "best_available"})
+
+
+def _has_residual_surface_role(roles_by_context: dict[str, list[str]]) -> bool:
+    """Return True if the node has any trass/unresolved/best_available role."""
+    for roles in roles_by_context.values():
+        for role in roles:
+            if role in _RESIDUAL_SURFACE_ROLES:
+                return True
+    return False

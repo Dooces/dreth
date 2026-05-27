@@ -181,6 +181,8 @@ _BUDGET_ESCALATION_CAP               = 400
 # set for influence on that var. Fires every multiple of this threshold so
 # re-screen recurs as failures accumulate (e.g. at 6, 12, 18...).
 _INERT_RESCREEN_THRESHOLD            = 6
+_BACKGROUND_RESIDUAL_BUDGET          = 10  # max residuals classified per cycle; never competes with focal audit
+
 class AgentExtension(Protocol):
     derive_compressions: Callable[["ChainedAgent", int, int], List[Compression]]
     derive_equivalence_compressions: Callable[["ChainedAgent", int, int], List[Compression]]
@@ -1237,6 +1239,19 @@ class ChainedAgent:
                 "reservoir_records_by_source": {},
                 "reservoir_roles_by_context": {},
                 "reservoir_roles_by_role": {},
+                # Surface metric stubs for off mode
+                "role_surface_count": 0,
+                "load_bearing_surface_count": 0,
+                "residual_surface_count": 0,
+                "residual_bucket_count": 0,
+                "residual_pressure_total": 0.0,
+                "residual_pressure_mean": 0.0,
+                "residual_recent_growth_total": 0.0,
+                "residual_absorbed_count": 0,
+                "residual_unresolved_count": 0,
+                "residual_clarity_mean": 0.0,
+                "regime_transition_candidates_from_residuals": 0,
+                "residual_pressure_persistent_growth_windows": 0,
             }
         summary = self._context_role_index.summarize()
         summary["context_role_index_mode"] = self._context_role_index_mode
@@ -1421,6 +1436,30 @@ class ChainedAgent:
                     parents=parents,
                     signals=tuple(record.uncertainty_signals),
                 )
+
+    def _run_background_residual_classification(self, cycle: int) -> None:
+        """Passive per-cycle residual pressure classification.
+
+        Uses a strictly capped budget so it never competes with focal audit.
+        Invariants: never issues certs, revokes certs, suppresses skips, forces
+        probes, increases monitoring, or reads hidden truth fields.
+        Record mode matches off mode on all operational metrics.
+        """
+        if self._context_role_index is None:
+            return
+        store = self._context_role_index.role_surfaces
+        if not store._buckets:
+            return
+        budget = _BACKGROUND_RESIDUAL_BUDGET
+        store.classify_background_residuals(cycle, budget)
+        store.decay_residuals(cycle, budget)
+        store.check_persistent_growth()
+        store.regime_transition_candidates(
+            cycle=cycle,
+            min_pressure=2.0,
+            min_growth=0.0,
+            min_co_shift=2,
+        )
 
     def background_nethra_metrics(self) -> Dict[str, Any]:
         if self._background_nethra_index is None:
@@ -4082,6 +4121,7 @@ class ChainedAgent:
         self._run_uncertainty_consolidation(cycle)
         self._run_authority_strength(cycle)
         self._run_background_nethra(cycle)
+        self._run_background_residual_classification(cycle)
 
         skipped: List[int] = []
         audited: List[int] = []

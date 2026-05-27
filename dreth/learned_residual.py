@@ -25,7 +25,10 @@ from __future__ import annotations
 import collections
 import dataclasses
 import math
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
+
+if TYPE_CHECKING:
+    from .hybrid import ResidualPrediction
 
 
 # ── Feature / label dataclasses (for future batch training) ──────────────────
@@ -615,7 +618,7 @@ class ShadowLearnedResidualPredictor:
         func: str,
         tolerance: float,
         fv: Optional["ResidualFeatureVector"] = None,
-    ) -> "ResidualPrediction":  # type: ignore[name-defined]
+    ) -> "ResidualPrediction":
         """Return shadow ResidualPrediction — NEVER used for gating.
 
         In feature mode, uses fv for key-conditioned prediction.

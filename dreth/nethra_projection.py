@@ -22,6 +22,13 @@ _HOOK_USE_RIGHTS: dict[str, frozenset[str]] = {
     "probe_hint":        frozenset({"probe_hint",   "soft_filter"}),
 }
 
+# Hooks that carry primary projection authority.
+# Trass and unresolved surfaces must not emit for these hooks.
+_PRIMARY_HOOKS: frozenset[str] = frozenset({"parent_candidates", "ranking_hint", "probe_hint"})
+
+# Role states that block primary projection.
+_BLOCKED_PRIMARY_ROLE_STATES: frozenset[str] = frozenset({"trass", "unresolved"})
+
 
 @dataclass
 class ProjectionEntry:
@@ -33,6 +40,7 @@ class ProjectionEntry:
     behavior_effect_count: int
     failure_count: int
     success_count: int
+    role_state: str = ""      # dominant surface role from context_role_index; gates primary projections
 
 
 class ProjectionIndex:
@@ -64,6 +72,7 @@ class ProjectionIndex:
             behavior_effect_count=node.behavior_effect_count,
             failure_count=node.failure_count,
             success_count=node.success_count,
+            role_state=_node_dominant_role(getattr(node, "roles_by_context", {})),
         )
         if node.nethra_id in self._entries:
             self._deindex(self._entries[node.nethra_id])
@@ -84,6 +93,13 @@ class ProjectionIndex:
                 use_rights_seen = [urs]
         contexts = list(row.get("contexts") or [])
         ctx_prefix = (str(contexts[0]) if contexts else "").split("|")[0]
+        roles_by_context: dict[str, list[str]] = {
+            str(k): [str(r) for r in v]
+            for k, v in (row.get("roles_by_context") or {}).items()
+            if isinstance(v, list)
+        }
+        role_state_from_row = str(row.get("role_state", ""))
+        role_state = role_state_from_row or _node_dominant_role(roles_by_context)
         entry = ProjectionEntry(
             nethra_id=nethra_id,
             atoms=frozenset(str(a) for a in (row.get("touched_atoms") or [])),
@@ -93,6 +109,7 @@ class ProjectionIndex:
             behavior_effect_count=int(row.get("behavior_effect_count", 0) or 0),
             failure_count=int(row.get("failure_count", 0) or 0),
             success_count=int(row.get("success_count", 0) or 0),
+            role_state=role_state,
         )
         if nethra_id in self._entries:
             self._deindex(self._entries[nethra_id])
@@ -158,12 +175,15 @@ class ProjectionIndex:
         if not candidates:
             candidates = list(self._entries.keys())
 
+        gate_primary = operation_hook in _PRIMARY_HOOKS
         scored: list[tuple[float, ProjectionEntry]] = []
         for nid in candidates:
             entry = self._entries.get(nid)
             if entry is None:
                 continue
             if allowed is not None and not (entry.use_rights & allowed):
+                continue
+            if gate_primary and entry.role_state in _BLOCKED_PRIMARY_ROLE_STATES:
                 continue
             score = _score_entry(entry, target_var, ctx_prefix)
             scored.append((score, entry))
@@ -206,6 +226,20 @@ class ProjectionIndex:
             bucket = self._by_hook.get(hook)
             if bucket and nid in bucket:
                 bucket.remove(nid)
+
+
+def _node_dominant_role(roles_by_context: dict[str, list[str]]) -> str:
+    """Return the dominant surface role for a node.
+
+    Prefers tareth > best_available > unresolved > trass so that a node that is
+    tareth in any context is never blocked by a trass role in another context.
+    An empty dict returns ''.
+    """
+    all_roles = {role for roles in roles_by_context.values() for role in roles}
+    for preferred in ("tareth", "best_available", "unresolved", "trass"):
+        if preferred in all_roles:
+            return preferred
+    return ""
 
 
 def _score_entry(entry: ProjectionEntry, target_var: str, ctx_prefix: str) -> float:

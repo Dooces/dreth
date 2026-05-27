@@ -934,3 +934,231 @@ def test_shadow_predictor_feature_mode_metadata():
     )
     assert meta["key_sample_count"] == 1
     assert meta["upper_bound"] <= meta["threshold"]
+
+
+# ── Step 3: peripheral residual classification ────────────────────────────────
+
+from dreth.nethra_role_surface import (
+    NethraRoleSurfaceStore,
+    _MAX_REPRESENTATIVE_EXAMPLES,
+    _HIDDEN_TRUTH_FIELDS,
+)
+
+
+def test_background_residual_classification_does_not_change_record_mode_behavior():
+    """Background classification must never increase pressure."""
+    store = NethraRoleSurfaceStore()
+    store.assign_surface("n0", "ctx:A", "trass", cycle=1)
+
+    for i in range(5):
+        store.charge_residual("n0", "ctx:A", {"var": i}, cycle=i + 1)
+
+    pressure_before = store._buckets[("n0", "ctx:A")].pressure
+
+    store.classify_background_residuals(cycle=10, budget=100)
+
+    pressure_after = store._buckets[("n0", "ctx:A")].pressure
+    assert pressure_after <= pressure_before, (
+        f"background classification must not increase pressure: "
+        f"before={pressure_before} after={pressure_after}"
+    )
+
+
+def test_background_classification_reduces_pressure_in_closed_context():
+    """Repeated classification without new charges reduces pressure and raises clarity."""
+    store = NethraRoleSurfaceStore()
+    store.assign_surface("n0", "ctx:X", "trass", cycle=1)
+
+    for i in range(6):
+        store.charge_residual("n0", "ctx:X", {"k": i}, cycle=i + 1)
+
+    initial_pressure = store._buckets[("n0", "ctx:X")].pressure
+    initial_clarity = store._buckets[("n0", "ctx:X")].clarity
+
+    for cycle in range(10, 20):
+        store.classify_background_residuals(cycle=cycle, budget=10)
+
+    final = store._buckets[("n0", "ctx:X")]
+    assert final.pressure < initial_pressure, (
+        f"pressure must decrease after repeated classification: "
+        f"initial={initial_pressure} final={final.pressure}"
+    )
+    assert final.clarity >= initial_clarity, (
+        f"clarity must not decrease after classification: "
+        f"initial={initial_clarity} final={final.clarity}"
+    )
+
+
+def test_residual_pressure_persistent_growth_window_is_warning():
+    """Monotonic unresolved growth across 3+ consecutive passes triggers persistent_growth_windows."""
+    store = NethraRoleSurfaceStore()
+    store.assign_surface("n0", "ctx:W", "unresolved", cycle=1)
+
+    for i in range(6):
+        store.charge_residual("n0", "ctx:W", {"step": i}, cycle=i + 1)
+        store.check_persistent_growth()
+
+    assert store._persistent_growth_windows >= 1, (
+        f"monotonic unresolved growth over 6 consecutive passes should trigger "
+        f"at least 1 persistent_growth_window, got {store._persistent_growth_windows}"
+    )
+
+
+def test_co_shift_residuals_emit_regime_candidate_only():
+    """Correlated co-shifting residuals produce candidates without promoting roles."""
+    store = NethraRoleSurfaceStore()
+    store.assign_surface("n0", "ctx:C", "trass", cycle=1)
+    store.assign_surface("n1", "ctx:C", "trass", cycle=1)
+
+    for i in range(6):
+        store.charge_residual(
+            "n0", "ctx:C", {"step": i}, cycle=i + 1, coactive_nethras=("n1",)
+        )
+
+    candidates = store.regime_transition_candidates(
+        cycle=10, min_pressure=2.0, min_growth=0.0, min_co_shift=1
+    )
+
+    assert len(candidates) > 0, "correlated co-shift should produce regime candidates"
+
+    surface = store.surface_for("n0", "ctx:C")
+    assert surface is not None
+    assert surface.role_state == "trass", (
+        f"role must not be promoted by candidate emission: got {surface.role_state!r}"
+    )
+    assert not surface.projection_allowed, "trass must not have projection_allowed"
+
+
+def test_regime_candidate_does_not_promote_role_directly():
+    """Pressure alone must never promote trass to tareth."""
+    store = NethraRoleSurfaceStore()
+    store.assign_surface("n0", "ctx:D", "trass", cycle=1)
+
+    for i in range(60):
+        store.charge_residual(
+            "n0", "ctx:D", {"i": i}, cycle=i + 1, coactive_nethras=("n1",)
+        )
+
+    candidates = store.regime_transition_candidates(
+        cycle=100, min_pressure=0.0, min_growth=-100.0, min_co_shift=0
+    )
+    assert len(candidates) > 0, "expected at least one candidate to verify path ran"
+
+    surface = store.surface_for("n0", "ctx:D")
+    assert surface is not None
+    assert surface.role_state == "trass", (
+        f"pressure alone must not promote role: got {surface.role_state!r}"
+    )
+    assert surface.load_bearing_score == 0.0, "trass must have zero load_bearing_score"
+    assert not surface.projection_allowed, "trass must not have projection_allowed"
+
+
+def test_record_mode_equals_off_for_small_seeded_run():
+    """context_role_index record mode must not change skip/audit/intervention counts."""
+    N = 40
+
+    agent_off, _ = _make_agent(context_role_index_mode="off")
+    agent_off.initialize()
+    for c in range(1, N + 1):
+        agent_off.run_cycle(c)
+
+    agent_rec, _ = _make_agent(context_role_index_mode="record")
+    agent_rec.initialize()
+    for c in range(1, N + 1):
+        agent_rec.run_cycle(c)
+
+    assert agent_rec.skip_count == agent_off.skip_count, (
+        f"skip_count: off={agent_off.skip_count} record={agent_rec.skip_count}"
+    )
+    assert agent_rec.full_audit_count == agent_off.full_audit_count, (
+        f"full_audit_count: off={agent_off.full_audit_count} record={agent_rec.full_audit_count}"
+    )
+    assert agent_rec.total_interventions == agent_off.total_interventions, (
+        f"total_interventions: off={agent_off.total_interventions} record={agent_rec.total_interventions}"
+    )
+
+
+def test_assist_mode_if_present_is_bounded_and_attributed():
+    """Assist mode is deferred for Step 3; record mode must not issue authority."""
+    agent, _ = _make_agent(context_role_index_mode="record")
+    agent.initialize()
+    for c in range(1, 20 + 1):
+        agent.run_cycle(c)
+
+    assert agent._context_role_index_mode == "record", (
+        "record mode agent must report mode as 'record', not 'assist_feature'"
+    )
+
+    if agent._context_role_index is not None:
+        store = agent._context_role_index.role_surfaces
+        for surface in store._surfaces.values():
+            assert not surface.projection_allowed or surface.role_state in {"tareth", "best_available"}, (
+                f"only tareth/best_available surfaces may have projection_allowed=True, "
+                f"got role_state={surface.role_state!r}"
+            )
+
+
+def test_no_hidden_truth_used_by_residual_classification():
+    """Hidden truth fields must not appear in representative_examples."""
+    store = NethraRoleSurfaceStore()
+    store.assign_surface("n0", "ctx:H", "trass", cycle=1)
+
+    row_with_hidden = {
+        "var": 1,
+        "truth_parents": [0, 1],
+        "truth_func": "SUM",
+        "truth_delayed_parents": [],
+        "truth_latents": {},
+        "debug_blind_challenge_manifest": {"secret": True},
+        "visible_field": "keep_me",
+    }
+    store.charge_residual("n0", "ctx:H", row_with_hidden, cycle=1)
+
+    bucket = store._buckets[("n0", "ctx:H")]
+    assert len(bucket.representative_examples) == 1
+    example = bucket.representative_examples[0]
+
+    for hidden_field in _HIDDEN_TRUTH_FIELDS:
+        assert hidden_field not in example, (
+            f"hidden field {hidden_field!r} must not appear in representative_examples"
+        )
+    assert "visible_field" in example, "visible fields must be preserved"
+
+
+def test_no_unbounded_residual_history_growth():
+    """representative_examples must be capped at _MAX_REPRESENTATIVE_EXAMPLES."""
+    store = NethraRoleSurfaceStore()
+    store.assign_surface("n0", "ctx:B", "trass", cycle=1)
+
+    for i in range(_MAX_REPRESENTATIVE_EXAMPLES + 50):
+        store.charge_residual("n0", "ctx:B", {"step": i}, cycle=i + 1)
+
+    bucket = store._buckets[("n0", "ctx:B")]
+    assert len(bucket.representative_examples) <= _MAX_REPRESENTATIVE_EXAMPLES, (
+        f"representative_examples must not grow past {_MAX_REPRESENTATIVE_EXAMPLES}, "
+        f"got {len(bucket.representative_examples)}"
+    )
+
+
+def test_background_classification_in_agent_does_not_alter_operational_metrics():
+    """Agent-level: record mode with background classification matches off-mode metrics."""
+    N = 60
+
+    agent_off, _ = _make_agent(context_role_index_mode="off")
+    agent_off.initialize()
+    for c in range(1, N + 1):
+        agent_off.run_cycle(c)
+
+    agent_rec, _ = _make_agent(context_role_index_mode="record")
+    agent_rec.initialize()
+    for c in range(1, N + 1):
+        agent_rec.run_cycle(c)
+
+    assert agent_rec.skip_count == agent_off.skip_count
+    assert agent_rec.full_audit_count == agent_off.full_audit_count
+    assert agent_rec.total_interventions == agent_off.total_interventions
+
+    if agent_rec._context_role_index is not None:
+        summary = agent_rec._context_role_index.role_surfaces.summarize()
+        assert isinstance(summary["residual_bucket_count"], int)
+        assert isinstance(summary["residual_pressure_persistent_growth_windows"], int)

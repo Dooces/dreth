@@ -325,3 +325,76 @@ def test_residuals_are_stored_on_assimilator():
     # The assimilator itself doesn't auto-store residuals in explain()
     # (store does it via the returned disposition); just verify stats
     assert a.stats()["residual"] == 1
+
+
+# ── Step 2: internal disposition tests ────────────────────────────────────────
+
+from dreth.nethra_assimilator import InternalDisposition
+
+
+def test_assimilator_keeps_old_disposition_compatibility():
+    """Existing Disposition enum values still exist and work."""
+    assert Disposition.ASSIMILATED.value == "assimilated"
+    assert Disposition.RESIDUAL.value == "residual"
+    assert Disposition.CONTRADICTION.value == "contradiction"
+    assert Disposition.SPLIT_CANDIDATE.value == "split_candidate"
+    assert Disposition.NOISE.value == "noise"
+
+
+def test_assimilator_maps_partial_overlap_to_charge_residual():
+    """Partial overlap with a trass/unresolved node returns CHARGE_RESIDUAL internally."""
+    a = NethraAssimilator()
+    # Node with trass role (residual-collection surface)
+    node = make_node(
+        "n1",
+        atoms=["xa", "xb", "xc"],
+        roles={"ctx_A": ["trass"]},
+        success_count=0,
+        failure_count=0,
+    )
+    nodes = {"n1": node}
+    a.index_node("n1", ["xa", "xb", "xc"])
+
+    # Row with partial overlap (2/4 atoms → Jaccard = 2/4 = 0.5 >= _ASSIMILATION_THRESHOLD=0.5)
+    # Let me use 1/4 atoms to stay below threshold
+    row = {
+        "touched_atoms": ["xa", "xd"],  # 1 shared out of 4 total → 0.25 Jaccard (>= _PARTIAL_THRESHOLD)
+        "record_id": "r1",
+    }
+    result = a.explain(row, nodes)
+    # External disposition is still RESIDUAL for backward compat
+    assert result.disposition == Disposition.RESIDUAL
+    # Internal disposition reflects the trass surface
+    assert result.internal_disposition == InternalDisposition.CHARGE_RESIDUAL.value
+
+
+def test_assimilator_spawn_residual_when_no_trass_surface():
+    """Partial overlap with a tareth node yields SPAWN_RESIDUAL internally."""
+    a = NethraAssimilator()
+    node = make_node(
+        "n1",
+        atoms=["xa", "xb", "xc"],
+        roles={"ctx_A": ["tareth"]},
+        success_count=5,
+        failure_count=0,
+    )
+    nodes = {"n1": node}
+    a.index_node("n1", ["xa", "xb", "xc"])
+
+    row = {
+        "touched_atoms": ["xa", "xd"],
+        "record_id": "r2",
+    }
+    result = a.explain(row, nodes)
+    assert result.disposition == Disposition.RESIDUAL
+    assert result.internal_disposition == InternalDisposition.SPAWN_RESIDUAL.value
+
+
+def test_assimilator_internal_stats_track_dispositions():
+    """internal_stats() returns counts per InternalDisposition."""
+    a = NethraAssimilator()
+    # Noise row
+    a.explain({}, {})
+    stats = a.internal_stats()
+    assert "noise" in stats
+    assert stats["noise"] >= 1

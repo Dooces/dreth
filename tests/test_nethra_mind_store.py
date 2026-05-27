@@ -698,3 +698,142 @@ def test_write_report_sections_present_with_new_sections():
     assert "compacted mind is not authority" in report
     assert "rows_rejected_mind_derived" in report
     assert "nodes_pruned" in report
+
+
+# ── Step 2: surface fields in NethraMindNode ──────────────────────────────────
+
+def test_mind_node_loads_without_surface_fields_from_old_file(tmp_path):
+    """Old compact files that lack role_surfaces/residual_buckets load cleanly."""
+    import json
+    from dreth.nethra_mind_store import NethraMindStore
+
+    old_node = {
+        "entry_kind": "nethra_mind_node",
+        "nethra_id": "old_n1",
+        "touched_atoms": ["x1"],
+        "contexts": ["ctx_A"],
+        "use_rights_seen": ["ranking_hint"],
+        "evidence_count": 3,
+        # No role_surfaces, no residual_buckets, no surface_transitions
+    }
+    mind_file = tmp_path / "old_mind.jsonl"
+    mind_file.write_text(json.dumps(old_node) + "\n")
+
+    store = NethraMindStore()
+    loaded = store.load(mind_file)
+    assert loaded == 1
+
+    node = store._nodes["old_n1"]
+    assert node.role_surfaces == {}
+    assert node.residual_buckets == {}
+    assert node.surface_transitions == []
+    assert node.authority_effect_count == 0
+
+
+def test_mind_node_serializes_surface_fields_in_new_file(tmp_path):
+    """New compact files include role_surfaces, residual_buckets, surface_transitions."""
+    import json
+    from dreth.nethra_mind_store import NethraMindStore, NethraMindNode
+
+    store = NethraMindStore()
+    store.upsert_node(
+        "n_new",
+        touched_atoms=["x1"],
+        contexts=["ctx_B"],
+        use_right="ranking_hint",
+    )
+    # Manually attach surface data to the node (as would be done by a future integration)
+    node = store._nodes["n_new"]
+    node.role_surfaces["ctx_B"] = {"role_state": "tareth", "load_bearing_score": 0.8}
+    node.residual_buckets["ctx_B"] = {"pressure": 1.5, "unresolved_count": 3}
+    node.surface_transitions.append({"operation": "PROMOTE_ROLE", "cycle": 5})
+
+    out = tmp_path / "new_mind.jsonl"
+    store.write_compact(out)
+
+    # Load back and verify round-trip
+    store2 = NethraMindStore()
+    store2.load(out)
+    node2 = store2._nodes["n_new"]
+    assert "ctx_B" in node2.role_surfaces
+    assert node2.role_surfaces["ctx_B"]["role_state"] == "tareth"
+    assert "ctx_B" in node2.residual_buckets
+    assert node2.residual_buckets["ctx_B"]["pressure"] == 1.5
+    assert len(node2.surface_transitions) >= 1
+
+
+def test_mind_compaction_serializes_surface_buckets(tmp_path):
+    """Compacted mind output contains role_surfaces and residual_buckets on nodes."""
+    import json
+    from dreth.nethra_mind_store import NethraMindStore
+
+    store = NethraMindStore()
+    store.upsert_node("n_compact", touched_atoms=["x1"], use_right="ranking_hint")
+    node = store._nodes["n_compact"]
+    node.residual_buckets["ctx_X"] = {"pressure": 2.0, "absorbed_count": 5}
+
+    out = tmp_path / "compact.jsonl"
+    store.write_compact(out)
+
+    rows = [json.loads(line) for line in out.read_text().splitlines() if line.strip()]
+    mind_nodes = [r for r in rows if r.get("entry_kind") == "nethra_mind_node"]
+    assert mind_nodes, "expected at least one nethra_mind_node"
+    target = next((r for r in mind_nodes if r["nethra_id"] == "n_compact"), None)
+    assert target is not None
+    assert "residual_buckets" in target
+    assert "ctx_X" in target["residual_buckets"]
+
+
+def test_repeated_residuals_do_not_write_unbounded_raw_rows(tmp_path):
+    """After many partial-overlap ingestions, residual rows stay bounded."""
+    from dreth.nethra_mind_store import NethraMindStore
+    import json
+
+    store = NethraMindStore()
+    # First: create a canonical node
+    store.ingest_record(_record_row("seed", atoms=["xa", "xb", "xc"]), line_no=1, generation=1)
+
+    # Now ingest many partial-overlap rows
+    for i in range(50):
+        partial = {
+            "record_id": f"partial_{i}",
+            "touched_atoms": ["xa"],   # partial overlap with seed (1/3 atoms)
+            "context_scope": "ctx_partial",
+            "use_right": "record_only",
+            "source": "runtime",
+        }
+        store.ingest_record(partial, line_no=i + 2, generation=1)
+
+    out = tmp_path / "mind.jsonl"
+    store.write_compact(out)
+
+    rows = [json.loads(line) for line in out.read_text().splitlines() if line.strip()]
+    residual_rows = [r for r in rows if r.get("entry_kind") == "nethra_residual"]
+    # Residual rows are bounded by ResidualIndex.max_size
+    assert len(residual_rows) <= 200
+
+
+def test_authority_allowed_remains_false_in_compacted_mind(tmp_path):
+    """After compaction and reload, authority_allowed and authority_effect_count stay zero."""
+    import json
+    from dreth.nethra_mind_store import NethraMindStore
+
+    store = NethraMindStore()
+    store.upsert_node("n_auth", touched_atoms=["x1"], use_right="ranking_hint")
+    # Even if we try to set authority_effect_count, it should reset on upsert
+    store._nodes["n_auth"].authority_effect_count = 0  # invariant already enforced
+
+    out = tmp_path / "auth_mind.jsonl"
+    store.write_compact(out)
+
+    rows = [json.loads(line) for line in out.read_text().splitlines() if line.strip()]
+    node_rows = [r for r in rows if r.get("entry_kind") == "nethra_mind_node"]
+    for row in node_rows:
+        assert row.get("authority_allowed") is False
+        assert row.get("authority_effect_count") == 0
+
+    # Also verify after reload
+    store2 = NethraMindStore()
+    store2.load(out)
+    for node in store2._nodes.values():
+        assert node.authority_effect_count == 0

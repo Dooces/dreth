@@ -41,6 +41,7 @@ _MAX_CONTEXTS = 16
 _MAX_TOUCHED_ATOMS = 64
 _MAX_TOUCHED_STRUCTURE_REFS = 32
 _MAX_MEMBER_NETHRAS = 32
+_MAX_SURFACE_TRANSITIONS = 32
 
 # Ingestion policy: reject these entry_kinds and sources from the delta stream.
 # They are outputs of compaction, not world-backed evidence.
@@ -87,6 +88,9 @@ class NethraMindNode:
     invalidators: list[str] = field(default_factory=list)
     sample_evidence_refs: list[str] = field(default_factory=list)
     temporal_spans: list[dict[str, Any]] = field(default_factory=list)
+    role_surfaces: dict[str, dict[str, Any]] = field(default_factory=dict)
+    residual_buckets: dict[str, dict[str, Any]] = field(default_factory=dict)
+    surface_transitions: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -127,6 +131,9 @@ class NethraMindNode:
                 "last_generation": self.last_seen_generation,
                 "span_count": len(self.temporal_spans),
             },
+            "role_surfaces": dict(self.role_surfaces),
+            "residual_buckets": dict(self.residual_buckets),
+            "surface_transitions": self.surface_transitions[:_MAX_SURFACE_TRANSITIONS],
         }
 
     @classmethod
@@ -185,6 +192,17 @@ class NethraMindNode:
             invalidators=invalidators,
             sample_evidence_refs=[str(r) for r in (d.get("sample_evidence_refs") or [])],
             temporal_spans=[],  # not persisted in compact form; use temporal_span_summary
+            role_surfaces={
+                str(k): dict(v) for k, v in (d.get("role_surfaces") or {}).items()
+                if isinstance(v, dict)
+            },
+            residual_buckets={
+                str(k): dict(v) for k, v in (d.get("residual_buckets") or {}).items()
+                if isinstance(v, dict)
+            },
+            surface_transitions=[
+                r for r in (d.get("surface_transitions") or []) if isinstance(r, dict)
+            ],
         )
 
 

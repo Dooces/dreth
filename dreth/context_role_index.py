@@ -11,6 +11,8 @@ from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
+from dreth.nethra_role_surface import NethraRoleSurfaceStore
+
 
 NethraKind = Literal[
     "var_fit",
@@ -164,6 +166,7 @@ class ContextRoleIndex:
         self.max_index_assists_per_cycle = 20
         self._dedupe_cycle: int | None = None
         self._anchor_keys_seen: set[tuple[str, str, str, int | None]] = set()
+        self.role_surfaces: NethraRoleSurfaceStore = NethraRoleSurfaceStore()
 
     def add_or_update_node(self, node: NethraNode) -> NethraNode:
         existing = self.nodes.get(node.nethra_id)
@@ -203,6 +206,9 @@ class ContextRoleIndex:
         self._roles_by_nethra[role_record.nethra_id].append(role_record)
         self._last_role_key[key] = role_record
         self._by_context[role_record.context_key].append(role_record)
+        self.role_surfaces.assign_surface_from_context_role(
+            role_record, self.nodes.get(role_record.nethra_id)
+        )
 
     def query_by_nethra(self, nethra_id: str) -> tuple[NethraNode | None, tuple[ContextRoleRecord, ...]]:
         self.index_queries += 1
@@ -475,7 +481,7 @@ class ContextRoleIndex:
     def summarize(self) -> dict[str, Any]:
         role_counts = Counter(r.role for r in self.roles)
         context_counts = Counter(r.context_key for r in self.roles)
-        return {
+        out = {
             "context_role_index_nodes": len(self.nodes),
             "context_role_records": len(self.roles),
             "context_role_tareth": role_counts.get("tareth", 0),
@@ -522,10 +528,12 @@ class ContextRoleIndex:
             "reservoir_roles_by_context": dict(context_counts),
             "reservoir_roles_by_role": dict(role_counts),
         }
+        out.update(self.role_surfaces.summarize())
+        return out
 
     def export_records(self, limit: int = 200) -> dict[str, Any]:
         limit = max(0, int(limit))
-        return {
+        out = {
             "nodes": [asdict(r) for r in list(self.nodes.values())[:limit]],
             "edges": [asdict(e) for e in self.edges[:limit]],
             "roles": [asdict(r) for r in self.roles[:limit]],
@@ -533,6 +541,8 @@ class ContextRoleIndex:
             # Compatibility aliases for older report code.
             "records": [asdict(r) for r in list(self.nodes.values())[:limit]],
         }
+        out.update(self.role_surfaces.export_records(limit=limit))
+        return out
 
     def _index_node(self, node: NethraNode) -> None:
         if node.target_var is not None:
