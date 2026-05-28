@@ -8,15 +8,16 @@ possible effects. It never writes certificates or mutates the ledger.
 """
 
 import json
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
-from .memory_sleep import HIDDEN_TRUTH_LIKE_FIELDS
-from .nethra_memory_store import ExperienceEvent, NethraMemoryRecord, USE_RIGHTS
-from .nethra_projection import ProjectionIndex
+from .nethra_memory_store import ExperienceEvent, HIDDEN_TRUTH_LIKE_FIELDS, NethraMemoryRecord, USE_RIGHTS
+from dreth.learner.nethra_projection import ProjectionIndex
 
+
+_MAX_EXPERIENCE_EVENTS = 200
 
 BEHAVIOR_USE_RIGHTS: frozenset[str] = frozenset({
     "ranking_hint",
@@ -29,86 +30,6 @@ BEHAVIOR_USE_RIGHTS: frozenset[str] = frozenset({
 class SalienceExplanation:
     score: float
     components: dict[str, float]
-
-
-@dataclass
-class SalienceScorer:
-    """Central salience scorer.
-
-    Raw count is intentionally capped and outweighed by context match,
-    specificity, success/lift, recency, and negative penalties.
-    """
-
-    current_cycle: int = 0
-
-    def score(
-        self,
-        record: NethraMemoryRecord,
-        *,
-        active_atoms: Iterable[str] = (),
-        context_key: str = "",
-    ) -> SalienceExplanation:
-        atoms = {str(a) for a in active_atoms}
-        touched = {str(a) for a in record.touched_atoms}
-        context_scope = str(record.context_scope or "")
-        context_match = 1.5 if context_key and context_key == context_scope else 0.0
-        if not context_match and context_key and context_scope:
-            context_match = 0.4 if context_key.split("|", 1)[0] == context_scope.split("|", 1)[0] else -0.8
-        atom_overlap = len(atoms & touched)
-        specificity = 1.0 / max(1, len(touched))
-        broad_penalty = -0.25 * max(0, len(touched) - 2)
-        recency = 0.0
-        last_cycle = max(record.last_used_cycle, record.last_success_cycle, record.created_cycle)
-        if last_cycle:
-            age = max(0, int(self.current_cycle or last_cycle) - int(last_cycle))
-            recency = max(0.0, 1.0 - age / 500.0)
-        success = min(1.5, 0.3 * record.success_count)
-        failure = -0.7 * record.failure_count
-        revocation = -0.5 * len(record.invalidators)
-        prior_lift = 0.0
-        audit_saved = 0.0
-        candidate_lift = 0.0
-        probe_lift = 0.0
-        quality_penalty = 0.0
-        sentinel_survival = 0.0
-        for item in record.lift_history:
-            if not isinstance(item, dict):
-                continue
-            prior_lift += float(item.get("prior_lift", 0.0) or 0.0)
-            candidate_lift += float(item.get("candidate_reduction_lift", 0.0) or 0.0)
-            probe_lift += float(item.get("probe_lift", 0.0) or 0.0)
-            audit_saved += float(item.get("audit_saved_lift", 0.0) or 0.0)
-            sentinel_survival += float(item.get("sentinel_survival", 0.0) or 0.0)
-            q = float(item.get("quality_delta", 0.0) or 0.0)
-            if q < 0:
-                quality_penalty += q
-        use_count = min(0.25, 0.03 * (record.success_count + record.failure_count))
-        stale = -0.6 if recency == 0.0 and last_cycle else 0.0
-        components = {
-            "context_match": context_match,
-            "active_atom_overlap": 0.5 * atom_overlap,
-            "recency": recency,
-            "prior_success": success,
-            "prior_lift": min(1.0, prior_lift),
-            "candidate_reduction_lift": min(1.0, candidate_lift),
-            "probe_lift": min(1.0, probe_lift),
-            "audit_saved": min(1.0, audit_saved),
-            "sentinel_survival": min(1.0, sentinel_survival),
-            "specificity": specificity,
-            "raw_use_count_cap": use_count,
-            "failure_count": failure,
-            "revocation_count": revocation,
-            "stale_evidence": stale,
-            "context_mismatch": context_match if context_match < 0 else 0.0,
-            "broad_atom_penalty": broad_penalty,
-            "quality_regression": quality_penalty,
-            "sentinel_failure": -0.7 if "sentinel_failure" in record.invalidators else 0.0,
-            "base_salience": float(record.salience or 0.0),
-        }
-        return SalienceExplanation(
-            score=sum(components.values()),
-            components={k: round(v, 6) for k, v in components.items()},
-        )
 
 
 @dataclass
@@ -161,7 +82,7 @@ class PersistentNethraIndex:
         self._by_id: dict[str, NethraMemoryRecord] = {}
         self._projection: ProjectionIndex = ProjectionIndex()
         self.metrics = RuntimeMemoryMetrics()
-        self.events: list[ExperienceEvent] = []
+        self.events: deque[ExperienceEvent] = deque(maxlen=_MAX_EXPERIENCE_EVENTS)
 
     def load_path(self, path: str | Path) -> int:
         loaded = 0
@@ -196,22 +117,14 @@ class PersistentNethraIndex:
         atoms = {str(a) for a in active_atoms}
         self.metrics.lookups += 1
         seen: set[str] = set()
-        candidates: list[NethraMemoryRecord] = []
+        out: list[tuple[NethraMemoryRecord, SalienceExplanation]] = []
         for atom in atoms:
             for record in self._by_atom.get(atom, ()):
-                if record.record_id not in seen:
+                if record.record_id not in seen and record.use_right != "block":
                     seen.add(record.record_id)
-                    candidates.append(record)
-        scorer = SalienceScorer(current_cycle=cycle)
-        scored = [
-            (record, scorer.score(record, active_atoms=atoms, context_key=context_key))
-            for record in candidates
-            if record.use_right != "block"
-        ]
-        scored = [item for item in scored if item[1].score > -1.0]
-        scored.sort(key=lambda item: (-item[1].score, item[0].record_id))
-        self.metrics.matches += len(scored)
-        return scored
+                    out.append((record, SalienceExplanation(score=0.0, components={})))
+        self.metrics.matches += len(out)
+        return out
 
     def rank_candidates(
         self,
@@ -222,35 +135,47 @@ class PersistentNethraIndex:
         hook: str,
         cycle: int,
     ) -> Any:
-        original_type = type(candidates)
         original = list(candidates or [])
         if self.mode == "off":
             return candidates
         active_atoms = [f"x{int(var)}", *(f"x{int(c)}" for c in original if _intlike(c))]
-        target_var_atom = f"x{int(var)}"
-        if self._projection.size() > 0:
-            proj_entries = self._projection.query(target_var_atom, context_key, hook, top_k=20)
-            proj_ids = {e.nethra_id for e in proj_entries}
-            projected_records = [r for r in self.records if r.record_id in proj_ids or r.nethra_id in proj_ids]
-            if projected_records:
-                scorer = SalienceScorer(current_cycle=cycle)
-                atoms_set = set(active_atoms)
-                scored_handles = [
-                    (r, scorer.score(r, active_atoms=atoms_set, context_key=context_key))
-                    for r in projected_records
-                    if r.use_right != "block"
-                ]
-                scored_handles = [item for item in scored_handles if item[1].score > -1.0]
-                scored_handles.sort(key=lambda item: (-item[1].score, item[0].record_id))
-            else:
-                scored_handles = self.query(active_atoms, context_key, cycle=cycle)
-        else:
-            scored_handles = self.query(active_atoms, context_key, cycle=cycle)
+        scored_handles = self.query(active_atoms, context_key, cycle=cycle)
         usable = [
             (record, explanation)
             for record, explanation in scored_handles
             if record.use_right in BEHAVIOR_USE_RIGHTS or self.mode == "record"
         ]
+
+        reordered = original
+        behavior_effect = 0
+        if self.mode == "assist":
+            # Only use ranking records that match this specific context (or have no context).
+            # Without context scoping, all records for any context match the query and
+            # produce a preferred set covering all vars → no reordering.
+            ranking_handles = [
+                r for r, _ in usable
+                if r.use_right == "ranking_hint"
+                and (not r.context_scope or r.context_scope == context_key)
+            ]
+            if ranking_handles:
+                preferred: set[int] = set()
+                for r in ranking_handles:
+                    for atom in r.touched_atoms:
+                        if atom.startswith("x") and atom[1:].isdigit():
+                            preferred.add(int(atom[1:]))
+                # Remove the target var itself from preferred (it's not a candidate)
+                preferred.discard(int(var))
+                reordered = sorted(
+                    original,
+                    key=lambda c: (0 if (_intlike(c) and int(c) in preferred) else 1),
+                )
+                if reordered != original:
+                    behavior_effect = 1
+                    self.metrics.behavior_effects += 1
+                    self.metrics.candidate_reorders += 1
+                    if any(r.source == "sleep" for r in ranking_handles):
+                        self.metrics.sleep_products_used += 1
+
         self._record_event(
             cycle=cycle,
             context_key=context_key,
@@ -259,62 +184,13 @@ class PersistentNethraIndex:
             hook=hook,
             use_right=_dominant_use_right(usable),
             candidates_before=original,
-            candidates_after=original,
-            behavior_effect=0,
+            candidates_after=reordered,
+            behavior_effect=behavior_effect,
             evidence_refs=[r.record_id for r, _ in usable],
         )
-        if len(original) < 2 or self.mode != "assist" or not usable:
-            return candidates
-
-        candidate_scores: dict[Any, float] = {}
-        reason_by_candidate: dict[Any, list[str]] = {}
-        for candidate in original:
-            catom = f"x{int(candidate)}" if _intlike(candidate) else str(candidate)
-            total = 0.0
-            reasons: list[str] = []
-            for record, explanation in usable:
-                if catom in set(record.touched_atoms):
-                    total += explanation.score
-                    reasons.extend(k for k, v in explanation.components.items() if v)
-            candidate_scores[candidate] = total
-            reason_by_candidate[candidate] = sorted(set(reasons))
-        if not any(score > 0 for score in candidate_scores.values()):
-            return candidates
-        ranked = sorted(original, key=lambda c: (-candidate_scores.get(c, 0.0), original.index(c)))
-        if ranked != original:
-            self.metrics.behavior_effects += 1
-            self.metrics.candidate_reorders += 1
-            if any(record.use_right == "soft_filter" for record, _ in usable):
-                self.metrics.soft_filter_fallbacks += 1
-            self.metrics.used += len(usable)
-            self.metrics.sleep_products_used += sum(1 for r, _ in usable if r.source == "sleep")
-            for record, _ in usable:
-                self.metrics.use_right_counts.update([record.use_right])
-            self._record_event(
-                cycle=cycle,
-                context_key=context_key,
-                active_atoms=active_atoms,
-                active_nethras=[r.nethra_id for r, _ in usable],
-                hook=hook,
-                use_right=_dominant_use_right(usable),
-                candidates_before=original,
-                candidates_after=ranked,
-                selected_candidate=ranked[0] if ranked else None,
-                behavior_effect=1,
-                candidate_reduction_delta=0,
-                success=True,
-                evidence_refs=[r.record_id for r, _ in usable],
-            )
-            self._example({
-                "hook": hook,
-                "context_key": context_key,
-                "before": [_label(v) for v in original],
-                "after": [_label(v) for v in ranked],
-                "reason_by_candidate": {
-                    _label(k): v for k, v in reason_by_candidate.items() if v
-                },
-            })
-        return _restore_type(ranked, original_type)
+        if behavior_effect:
+            return type(candidates)(reordered) if isinstance(candidates, (list, tuple, set)) else reordered
+        return candidates
 
     def rank_probes(
         self,
@@ -328,30 +204,38 @@ class PersistentNethraIndex:
         if self.mode == "off":
             return original
         active_atoms = [f"x{int(var)}", *(f"x{int(p[0])}" for p in original)]
-        target_var_atom = f"x{int(var)}"
-        if self._projection.size() > 0:
-            proj_entries = self._projection.query(target_var_atom, context_key, "probe_hint", top_k=20)
-            proj_ids = {e.nethra_id for e in proj_entries}
-            projected_records = [r for r in self.records if r.record_id in proj_ids or r.nethra_id in proj_ids]
-            if projected_records:
-                scorer = SalienceScorer(current_cycle=cycle)
-                atoms_set = set(active_atoms)
-                scored_all = [
-                    (r, scorer.score(r, active_atoms=atoms_set, context_key=context_key))
-                    for r in projected_records
-                    if r.use_right != "block"
-                ]
-                scored_all = [item for item in scored_all if item[1].score > -1.0]
-                scored_all.sort(key=lambda item: (-item[1].score, item[0].record_id))
-            else:
-                scored_all = self.query(active_atoms, context_key, cycle=cycle)
-        else:
-            scored_all = self.query(active_atoms, context_key, cycle=cycle)
+        scored_all = self.query(active_atoms, context_key, cycle=cycle)
         usable = [
             (record, explanation)
             for record, explanation in scored_all
             if record.use_right == "probe_hint" or self.mode == "record"
         ]
+
+        reordered = original
+        behavior_effect = 0
+        if self.mode == "assist":
+            probe_handles = [
+                r for r, _ in usable
+                if r.use_right == "probe_hint"
+                and (not r.context_scope or r.context_scope == context_key)
+            ]
+            if probe_handles:
+                preferred: set[int] = set()
+                for r in probe_handles:
+                    for atom in r.touched_atoms:
+                        if atom.startswith("x") and atom[1:].isdigit():
+                            preferred.add(int(atom[1:]))
+                reordered = tuple(sorted(
+                    original,
+                    key=lambda p: (0 if p[0] in preferred else 1),
+                ))
+                if reordered != original:
+                    behavior_effect = 1
+                    self.metrics.behavior_effects += 1
+                    self.metrics.probe_reorders += 1
+                    if any(r.source == "sleep" for r in probe_handles):
+                        self.metrics.sleep_products_used += 1
+
         self._record_event(
             cycle=cycle,
             context_key=context_key,
@@ -360,44 +244,10 @@ class PersistentNethraIndex:
             hook="probe_hint",
             use_right="probe_hint" if usable else "record_only",
             probes_before=list(original),
-            probes_after=list(original),
+            probes_after=list(reordered),
             evidence_refs=[r.record_id for r, _ in usable],
         )
-        if len(original) < 2 or self.mode != "assist" or not usable:
-            return original
-        scores: dict[tuple[int, float], float] = {}
-        for probe in original:
-            atom = f"x{int(probe[0])}"
-            scores[probe] = sum(
-                explanation.score
-                for record, explanation in usable
-                if atom in set(record.touched_atoms)
-            )
-        if not any(score > 0 for score in scores.values()):
-            return original
-        ranked = tuple(sorted(original, key=lambda p: (-scores.get(p, 0.0), original.index(p))))
-        if ranked != original:
-            self.metrics.behavior_effects += 1
-            self.metrics.probe_reorders += 1
-            self.metrics.used += len(usable)
-            self.metrics.sleep_products_used += sum(1 for r, _ in usable if r.source == "sleep")
-            for record, _ in usable:
-                self.metrics.use_right_counts.update([record.use_right])
-            self._record_event(
-                cycle=cycle,
-                context_key=context_key,
-                active_atoms=active_atoms,
-                active_nethras=[r.nethra_id for r, _ in usable],
-                hook="probe_hint",
-                use_right="probe_hint",
-                probes_before=list(original),
-                probes_after=list(ranked),
-                selected_probe=ranked[0] if ranked else None,
-                behavior_effect=1,
-                success=True,
-                evidence_refs=[r.record_id for r, _ in usable],
-            )
-        return ranked
+        return reordered
 
     def runtime_metrics(self) -> dict[str, Any]:
         return self.metrics.to_dict()
@@ -431,6 +281,8 @@ class PersistentNethraIndex:
             invalidators = [str(i) for i in (row.get("invalidators") or [])]
             contexts = list(row.get("contexts") or [])
             context_scope = str(contexts[0]) if contexts else ""
+            source_counts = row.get("source_counts") or {}
+            source = "sleep" if int(source_counts.get("sleep", 0)) > 0 else "mind"
             return NethraMemoryRecord(
                 record_id=nethra_id,
                 record_type="nethra_handle",
@@ -448,7 +300,7 @@ class PersistentNethraIndex:
                 evidence_refs=[str(r) for r in (row.get("sample_evidence_refs") or [])],
                 use_right=use_right,
                 salience=float(row.get("salience", 0.0) or 0.0),
-                source="mind",
+                source=source,
                 created_cycle=int(row.get("first_seen_cycle", 0) or 0),
                 last_used_cycle=int(row.get("last_seen_cycle", 0) or 0),
                 success_count=int(row.get("success_count", 0) or 0),
@@ -583,28 +435,12 @@ def _dominant_use_right(items: list[tuple[NethraMemoryRecord, SalienceExplanatio
     return "record_only"
 
 
-def _restore_type(values: list[Any], original_type: type) -> Any:
-    if original_type is tuple:
-        return tuple(values)
-    if original_type is set:
-        return set(values)
-    if original_type is frozenset:
-        return frozenset(values)
-    return values
-
-
 def _intlike(value: Any) -> bool:
     try:
         int(value)
         return value is not None and not isinstance(value, bool)
     except (TypeError, ValueError):
         return False
-
-
-def _label(value: Any) -> str:
-    if _intlike(value):
-        return f"x{int(value)}"
-    return str(value)
 
 
 def _effective_mind_use_right(use_rights_seen: list[str]) -> str:

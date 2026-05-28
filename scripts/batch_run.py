@@ -61,19 +61,13 @@ from dreth.hybrid import (
     HistoryRescueProbeProposer,
     FuncLibraryRouter,
 )
-from dreth.learned_residual import (
-    ShadowLearnedResidualPredictor,
-    ShadowResidualKeyAuthority,
-    OnlineResidualCalibrator,
-    FeatureConditionedResidualCalibrator,
-)
 from dreth.quality import QualityWeights, RunQualityScore, make_quality_score
 from dreth.scaffold_memory import (
     ScaffoldMemoryIndex,
     compute_run_scaffold_metrics,
     empty_scaffold_metrics,
 )
-from dreth.auto_sleep import AutoSleepConfig, AutoSleepScheduler, empty_auto_sleep_metrics
+from dreth.learner.auto_sleep import AutoSleepConfig, AutoSleepScheduler, empty_auto_sleep_metrics
 from dreth.nethra_memory_store import NethraMemoryStore, records_from_batch_record
 from dreth.nethra_runtime_memory import PersistentNethraIndex
 from dreth.shadow_policy import (
@@ -918,27 +912,6 @@ def _build_and_run_dreth(
     _shadow_predictor = None
     _shadow_enabled = False
     _shadow_key_authority = None
-    if cfg.shadow_residual == "online":
-        if cfg.shadow_calibrator == "feature":
-            _cal: Any = FeatureConditionedResidualCalibrator(
-                conservative_factor=cfg.shadow_conservative_factor,
-                min_samples=cfg.shadow_min_samples,
-                window=cfg.shadow_window,
-            )
-        else:
-            _cal = OnlineResidualCalibrator(
-                conservative_factor=cfg.shadow_conservative_factor,
-                min_samples=cfg.shadow_min_samples,
-                window=cfg.shadow_window,
-            )
-        _shadow_predictor = ShadowLearnedResidualPredictor(_cal)
-        _shadow_enabled = True
-        if cfg.shadow_key_authority == "on" and cfg.shadow_calibrator == "feature":
-            _shadow_key_authority = ShadowResidualKeyAuthority(
-                min_key_ok=cfg.shadow_key_min_ok,
-                min_clean_streak=cfg.shadow_key_min_clean_streak,
-                symbolic_false_ok_tolerance=cfg.shadow_key_symbolic_false_ok_tolerance,
-            )
 
     _scaffold_index = None
     if cfg.scaffold_memory_mode != "off" and cfg.scaffold_memory_path:
@@ -967,35 +940,18 @@ def _build_and_run_dreth(
         probe_proposer=_probe_proposer,
         expert_router=_expert_router,
         repair_agenda_enabled=cfg.repair_agenda_enabled,
-        shadow_residual_predictor=_shadow_predictor,
-        shadow_residual_enabled=_shadow_enabled,
-        shadow_key_authority=_shadow_key_authority,
-        uncertainty_consolidation_mode=cfg.uncertainty_consolidation,
-        uncertainty_assist_policy=cfg.uncertainty_assist_policy,
         context_role_index_mode=cfg.context_role_index,
         context_role_anchor_policy=cfg.context_role_anchor_policy,
         authority_strength_mode=cfg.authority_strength,
         authority_strength_controller=cfg.authority_strength_controller,
         authority_derivation_policy=cfg.authority_derivation_policy,
-        background_nethra_mode=cfg.background_nethra,
         scaffold_memory_mode=cfg.scaffold_memory_mode,
         scaffold_memory_index=_scaffold_index,
         nethra_memory_mode=cfg.nethra_memory,
         nethra_memory_index=_nethra_memory_index,
     )
     if cfg.relative_authority_frontier_temporal_report:
-        from dreth.relative_authority_frontier import TemporalGraphFrontierEvaluator
-
-        warmup_cycles = (
-            cfg.relative_authority_frontier_warmup_cycles
-            if cfg.relative_authority_frontier_warmup_cycles is not None
-            else max(100, cfg.cycles // 3)
-        )
-        agent._diagnostic_audit_observer = TemporalGraphFrontierEvaluator(
-            warmup_cycles=warmup_cycles,
-            max_depth=cfg.relative_authority_frontier_max_depth,
-            max_candidates=cfg.relative_authority_frontier_max_candidates,
-        )
+        pass  # relative_authority_frontier removed
     agent.initialize()
 
     prev_iv = 0
@@ -1455,35 +1411,6 @@ def _extract_arch_metrics(agent: ChainedAgent, world: CausalWorld) -> ArchMetric
         )
         if hasattr(agent, "authority_strength_export"):
             m.authority_strength_export = agent.authority_strength_export(limit=300)
-    if hasattr(agent, "background_nethra_metrics"):
-        _bn = agent.background_nethra_metrics()
-        m.background_nethra_mode = str(_bn.get("background_nethra_mode", "off"))
-        m.background_nethra_records = int(_bn.get("background_nethra_records", 0))
-        m.background_nethra_by_kind = dict(_bn.get("background_nethra_by_kind", {}))
-        m.background_nethra_edges = int(_bn.get("background_nethra_edges", 0))
-        m.background_contexts_seen = int(_bn.get("background_contexts_seen", 0))
-        m.background_role_shift_examples = int(_bn.get("background_role_shift_examples", 0))
-        m.background_trass_patterns = int(_bn.get("background_trass_patterns", 0))
-        m.background_unresolved_patterns = int(_bn.get("background_unresolved_patterns", 0))
-        m.background_quarantined_patterns = int(_bn.get("background_quarantined_patterns", 0))
-        m.background_giant_cluster_patterns = int(_bn.get("background_giant_cluster_patterns", 0))
-        m.background_dormant_patterns = int(_bn.get("background_dormant_patterns", 0))
-        m.background_tied_frontier_patterns = int(_bn.get("background_tied_frontier_patterns", 0))
-        m.background_recognition_score_mean = float(
-            _bn.get("background_recognition_score_mean", 0.0)
-        )
-        m.background_action_relevance_score_mean = float(
-            _bn.get("background_action_relevance_score_mean", 0.0)
-        )
-        m.background_records_used_as_features = int(
-            _bn.get("background_records_used_as_features", 0)
-        )
-        m.background_feature_hits = int(_bn.get("background_feature_hits", 0))
-        m.background_feature_noops = int(_bn.get("background_feature_noops", 0))
-        m.familiar_background_count = int(_bn.get("familiar_background_count", 0))
-        m.operational_authority_count = int(_bn.get("operational_authority_count", 0))
-        if hasattr(agent, "background_nethra_export"):
-            m.background_nethra_export = agent.background_nethra_export(limit=200)
     if hasattr(agent, "scaffold_memory_metrics"):
         _sm = agent.scaffold_memory_metrics()
         m.scaffold_memory_ranking_applications = int(
@@ -1746,109 +1673,7 @@ def _attach_relative_authority_metrics(
     Diagnostic only — does not affect ChainedAgent, fit_var, sentinels, certs,
     route certs, providers, policy selection, or defaults.
     """
-    from dreth.relative_authority_observer import build_snapshot_from_agent
-
-    snapshot = build_snapshot_from_agent(agent)
-    arch.relative_authority_nodes = snapshot.node_count
-    arch.relative_authority_relations = snapshot.relation_count
-    arch.relative_authority_records = len(snapshot.authority_records)
-    arch.relative_authority_relation_types = dict(
-        Counter(relation.relation_type for relation in snapshot.relations)
-    )
-    arch.relative_authority_top_examples = [
-        f"{record.node.node_id}:{record.authority_score():.1f}"
-        for record in snapshot.top_authority(limit=5)
-    ]
-    if frontier_report:
-        from dreth.relative_authority_frontier import (
-            evaluate_frontier_against_agent,
-            evaluate_frontier_leave_one_out,
-        )
-
-        def _frontier_counts(evaluations):
-            chosen_hits = sum(ev.chosen_parent_hits for ev in evaluations)
-            chosen_total = sum(ev.chosen_parent_total for ev in evaluations)
-            revoked_hits = sum(ev.revoked_neighbor_hits for ev in evaluations)
-            revoked_total = sum(ev.revoked_total for ev in evaluations)
-            dormant_hits = sum(ev.dormant_neighbor_hits for ev in evaluations)
-            dormant_total = sum(ev.dormant_total for ev in evaluations)
-            return (
-                chosen_hits,
-                chosen_total,
-                revoked_hits,
-                revoked_total,
-                dormant_hits,
-                dormant_total,
-            )
-
-        direct_evaluations = evaluate_frontier_against_agent(snapshot, agent)
-        loo_evaluations = evaluate_frontier_leave_one_out(snapshot, agent)
-        arch.graph_frontier_evals = len(direct_evaluations)
-        evaluations = direct_evaluations
-        if evaluations:
-            arch.graph_frontier_avg_size = (
-                sum(ev.frontier_size for ev in evaluations) / len(evaluations)
-            )
-            (
-                chosen_hits,
-                chosen_total,
-                revoked_hits,
-                revoked_total,
-                dormant_hits,
-                dormant_total,
-            ) = _frontier_counts(evaluations)
-            arch.graph_frontier_chosen_parent_hits = chosen_hits
-            arch.graph_frontier_chosen_parent_total = chosen_total
-            arch.graph_frontier_revoked_hits = revoked_hits
-            arch.graph_frontier_revoked_total = revoked_total
-            arch.graph_frontier_dormant_hits = dormant_hits
-            arch.graph_frontier_dormant_total = dormant_total
-            arch.direct_frontier_chosen_parent_hits = chosen_hits
-            arch.direct_frontier_chosen_parent_total = chosen_total
-            arch.direct_frontier_revoked_hits = revoked_hits
-            arch.direct_frontier_revoked_total = revoked_total
-            arch.direct_frontier_dormant_hits = dormant_hits
-            arch.direct_frontier_dormant_total = dormant_total
-            arch.graph_frontier_chosen_parent_recall = (
-                chosen_hits / chosen_total if chosen_total else 0.0
-            )
-            arch.graph_frontier_revoked_recall = (
-                revoked_hits / revoked_total if revoked_total else 0.0
-            )
-            arch.graph_frontier_dormant_recall = (
-                dormant_hits / dormant_total if dormant_total else 0.0
-            )
-            arch.direct_frontier_chosen_parent_recall = (
-                arch.graph_frontier_chosen_parent_recall
-            )
-            arch.direct_frontier_revoked_recall = arch.graph_frontier_revoked_recall
-            arch.direct_frontier_dormant_recall = arch.graph_frontier_dormant_recall
-        if loo_evaluations:
-            (
-                chosen_hits,
-                chosen_total,
-                revoked_hits,
-                revoked_total,
-                dormant_hits,
-                dormant_total,
-            ) = _frontier_counts(loo_evaluations)
-            arch.loo_frontier_chosen_parent_hits = chosen_hits
-            arch.loo_frontier_chosen_parent_total = chosen_total
-            arch.loo_frontier_revoked_hits = revoked_hits
-            arch.loo_frontier_revoked_total = revoked_total
-            arch.loo_frontier_dormant_hits = dormant_hits
-            arch.loo_frontier_dormant_total = dormant_total
-            arch.loo_frontier_chosen_parent_recall = (
-                chosen_hits / chosen_total if chosen_total else 0.0
-            )
-            arch.loo_frontier_revoked_recall = (
-                revoked_hits / revoked_total if revoked_total else 0.0
-            )
-            arch.loo_frontier_dormant_recall = (
-                dormant_hits / dormant_total if dormant_total else 0.0
-            )
-
-
+    pass  # removed: relative_authority modules deleted
 def _run_one(cfg: RunConfig) -> RunResult:
     t0 = time.monotonic()
     try:
@@ -2058,14 +1883,13 @@ def _append_memory_records_for_result(
         "uncertainty_compression_ratio": r.arch.uncertainty_compression_ratio,
         "giant_cluster_count": r.arch.giant_cluster_count,
         "max_cluster_size": r.arch.max_cluster_size,
-        "background_nethra_export": r.arch.background_nethra_export,
         "context_role_index": r.arch.context_role_export,
         "authority_strength": r.arch.authority_strength_export,
     }
     if scaffold_mode != "off" and scaffold_index is not None:
         rec.update(compute_run_scaffold_metrics(
             scaffold_index,
-            r.arch.background_nethra_export,
+            {},
             r.arch.context_role_export,
             r.arch.authority_strength_export,
             runtime_metrics={
@@ -3974,7 +3798,6 @@ def main():
                         "background_feature_noops": r.arch.background_feature_noops,
                         "familiar_background_count": r.arch.familiar_background_count,
                         "operational_authority_count": r.arch.operational_authority_count,
-                        "background_nethra_export": r.arch.background_nethra_export,
                     })
                 if args.scaffold_memory_mode != "off":
                     runtime_scaffold_metrics = {
@@ -3989,7 +3812,7 @@ def main():
                     scaffold_metrics = (
                         compute_run_scaffold_metrics(
                             scaffold_index,
-                            r.arch.background_nethra_export,
+                            {},
                             r.arch.context_role_export,
                             r.arch.authority_strength_export,
                             runtime_metrics=runtime_scaffold_metrics,
@@ -4019,7 +3842,7 @@ def main():
                     "nethra_memory_candidate_reorders": r.arch.nethra_memory_candidate_reorders,
                     "nethra_memory_probe_reorders": r.arch.nethra_memory_probe_reorders,
                     "nethra_memory_hard_filter_rejected": r.arch.nethra_memory_hard_filter_rejected,
-                    "nethra_memory_experience_events": r.arch.nethra_memory_experience_events,
+                    "nethra_memory_experience_events": [] if memory_store is not None else r.arch.nethra_memory_experience_events,
                 })
                 rec.update(empty_auto_sleep_metrics())
                 rec["run_id"] = (

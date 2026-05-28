@@ -13,6 +13,8 @@ from typing import Any, Literal
 
 from dreth.nethra_role_surface import NethraRoleSurfaceStore
 
+_MAX_NODES_PER_VAR = 10
+
 
 NethraKind = Literal[
     "var_fit",
@@ -171,6 +173,9 @@ class ContextRoleIndex:
     def add_or_update_node(self, node: NethraNode) -> NethraNode:
         existing = self.nodes.get(node.nethra_id)
         if existing is None:
+            if (node.target_var is not None
+                    and len(self._by_var.get(int(node.target_var), set())) >= _MAX_NODES_PER_VAR):
+                return node
             merged = node
         else:
             first_seen = min(existing.first_seen_cycle, node.first_seen_cycle)
@@ -533,13 +538,13 @@ class ContextRoleIndex:
 
     def export_records(self, limit: int = 200) -> dict[str, Any]:
         limit = max(0, int(limit))
+        node_list = [asdict(r) for r in list(self.nodes.values())[:limit]]
         out = {
-            "nodes": [asdict(r) for r in list(self.nodes.values())[:limit]],
+            "nodes": node_list,
+            "records": node_list,  # alias consumed by records_from_batch_record
             "edges": [asdict(e) for e in self.edges[:limit]],
             "roles": [asdict(r) for r in self.roles[:limit]],
             "match_attribution": list(self.assist_attribution[:limit]),
-            # Compatibility aliases for older report code.
-            "records": [asdict(r) for r in list(self.nodes.values())[:limit]],
         }
         out.update(self.role_surfaces.export_records(limit=limit))
         return out

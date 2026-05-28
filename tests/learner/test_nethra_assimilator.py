@@ -4,7 +4,7 @@ from __future__ import annotations
 import pytest
 from unittest.mock import MagicMock
 
-from dreth.nethra_assimilator import (
+from dreth.learner.nethra_assimilator import (
     AnchorIndex,
     PerspectiveIndex,
     RoleIndex,
@@ -329,7 +329,7 @@ def test_residuals_are_stored_on_assimilator():
 
 # ── Step 2: internal disposition tests ────────────────────────────────────────
 
-from dreth.nethra_assimilator import InternalDisposition
+from dreth.learner.nethra_assimilator import InternalDisposition
 
 
 def test_assimilator_keeps_old_disposition_compatibility():

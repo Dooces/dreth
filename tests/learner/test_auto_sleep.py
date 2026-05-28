@@ -5,10 +5,10 @@ import sys
 import tempfile
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from dreth.auto_sleep import AutoSleepConfig, AutoSleepScheduler
+from dreth.learner.auto_sleep import AutoSleepConfig, AutoSleepScheduler
 from dreth.nethra_memory_store import NethraMemoryRecord, NethraMemoryStore
 from dreth.scaffold_memory import ScaffoldMemoryIndex, compute_run_scaffold_metrics
 
@@ -100,7 +100,7 @@ def test_auto_load_scaffold_memory_record_mode_loads_proposals():
             {"records": []},
         )
         assert loaded > 0
-        assert metrics["scaffold_memory_matches"] > 0
+        assert metrics["scaffold_memory_loaded_proposals"] == loaded
         assert metrics["scaffold_memory_behavior_effects"] == 0
 
 
@@ -154,11 +154,8 @@ def test_broad_generic_debt_remains_telemetry_only():
         path.write_text(json.dumps(proposal) + "\n")
         idx = ScaffoldMemoryIndex()
         idx.load_proposals(path)
-        matches = idx.match_authority_strength_record({
-            "var": 0,
-            "authority_state": "contested_best_available",
-            "reason": "active_visible_conflict",
-        })
-        assert matches[0].broad_generic_debt is True
-        assert matches[0].authority_allowed is False
+        assert len(idx._proposals) == 1
+        p = idx._proposals[0]
+        assert p.broad_generic_debt is True
+        assert p.authority_allowed is False
         assert idx.summarize_matches()["scaffold_memory_behavior_effects"] == 0

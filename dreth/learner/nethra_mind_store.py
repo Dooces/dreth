@@ -17,8 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .memory_sleep import HIDDEN_TRUTH_LIKE_FIELDS
-from .nethra_memory_store import USE_RIGHTS
+from dreth.nethra_memory_store import HIDDEN_TRUTH_LIKE_FIELDS, USE_RIGHTS
 from .nethra_assimilator import NethraAssimilator, Disposition
 from .nethra_projection import ProjectionIndex
 

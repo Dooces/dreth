@@ -19,10 +19,7 @@ from __future__ import annotations
 #                           Returns tareth/trass/untested. This verdict gates
 #                           all downstream hypothesis spaces.
 #   _update_tied_frontier — maintains the ambiguity object on VarNethra
-#   _collapse_tied_frontier — CURRENTLY PREMATURE: collapses when score
-#                           landscape narrows to one candidate in a single
-#                           audit. Should require regime-survival evidence
-#                           (stable_count + distinct context_keys). Fix in P4.
+#   _collapse_tied_frontier — requires stable_count >= 3 AND distinct_contexts_seen >= 2
 #
 # What makes authoritative nethras operative here:
 #   available_parents in _full_audit_var is built only from vars with tareth
@@ -68,9 +65,8 @@ from __future__ import annotations
 #
 # This file: authority-record decisions live here. _install_var must not collapse
 #   based on score proximity alone. _certify_operation_role must not promote
-#   trass without regime-survival evidence. _collapse_tied_frontier as currently
-#   implemented triggers on score-landscape narrowing — that is PREMATURE COLLAPSE
-#   and must be replaced with stable_count + distinct_contexts_seen gating (P1.2).
+#   trass without regime-survival evidence. _collapse_tied_frontier guards on
+#   stable_count >= 3 AND distinct_contexts_seen >= 2 before collapsing.
 # ════════════════════════════════════════════════════════════════════════════════
 
 import dataclasses
@@ -81,7 +77,7 @@ from typing import Any, Callable, Dict, FrozenSet, List, Optional, Protocol, Set
 from .functions import FUNC_LIBRARY
 from .world import CausalWorld
 from .ledger import (ChainedLedger, CompositeNethra, HyperCompositeNethra, Compression, LedgerEvent,
-                     DEFAULT_TOLERANCE, DormantAlternative, NethraCertificate, Role, TiedFrontier)
+                     DEFAULT_TOLERANCE, DormantAlternative, Role, TiedFrontier)
 from .fit import fit_var
 from .sentinels import select_var_sentinels, check_var_sentinels_with_envelope
 from .regime import RegimeRegister, CertEvent as RegimeCertEvent
@@ -89,17 +85,10 @@ from .records import CycleRecord, FitDiagnostic
 from .summary import RunAnalyzer, SummaryRenderer
 from .hybrid import (
     ResidualPredictor, ParentRanker, ProbeProposer, ExpertRouter,
-    SymbolicResidualPredictor, SensitivityParentRanker,
+    SensitivityParentRanker,
     ParentProposalDiagnostics, ProbeProposalDiagnostics,
 )
 from .repair_agenda import RepairAgenda, RepairAgendaItem
-from .uncertainty_consolidation import (
-    cluster_has_specific_local_anchor,
-    cluster_uncertainty_cases,
-    extract_uncertainty_cases_from_agent,
-    propose_consolidation_assists,
-    summarize_clusters,
-)
 from .context_role_index import (
     ContextRoleRecord,
     ContextRoleIndex,
@@ -115,12 +104,6 @@ from .authority_strength import (
     summarize_authority_strength_records,
     summary_to_dict as authority_strength_summary_to_dict,
 )
-from .learned_residual import (
-    ResidualFeatureVector,
-    ShadowLearnedResidualPredictor,
-    ShadowResidualKeyAuthority,
-)
-from .background_nethra import BackgroundNethraIndex
 from .scaffold_memory import ScaffoldMemoryIndex
 from .nethra_runtime_memory import PersistentNethraIndex
 
@@ -181,7 +164,6 @@ _BUDGET_ESCALATION_CAP               = 400
 # set for influence on that var. Fires every multiple of this threshold so
 # re-screen recurs as failures accumulate (e.g. at 6, 12, 18...).
 _INERT_RESCREEN_THRESHOLD            = 6
-_BACKGROUND_RESIDUAL_BUDGET          = 10  # max residuals classified per cycle; never competes with focal audit
 
 class AgentExtension(Protocol):
     derive_compressions: Callable[["ChainedAgent", int, int], List[Compression]]
@@ -249,19 +231,12 @@ class ChainedAgent:
         expert_router: Optional[ExpertRouter] = None,
         repair_agenda_enabled: bool = False,
         repair_agenda_ordering: str = "observe",
-        shadow_residual_predictor: Optional[ShadowLearnedResidualPredictor] = None,
-        shadow_residual_enabled: bool = False,
-        shadow_key_authority: Optional[ShadowResidualKeyAuthority] = None,
-        uncertainty_consolidation_mode: str = "off",
-        uncertainty_assist_policy: str = "all",
-        uncertainty_max_preserve_count: int = 3,
         context_role_index_mode: str = "off",
         context_role_anchor_policy: Optional[str] = None,
         nethra_reservoir_mode: Optional[str] = None,
         authority_strength_mode: str = "off",
         authority_strength_controller: str = "state",
         authority_derivation_policy: Optional[str] = None,
-        background_nethra_mode: str = "off",
         scaffold_memory_mode: str = "off",
         scaffold_memory_index: Optional[ScaffoldMemoryIndex] = None,
         nethra_memory_mode: str = "off",
@@ -479,103 +454,6 @@ class ChainedAgent:
         self._repair_agenda_ordering: str = repair_agenda_ordering
         self._repair_agenda: RepairAgenda = RepairAgenda()
 
-        # ── Shadow residual predictor (Stage 3A — shadow mode only) ──────────
-        # Never used for gating, certs, skips, or any operative decision.
-        # shadow_residual_enabled=True only when shadow_residual_predictor is set.
-        self._shadow_residual_predictor: Optional[ShadowLearnedResidualPredictor] = shadow_residual_predictor
-        self._shadow_residual_enabled: bool = (
-            shadow_residual_enabled and shadow_residual_predictor is not None
-        )
-        self._shadow_key_authority: Optional[ShadowResidualKeyAuthority] = (
-            shadow_key_authority if self._shadow_residual_enabled else None
-        )
-        # Shadow diagnostic counters — increment each cycle for vars where
-        # shadow prediction runs. Never influence cert or skip decisions.
-        self._shadow_residual_calls: int = 0
-        self._shadow_residual_ok: int = 0
-        self._shadow_residual_stressed: int = 0
-        self._shadow_residual_insufficient: int = 0
-        self._shadow_false_ok_vs_symbolic: int = 0
-        self._shadow_false_stress_vs_symbolic: int = 0
-        self._shadow_agree_symbolic: int = 0
-        self._shadow_would_save_iv: int = 0
-        self._shadow_would_miss_symbolic_stress: int = 0
-        self._shadow_false_ok_vs_active_sentinel: int = 0
-        self._shadow_would_miss_active_failure: int = 0
-        # Feature-conditioned calibrator key-usage counters (nonzero only in feature mode)
-        self._shadow_feature_key_func_var: int = 0
-        self._shadow_feature_key_func_tier_parentcount: int = 0
-        self._shadow_feature_key_func_tier: int = 0
-        self._shadow_feature_key_func: int = 0
-        self._shadow_feature_key_global: int = 0
-        self._shadow_feature_key_insufficient: int = 0
-        # false_ok per key (feature mode only; insufficient cannot produce false_ok)
-        self._shadow_feature_fok_func_var: int = 0
-        self._shadow_feature_fok_func_tier_parentcount: int = 0
-        self._shadow_feature_fok_func_tier: int = 0
-        self._shadow_feature_fok_func: int = 0
-        self._shadow_feature_fok_global: int = 0
-
-        # Uncertainty consolidation. Default is off, preserving behavior.
-        # Shadow records only. Assist writes bounded hints for existing
-        # attention/probe/repair surfaces; it never issues or revokes authority.
-        if uncertainty_consolidation_mode not in {"off", "shadow", "assist"}:
-            raise ValueError(
-                "uncertainty_consolidation_mode must be off, shadow, or assist"
-            )
-        if uncertainty_assist_policy not in {
-            "all",
-            "budget_only",
-            "probe_only",
-            "preserve_only",
-            "priority_only",
-            "local_only",
-        }:
-            raise ValueError(
-                "uncertainty_assist_policy must be all, budget_only, probe_only, "
-                "preserve_only, priority_only, or local_only"
-            )
-        self._uncertainty_consolidation_mode = uncertainty_consolidation_mode
-        self._uncertainty_assist_policy = uncertainty_assist_policy
-        self._uncertainty_max_preserve_count = max(0, int(uncertainty_max_preserve_count))
-        self._uncertainty_consolidation_interval = 1
-        self._uncertainty_latest_cases = []
-        self._uncertainty_latest_clusters = []
-        self._uncertainty_latest_assists = []
-        self._uncertainty_summary = {
-            "uncertainty_clusters": 0,
-            "uncertainty_cases_seen": 0,
-            "uncertainty_compression_ratio": 0.0,
-            "max_cluster_size": 0,
-            "avg_cluster_size": 0.0,
-        }
-        self._uncertainty_assist_vars: Dict[int, Set[str]] = {}
-        self._uncertainty_forced_probes: Dict[int, Tuple[Tuple[int, float], ...]] = {}
-        self._uncertainty_budget_bonus: Dict[int, int] = {}
-        self._uncertainty_preserve_vars: Set[int] = set()
-        self._uncertainty_preserve_remaining: int = 0
-        self._uncertainty_cases_seen_total = 0
-        self._uncertainty_clusters_total = 0
-        self._uncertainty_assists_total = 0
-        self._uncertainty_assist_prioritize_attention = 0
-        self._uncertainty_assist_preserve_alternatives = 0
-        self._uncertainty_assist_request_probe = 0
-        self._uncertainty_assist_increase_monitoring = 0
-        self._uncertainty_assist_repair_priority_bonus = 0
-        self._uncertainty_assist_noops = 0
-        self._uncertainty_max_cluster_size = 0
-        self._uncertainty_cluster_size_sum = 0
-        self._uncertainty_cluster_observations = 0
-        self._uncertainty_cluster_specificity_sum = 0.0
-        self._uncertainty_giant_clusters_suppressed = 0
-        self._uncertainty_assists_suppressed_by_specificity_gate = 0
-        self._uncertainty_assists_applied_from_local_clusters = 0
-        self._uncertainty_assists_applied_from_giant_clusters = 0
-        self._uncertainty_assist_extra_budget_total = 0
-        self._uncertainty_assist_extra_probe_total = 0
-        self._uncertainty_assist_preserved_alternative_total = 0
-        self._uncertainty_assist_priority_hint_total = 0
-
         # Context-role provenance for reusable learned nethras. Default off
         # preserves behavior and avoids recording overhead.
         if nethra_reservoir_mode is not None:
@@ -647,17 +525,6 @@ class ChainedAgent:
         self._authority_strength_future_requirements_total = 0
         self._authority_strength_repair_priority_bumps_total = 0
 
-        # Passive background-familiarity index.  Default off preserves behavior.
-        if background_nethra_mode not in {"off", "record", "assist_feature"}:
-            raise ValueError(
-                "background_nethra_mode must be off, record, or assist_feature"
-            )
-        self._background_nethra_mode = background_nethra_mode
-        self._background_nethra_index: Optional[BackgroundNethraIndex] = (
-            BackgroundNethraIndex(mode=background_nethra_mode)
-            if background_nethra_mode != "off"
-            else None
-        )
         if scaffold_memory_mode not in {"off", "record", "assist_feature"}:
             raise ValueError(
                 "scaffold_memory_mode must be off, record, or assist_feature"
@@ -758,27 +625,6 @@ class ChainedAgent:
         uncertainty_signals: Tuple[str, ...] = (),
         validity_scope: Tuple[int, ...] = (),
     ) -> None:
-        # Passive background observation: runs independently of context_role_index.
-        if nethra_id and self._background_nethra_index is not None:
-            n = self.ledger.vars[var]
-            self._background_nethra_index.add_or_update_from_context_role(
-                nethra_id=nethra_id,
-                role=role,
-                var=var,
-                context_key=nethra_context_key(
-                    operation=operation,
-                    var=var,
-                    visible=self.world.visible_count,
-                    parents=tuple(n.parents),
-                ),
-                cycle=cycle,
-                operation_role=operation,
-                fit_signature=(
-                    f"x{var}:{n.func}({','.join(map(str, n.parents))})"
-                ),
-                parents=tuple(n.parents),
-                signals=uncertainty_signals,
-            )
         if self._context_role_index is None or not nethra_id:
             return
         if operation in {"route", "composite", "regime", "compression"}:
@@ -868,334 +714,6 @@ class ChainedAgent:
         )
         return nid
 
-    def _reset_uncertainty_assist_surfaces(self) -> None:
-        self._uncertainty_assist_vars = {}
-        self._uncertainty_forced_probes = {}
-        self._uncertainty_budget_bonus = {}
-        self._uncertainty_preserve_vars = set()
-        self._uncertainty_preserve_remaining = self._uncertainty_max_preserve_count
-
-    def _run_uncertainty_consolidation(self, cycle: int) -> None:
-        """Run visible-evidence consolidation for shadow/assist modes.
-
-        Off mode never calls this method. Shadow mode records diagnostics only.
-        Assist mode writes bounded hints consumed by existing repair/probe paths.
-        """
-        self._reset_uncertainty_assist_surfaces()
-        if self._uncertainty_consolidation_mode == "off":
-            return
-        if cycle % self._uncertainty_consolidation_interval != 0:
-            return
-
-        cases = extract_uncertainty_cases_from_agent(self, cycle)
-        if (
-            self._scaffold_memory_mode == "assist_feature"
-            and self._scaffold_memory_index is not None
-            and len(cases) >= 2
-        ):
-            context = nethra_context_key(
-                operation="uncertainty_cluster",
-                visible=self.world.visible_count,
-            )
-            cases = list(
-                self._scaffold_memory_index.rank_uncertainty_local_anchors(
-                    -1,
-                    context,
-                    cases,
-                )
-            )
-        clusters = cluster_uncertainty_cases(cases, visible_count=self.world.visible_count)
-        assists = propose_consolidation_assists(clusters)
-        summary = summarize_clusters(clusters)
-
-        self._uncertainty_latest_cases = cases
-        self._uncertainty_latest_clusters = clusters
-        self._uncertainty_latest_assists = assists
-        self._uncertainty_summary = summary
-        index_matches_by_cluster: Dict[str, Tuple[Any, ...]] = {}
-        if self._context_role_index is not None:
-            for cluster in clusters:
-                nid = f"uncertainty_cluster:{cluster.cluster_id}:{','.join(map(str, cluster.vars))}"
-                self._context_role_index.add_or_update_node(NethraNode(
-                    nethra_id=nid,
-                    kind="unknown",
-                    target_var=None,
-                    components=tuple(sorted(set(cluster.vars) | set(cluster.shared_parents) | set(cluster.shared_graph_neighbors))),
-                    learned_parents=tuple(cluster.shared_parents),
-                    learned_func=str(cluster.proposed_handle_kind),
-                    signature=f"{cluster.proposed_handle_kind}:{cluster.evidence_summary}",
-                    first_seen_cycle=cycle,
-                    last_seen_cycle=cycle,
-                    observations=max(1, len(cluster.vars)),
-                    source="uncertainty_cluster",
-                ))
-                self._context_role_index.assign_context_role(ContextRoleRecord(
-                    nethra_id=nid,
-                    context_key=nethra_context_key(operation="uncertainty_cluster", visible=self.world.visible_count),
-                    operation="uncertainty_consolidation",
-                    role="unresolved",
-                    cycle=cycle,
-                    evidence_summary=cluster.evidence_summary,
-                    fit_margin=None,
-                    near_tie_count=cluster.shared_near_tie_count,
-                    uncertainty_signals=tuple(cluster.shared_signals),
-                    validity_scope=tuple(cluster.vars),
-                ))
-                if (
-                    self._context_role_index_mode == "assist_feature"
-                    and self._context_role_anchor_policy != "off"
-                    and not cluster.is_giant_cluster
-                ):
-                    index_matches_by_cluster[cluster.cluster_id] = (
-                        self._context_role_index.query_for_uncertainty_cluster(
-                            cluster,
-                            anchor_policy=self._context_role_anchor_policy,
-                            current_cycle=cycle,
-                        )
-                    )
-            self._context_role_index_latest_matches = [
-                match
-                for matches in index_matches_by_cluster.values()
-                for match in matches
-            ]
-        # Passive background observation of uncertainty clusters.
-        if self._background_nethra_index is not None:
-            for cluster in clusters:
-                bg_nid = (
-                    f"bg_uc:{cluster.proposed_handle_kind}:"
-                    f"{','.join(map(str, cluster.shared_parents or cluster.vars[:4]))}"
-                )
-                self._background_nethra_index.add_or_update_from_uncertainty_cluster(
-                    nethra_id=bg_nid,
-                    vars=cluster.vars,
-                    context_key=nethra_context_key(
-                        operation="uncertainty_cluster",
-                        visible=self.world.visible_count,
-                    ),
-                    cycle=cycle,
-                    is_giant=cluster.is_giant_cluster,
-                    signals=cluster.shared_signals,
-                    parents=cluster.shared_parents,
-                )
-
-        self._uncertainty_cases_seen_total += len(cases)
-        self._uncertainty_clusters_total += len(clusters)
-        for cluster in clusters:
-            size = len(cluster.vars)
-            self._uncertainty_max_cluster_size = max(self._uncertainty_max_cluster_size, size)
-            self._uncertainty_cluster_size_sum += size
-            self._uncertainty_cluster_specificity_sum += cluster.shared_signal_specificity
-            self._uncertainty_cluster_observations += 1
-
-        if self._uncertainty_consolidation_mode != "assist":
-            return
-
-        visible = self.world.visible_count
-        clusters_by_id = {cluster.cluster_id: cluster for cluster in clusters}
-        suppressed_giant_clusters: Set[str] = set()
-        for assist in assists:
-            applied = False
-            target_vars = tuple(v for v in assist.target_vars if 0 <= v < visible)
-            if not target_vars:
-                self._uncertainty_assist_noops += 1
-                continue
-            cluster = clusters_by_id.get(assist.cluster_id)
-            is_local_cluster = (
-                cluster_has_specific_local_anchor(cluster)
-                if cluster is not None else False
-            )
-            index_local_anchor = bool(
-                cluster is not None
-                and index_matches_by_cluster.get(cluster.cluster_id)
-            )
-            index_anchor_required = bool(index_local_anchor and not is_local_cluster)
-            if index_local_anchor:
-                is_local_cluster = True
-            is_giant_cluster = bool(cluster and cluster.is_giant_cluster)
-            if not is_local_cluster or (
-                self._uncertainty_assist_policy == "local_only" and is_giant_cluster
-            ):
-                self._uncertainty_assists_suppressed_by_specificity_gate += 1
-                if is_giant_cluster:
-                    suppressed_giant_clusters.add(assist.cluster_id)
-                continue
-            self._uncertainty_assists_total += 1
-
-            if assist.assist_kind == "prioritize_attention":
-                self._uncertainty_assist_prioritize_attention += 1
-                if self._uncertainty_assist_policy in {"all", "budget_only", "local_only"}:
-                    for var in target_vars:
-                        before = self._uncertainty_budget_bonus.get(var, 0)
-                        after = max(
-                            before,
-                            min(2, max(1, int(math.ceil(assist.bounded_strength * 4)))),
-                        )
-                        self._uncertainty_budget_bonus[var] = after
-                        self._uncertainty_assist_extra_budget_total += after - before
-                    applied = True
-            elif assist.assist_kind == "preserve_alternatives":
-                self._uncertainty_assist_preserve_alternatives += 1
-                if self._uncertainty_assist_policy in {"all", "preserve_only", "local_only"}:
-                    self._uncertainty_preserve_vars.update(target_vars)
-                    applied = bool(self._uncertainty_max_preserve_count > 0)
-            elif assist.assist_kind == "request_separating_probe":
-                self._uncertainty_assist_request_probe += 1
-                if self._uncertainty_assist_policy in {"all", "probe_only", "local_only"}:
-                    for var in target_vars:
-                        frontier = self.ledger.vars[var].tied_frontier
-                        probes = frontier.separating_probes if frontier is not None else ()
-                        valid = tuple(
-                            (iv_var, iv_val)
-                            for iv_var, iv_val in probes
-                            if 0 <= iv_var < visible and 0.0 <= iv_val <= 1.0
-                        )[:3]
-                        if valid:
-                            self._uncertainty_forced_probes[var] = valid
-                            self._uncertainty_assist_extra_probe_total += len(valid)
-                            applied = True
-            elif assist.assist_kind == "increase_monitoring":
-                self._uncertainty_assist_increase_monitoring += 1
-                if self._uncertainty_assist_policy in {"all", "budget_only", "local_only"}:
-                    for var in target_vars:
-                        before = self._uncertainty_budget_bonus.get(var, 0)
-                        after = max(before, 1)
-                        self._uncertainty_budget_bonus[var] = after
-                        self._uncertainty_assist_extra_budget_total += after - before
-                    applied = True
-            elif assist.assist_kind == "repair_priority_bonus":
-                self._uncertainty_assist_repair_priority_bonus += 1
-                if self._uncertainty_assist_policy in {"all", "priority_only", "local_only"}:
-                    self._uncertainty_assist_priority_hint_total += len(target_vars)
-                    applied = True
-
-            if applied:
-                for var in target_vars:
-                    self._uncertainty_assist_vars.setdefault(var, set()).add(assist.assist_kind)
-                if (
-                    index_anchor_required
-                    and self._context_role_index is not None
-                    and self._context_role_index.can_record_index_assist_for_cycle(cycle)
-                ):
-                    anchor = index_matches_by_cluster.get(assist.cluster_id, ())[0]
-                    self._context_role_index.record_index_assist(
-                        cycle=cycle,
-                        assist_kind=assist.assist_kind,
-                        cluster_id=assist.cluster_id,
-                        nethra_id=anchor.nethra_id,
-                        match_reason=anchor.match_reason,
-                        changed_budget=assist.assist_kind in {
-                            "prioritize_attention",
-                            "increase_monitoring",
-                        } and self._uncertainty_assist_policy in {
-                            "all",
-                            "budget_only",
-                            "local_only",
-                        },
-                        changed_probes=assist.assist_kind == "request_separating_probe",
-                        changed_preservation=assist.assist_kind == "preserve_alternatives",
-                        changed_priority=assist.assist_kind == "repair_priority_bonus",
-                        outcome=self._context_role_assist_outcome(target_vars),
-                    )
-                if is_giant_cluster:
-                    self._uncertainty_assists_applied_from_giant_clusters += 1
-                else:
-                    self._uncertainty_assists_applied_from_local_clusters += 1
-
-            if not applied:
-                self._uncertainty_assist_noops += 1
-        self._uncertainty_giant_clusters_suppressed += len(suppressed_giant_clusters)
-
-    def _context_role_assist_outcome(self, target_vars: Tuple[int, ...]) -> Dict[str, Any]:
-        sentinel_failure = False
-        revocation = False
-        novelty_persistence = False
-        audit_count = 0
-        fit_signatures: Set[Tuple[Tuple[int, ...], str]] = set()
-        target_set = set(target_vars)
-        for var in target_vars:
-            if not (0 <= var < self.world.visible_count):
-                continue
-            n = self.ledger.vars[var]
-            sentinel_failure = sentinel_failure or int(n.consecutive_sentinel_failures) > 0
-            revocation = revocation or any(
-                getattr(cert, "revoked_by", None)
-                for cert in list(n.certificates.values()) + list(n.route_certs.values())
-            )
-            novelty_persistence = novelty_persistence or any(
-                int(getattr(nv, "affected_var", -1)) == int(var)
-                and getattr(nv, "status", "") == "open"
-                for nv in getattr(self.ledger, "novelty", ()) or ()
-            )
-            audit_count += int(getattr(n, "full_audits", 0) or 0)
-        for fd in getattr(self, "fit_diagnostics", ()) or ():
-            if int(getattr(fd, "var", -1)) in target_set:
-                fit_signatures.add((
-                    tuple(int(p) for p in getattr(fd, "best_parents", ()) or ()),
-                    str(getattr(fd, "best_func", "")),
-                ))
-        return {
-            "sentinel_failure": sentinel_failure,
-            "revocation": revocation,
-            "fit_churn": len(fit_signatures) > 1,
-            "novelty_persistence": novelty_persistence,
-            "audit_count": audit_count,
-        }
-
-    def uncertainty_consolidation_metrics(self) -> Dict[str, Any]:
-        avg_cluster = (
-            self._uncertainty_cluster_size_sum / self._uncertainty_cluster_observations
-            if self._uncertainty_cluster_observations else 0.0
-        )
-        avg_specificity = (
-            self._uncertainty_cluster_specificity_sum / self._uncertainty_cluster_observations
-            if self._uncertainty_cluster_observations else 0.0
-        )
-        cluster_count = (
-            self._uncertainty_summary.get("uncertainty_clusters", 0)
-            if self._uncertainty_consolidation_mode != "off" else 0
-        )
-        case_count = (
-            self._uncertainty_summary.get("uncertainty_cases_seen", 0)
-            if self._uncertainty_consolidation_mode != "off" else 0
-        )
-        return {
-            "uncertainty_consolidation_mode": self._uncertainty_consolidation_mode,
-            "uncertainty_assist_policy": self._uncertainty_assist_policy,
-            "uncertainty_cases_seen": case_count,
-            "uncertainty_clusters": cluster_count,
-            "uncertainty_compression_ratio": (
-                self._uncertainty_summary.get("uncertainty_compression_ratio", 0.0)
-                if self._uncertainty_consolidation_mode != "off" else 0.0
-            ),
-            "consolidation_assists_total": self._uncertainty_assists_total,
-            "assist_prioritize_attention": self._uncertainty_assist_prioritize_attention,
-            "assist_preserve_alternatives": self._uncertainty_assist_preserve_alternatives,
-            "assist_request_probe": self._uncertainty_assist_request_probe,
-            "assist_increase_monitoring": self._uncertainty_assist_increase_monitoring,
-            "assist_repair_priority_bonus": self._uncertainty_assist_repair_priority_bonus,
-            "assist_noops": self._uncertainty_assist_noops,
-            "max_cluster_size": self._uncertainty_max_cluster_size,
-            "avg_cluster_size": avg_cluster,
-            "cluster_specificity_mean": avg_specificity,
-            "giant_cluster_count": int(self._uncertainty_summary.get("giant_cluster_count", 0)),
-            "giant_clusters_suppressed": self._uncertainty_giant_clusters_suppressed,
-            "assists_suppressed_by_specificity_gate": (
-                self._uncertainty_assists_suppressed_by_specificity_gate
-            ),
-            "assists_applied_from_local_clusters": (
-                self._uncertainty_assists_applied_from_local_clusters
-            ),
-            "assists_applied_from_giant_clusters": (
-                self._uncertainty_assists_applied_from_giant_clusters
-            ),
-            "assist_extra_budget_total": self._uncertainty_assist_extra_budget_total,
-            "assist_extra_probe_total": self._uncertainty_assist_extra_probe_total,
-            "assist_preserved_alternative_total": (
-                self._uncertainty_assist_preserved_alternative_total
-            ),
-            "assist_priority_hint_total": self._uncertainty_assist_priority_hint_total,
-        }
-
     def context_role_index_metrics(self) -> Dict[str, Any]:
         if self._context_role_index is None:
             return {
@@ -1243,15 +761,6 @@ class ChainedAgent:
                 "role_surface_count": 0,
                 "load_bearing_surface_count": 0,
                 "residual_surface_count": 0,
-                "residual_bucket_count": 0,
-                "residual_pressure_total": 0.0,
-                "residual_pressure_mean": 0.0,
-                "residual_recent_growth_total": 0.0,
-                "residual_absorbed_count": 0,
-                "residual_unresolved_count": 0,
-                "residual_clarity_mean": 0.0,
-                "regime_transition_candidates_from_residuals": 0,
-                "residual_pressure_persistent_growth_windows": 0,
             }
         summary = self._context_role_index.summarize()
         summary["context_role_index_mode"] = self._context_role_index_mode
@@ -1361,138 +870,6 @@ class ChainedAgent:
             alternatives_preserved=self._authority_strength_alternatives_preserved_total,
         )
 
-    def _run_background_nethra(self, cycle: int) -> None:
-        """Passive per-cycle background-familiarity scan.
-
-        Observes tied frontiers, dormant alternatives, and authority states
-        from the current ledger snapshot. Never issues authority, revokes,
-        suppresses skips, forces probes, or increases monitoring.
-        """
-        bgi = self._background_nethra_index
-        if bgi is None:
-            return
-        visible = getattr(self.world, "visible_count", 0)
-        ctx_key = nethra_context_key(
-            operation="background_scan",
-            visible=visible,
-        )
-        for var in range(visible):
-            n = self.ledger.vars[var]
-            parents = tuple(sorted(int(p) for p in (n.parents or ())))
-
-            # Tied frontiers
-            frontier = getattr(n, "tied_frontier", None)
-            if frontier is not None:
-                candidates = getattr(frontier, "candidates", ())
-                nid = f"bg_frontier:x{var}:{n.func}({','.join(map(str, parents))})"
-                bgi.add_or_update_from_tied_frontier(
-                    nethra_id=nid,
-                    var=var,
-                    context_key=ctx_key,
-                    cycle=cycle,
-                    candidate_count=len(candidates),
-                    stable_count=int(getattr(frontier, "stable_count", 0)),
-                    parents=parents,
-                )
-
-            # Dormant alternatives
-            for alt in getattr(n, "dormant_alternatives", ()) or ():
-                alt_parents = tuple(sorted(
-                    int(p) for p in (getattr(alt, "parents", ()) or ())
-                ))
-                alt_func = str(getattr(alt, "func", ""))
-                nid = (
-                    f"bg_dormant:x{var}:{alt_func}"
-                    f"({','.join(map(str, alt_parents))})"
-                )
-                bgi.add_or_update_from_dormant_alternative(
-                    nethra_id=nid,
-                    var=var,
-                    context_key=ctx_key,
-                    cycle=cycle,
-                    revival_count=int(getattr(alt, "revival_count", 0)),
-                    parents=alt_parents,
-                )
-
-        # Authority state patterns (only if authority_strength ran)
-        if self._authority_strength_mode != "off":
-            for record in self._authority_strength_latest_records:
-                if record.authority_state not in {
-                    "contested_best_available",
-                    "quarantined_for_derivation",
-                    "repair_candidate",
-                }:
-                    continue
-                var = record.var
-                parents = tuple(sorted(
-                    int(p) for p in (self.ledger.vars[var].parents or ())
-                ))
-                bgi.add_or_update_from_authority_debt(
-                    nethra_id=f"bg_auth:{record.nethra_id}",
-                    var=var,
-                    context_key=str(record.context_key),
-                    cycle=cycle,
-                    authority_state=str(record.authority_state),
-                    parents=parents,
-                    signals=tuple(record.uncertainty_signals),
-                )
-
-    def _run_background_residual_classification(self, cycle: int) -> None:
-        """Passive per-cycle residual pressure classification.
-
-        Uses a strictly capped budget so it never competes with focal audit.
-        Invariants: never issues certs, revokes certs, suppresses skips, forces
-        probes, increases monitoring, or reads hidden truth fields.
-        Record mode matches off mode on all operational metrics.
-        """
-        if self._context_role_index is None:
-            return
-        store = self._context_role_index.role_surfaces
-        if not store._buckets:
-            return
-        budget = _BACKGROUND_RESIDUAL_BUDGET
-        store.classify_background_residuals(cycle, budget)
-        store.decay_residuals(cycle, budget)
-        store.check_persistent_growth()
-        store.regime_transition_candidates(
-            cycle=cycle,
-            min_pressure=2.0,
-            min_growth=0.0,
-            min_co_shift=2,
-        )
-
-    def background_nethra_metrics(self) -> Dict[str, Any]:
-        if self._background_nethra_index is None:
-            return {
-                "background_nethra_mode": self._background_nethra_mode,
-                "background_nethra_records": 0,
-                "background_nethra_by_kind": {},
-                "background_nethra_edges": 0,
-                "background_contexts_seen": 0,
-                "background_role_shift_examples": 0,
-                "background_trass_patterns": 0,
-                "background_unresolved_patterns": 0,
-                "background_quarantined_patterns": 0,
-                "background_giant_cluster_patterns": 0,
-                "background_dormant_patterns": 0,
-                "background_tied_frontier_patterns": 0,
-                "background_recognition_score_mean": 0.0,
-                "background_action_relevance_score_mean": 0.0,
-                "background_records_used_as_features": 0,
-                "background_feature_hits": 0,
-                "background_feature_noops": 0,
-                "familiar_background_count": 0,
-                "operational_authority_count": 0,
-            }
-        summary = self._background_nethra_index.summarize()
-        summary["background_nethra_mode"] = self._background_nethra_mode
-        return summary
-
-    def background_nethra_export(self, limit: int = 200) -> Dict[str, Any]:
-        if self._background_nethra_index is None:
-            return {"records": [], "edges": [], "role_shift_examples": []}
-        return self._background_nethra_index.export_records(limit=limit)
-
     def authority_strength_metrics(self) -> Dict[str, Any]:
         zero_controller_metrics: Dict[str, Any] = {
             "authority_strength_controller": self._authority_strength_controller_mode,
@@ -1512,7 +889,6 @@ class ChainedAgent:
             "derivation_gate_allowed": 0,
             "derivation_gate_blocked": 0,
             "derivation_gate_would_block": 0,
-            "derivation_gate_shadow_would_block": 0,
             "derivation_gate_blocked_by_state": {},
             "derivation_gate_blocked_by_reason": {},
             "derivation_gate_blocked_by_handle_kind": {},
@@ -1737,7 +1113,6 @@ class ChainedAgent:
         # P1-A: activated — was previously computed but discarded.
         _adaptive = self._adaptive_probe_budget(_n_hyp)
         budget = max(self._var_budget_escalation.get(var, 0), _adaptive)
-        budget += self._uncertainty_budget_bonus.get(var, 0)
         if self._authority_strength_mode == "assist":
             budget += self._authority_strength_budget_bonus.get(var, 0)
         diag_dict: Dict[str, object] = {
@@ -1798,13 +1173,8 @@ class ChainedAgent:
         # Merge provider probes with frontier probes; pass None when both are empty
         # so fit_var's default discrimination pool is used unchanged.
         _merged_probes: Optional[Tuple[Tuple[int, float], ...]] = None
-        _consolidation_probes: Tuple[Tuple[int, float], ...] = (
-            self._uncertainty_forced_probes.get(var, ())
-            if self._uncertainty_consolidation_mode == "assist"
-            else ()
-        )
-        if _provider_probes or _frontier_probes or _consolidation_probes:
-            _merged_probes = _provider_probes + _frontier_probes + _consolidation_probes
+        if _provider_probes or _frontier_probes:
+            _merged_probes = _provider_probes + _frontier_probes
         if (
             self._nethra_memory_index is not None
             and _merged_probes
@@ -1951,16 +1321,6 @@ class ChainedAgent:
                 self.ledger.event_log.append(
                     f"c{cycle}: x{var} operation_role test DEFERRED "
                     f"(only {n_other_visible} other visible vars; need ≥2)"
-                )
-                nid = self._context_role_index_record_var_fit(var, cycle, source="operation_role")
-                self._context_role_index_assign_role(
-                    nid,
-                    var=var,
-                    cycle=cycle,
-                    operation="skip",
-                    role="unresolved",
-                    evidence_summary="operation_role_deferred",
-                    validity_scope=(var,),
                 )
             return "untested"
 
@@ -2945,23 +2305,6 @@ class ChainedAgent:
             n.first_audited_cycle = cycle
         n.full_audits += 1
         n.margins.append(margin)
-        audit_nethra_id = self._context_role_index_record_var_fit(
-            var,
-            cycle,
-            source="audit",
-            fit_diag=fit_diag,
-        )
-        self._context_role_index_assign_role(
-            audit_nethra_id,
-            var=var,
-            cycle=cycle,
-            operation="audit",
-            role="best_available",
-            evidence_summary="selected by fit_var",
-            fit_diag=fit_diag,
-            validity_scope=tuple(sorted((var, *new_parents))),
-        )
-
         if n.role_for("skip") == "untested":
             self._certify_operation_role(var, cycle)
 
@@ -3326,37 +2669,6 @@ class ChainedAgent:
         """
         n = self.ledger.vars[var]
         existing = n.tied_frontier
-        frontier_candidates = tuple(near_tie_set)
-        if (
-            self._scaffold_memory_mode == "assist_feature"
-            and self._scaffold_memory_index is not None
-            and len(frontier_candidates) >= 2
-        ):
-            frontier_candidates = tuple(
-                self._scaffold_memory_index.rank_frontier_candidates(
-                    var,
-                    nethra_context_key(
-                        operation="tied_frontier",
-                        var=var,
-                        visible=self.world.visible_count,
-                    ),
-                    frontier_candidates,
-                )
-            )
-        for cand_parents, cand_func in frontier_candidates:
-            self._context_role_index_record_candidate(
-                prefix="frontier",
-                kind="tied_frontier_candidate",
-                var=var,
-                parents=tuple(cand_parents),
-                func=cand_func,
-                cycle=cycle,
-                source="tied_frontier",
-                role="unresolved",
-                score=scores_dict.get((cand_parents, cand_func), 0),
-                context_operation="tied_frontier",
-                fit_diag=fit_diag,
-            )
         if existing is None:
             new_frontier = TiedFrontier(
                 candidates=near_tie_set,
@@ -3397,19 +2709,6 @@ class ChainedAgent:
                         last_seen_cycle=cycle,
                     )
                 )
-                self._context_role_index_record_candidate(
-                    prefix="dormant",
-                    kind="dormant_alternative",
-                    var=var,
-                    parents=h[0],
-                    func=h[1],
-                    cycle=cycle,
-                    source="dormant_alternative",
-                    role="unresolved",
-                    score=existing.scores.get(h, 0),
-                    context_operation="frontier_context_change",
-                    fit_diag=fit_diag,
-                )
             new_frontier = TiedFrontier(
                 candidates=near_tie_set,
                 scores={h: scores_dict.get(h, 0) for h in near_tie_set},
@@ -3433,19 +2732,6 @@ class ChainedAgent:
                         last_score=existing.scores.get(h, 0),
                         last_seen_cycle=cycle,
                     )
-                )
-                self._context_role_index_record_candidate(
-                    prefix="dormant",
-                    kind="dormant_alternative",
-                    var=var,
-                    parents=h[0],
-                    func=h[1],
-                    cycle=cycle,
-                    source="dormant_alternative",
-                    role="unresolved",
-                    score=existing.scores.get(h, 0),
-                    context_operation="frontier_narrowed",
-                    fit_diag=fit_diag,
                 )
             new_frontier = TiedFrontier(
                 candidates=near_tie_set,
@@ -3489,18 +2775,6 @@ class ChainedAgent:
                             last_seen_cycle=cycle,
                         )
                     )
-                    self._context_role_index_record_candidate(
-                        prefix="dormant",
-                        kind="dormant_alternative",
-                        var=var,
-                        parents=h[0],
-                        func=h[1],
-                        cycle=cycle,
-                        source="dormant_alternative",
-                        role="unresolved",
-                        score=f.scores.get(h, 0),
-                        context_operation="frontier_collapse",
-                    )
             if winning_hyp is not None:
                 self.ledger.event_log.append(
                     f"c{cycle}: x{var} frontier collapsed → "
@@ -3509,42 +2783,6 @@ class ChainedAgent:
                 )
         else:
             # Threshold not met: ambiguity is unresolved; discard without archiving.
-            if (
-                self._uncertainty_consolidation_mode == "assist"
-                and var in self._uncertainty_preserve_vars
-                and self._uncertainty_preserve_remaining > 0
-            ):
-                archived = 0
-                for h in f.candidates:
-                    if h == winning_hyp or self._uncertainty_preserve_remaining <= 0:
-                        continue
-                    n.dormant_alternatives.append(
-                        DormantAlternative(
-                            parents=h[0], func=h[1],
-                            last_score=f.scores.get(h, 0),
-                            last_seen_cycle=cycle,
-                        )
-                    )
-                    self._context_role_index_record_candidate(
-                        prefix="dormant",
-                        kind="dormant_alternative",
-                        var=var,
-                        parents=h[0],
-                        func=h[1],
-                        cycle=cycle,
-                        source="dormant_alternative",
-                        role="unresolved",
-                        score=f.scores.get(h, 0),
-                        context_operation="frontier_preserve",
-                    )
-                    self._uncertainty_preserve_remaining -= 1
-                    self._uncertainty_assist_preserved_alternative_total += 1
-                    archived += 1
-                if archived:
-                    self.ledger.event_log.append(
-                        f"c{cycle}: x{var} uncertainty consolidation preserved "
-                        f"{archived} alternative(s) within cap"
-                    )
             if (
                 self._authority_strength_mode == "assist"
                 and var in self._authority_strength_preserve_vars
@@ -3566,18 +2804,6 @@ class ChainedAgent:
                             last_score=f.scores.get(h, 0),
                             last_seen_cycle=cycle,
                         )
-                    )
-                    self._context_role_index_record_candidate(
-                        prefix="dormant",
-                        kind="dormant_alternative",
-                        var=var,
-                        parents=h[0],
-                        func=h[1],
-                        cycle=cycle,
-                        source="dormant_alternative",
-                        role="unresolved",
-                        score=f.scores.get(h, 0),
-                        context_operation="authority_strength_preserve",
                     )
                     self._authority_strength_preserve_remaining -= 1
                     self._authority_strength_alternatives_preserved_total += 1
@@ -3881,22 +3107,6 @@ class ChainedAgent:
                 x for x in ranking.ranked
                 if n.route_certs.get(x) is None or n.route_certs[x].role != "trass"
             )
-            if (
-                self._scaffold_memory_mode == "assist_feature"
-                and self._scaffold_memory_index is not None
-                and len(post_route) >= 2
-            ):
-                post_route = tuple(
-                    self._scaffold_memory_index.rank_candidate_keys(
-                        target,
-                        nethra_context_key(
-                            operation="parent_candidates",
-                            var=target,
-                            visible=self.world.visible_count,
-                        ),
-                        post_route,
-                    )
-                )
             if self._nethra_memory_index is not None:
                 post_route = tuple(
                     self._nethra_memory_index.rank_candidates(
@@ -3944,36 +3154,7 @@ class ChainedAgent:
             delta = abs(hi - lo)
             if delta > DEFAULT_TOLERANCE:
                 scored.append((delta, x))
-        if (
-            self._scaffold_memory_mode == "assist_feature"
-            and self._scaffold_memory_index is not None
-            and len(scored) >= 2
-        ):
-            context = nethra_context_key(
-                operation="parent_candidates",
-                var=target,
-                visible=self.world.visible_count,
-            )
-            scaffold_scores = {
-                x: sum(
-                    score
-                    for _, score, _ in self._scaffold_memory_index.useful_local_matches(
-                        target,
-                        context,
-                        x,
-                    )
-                )
-                for _, x in scored
-            }
-            if any(score > 0 for score in scaffold_scores.values()):
-                self._scaffold_memory_index.rank_candidate_keys(
-                    target,
-                    context,
-                    tuple(x for _, x in scored),
-                )
-            scored.sort(key=lambda row: (-row[0], -scaffold_scores.get(row[1], 0), row[1]))
-        else:
-            scored.sort(reverse=True)
+        scored.sort(reverse=True)
         if self._nethra_memory_index is not None:
             context = nethra_context_key(
                 operation="parent_candidates",
@@ -4120,10 +3301,7 @@ class ChainedAgent:
         cycle = int(getattr(cycle, "cycle", cycle))
         self._current_cycle_for_memory = cycle
         self._uncertain_this_cycle.clear()
-        self._run_uncertainty_consolidation(cycle)
         self._run_authority_strength(cycle)
-        self._run_background_nethra(cycle)
-        self._run_background_residual_classification(cycle)
 
         skipped: List[int] = []
         audited: List[int] = []
@@ -4132,8 +3310,6 @@ class ChainedAgent:
         novelty_fired = False
         _cert_events: List[RegimeCertEvent] = []
         _passive_stressed_vars: Set[int] = set()
-        _shadow_ok_vars: Set[int] = set()  # vars where shadow said ok this cycle
-        _shadow_ok_var_keys: Dict[int, Tuple[object, Optional[str]]] = {}
         _structural_change_this_cycle = False
 
         # First pass: cheap paths and queue full audits.
@@ -4447,133 +3623,6 @@ class ChainedAgent:
             if self._probe_proposer is not None and hasattr(self._probe_proposer, "observe_residual_event"):
                 self._probe_proposer.observe_residual_event(var, cycle, _passive_stressed)  # type: ignore[attr-defined]
 
-            # Shadow residual (Stage 3A): observe actual symbolic residual and
-            # predict — NEVER used for gating, certs, skips, or any operative
-            # decision. Only increments diagnostic counters.
-            if n.authoritative and self._shadow_residual_enabled:
-                _sf = FUNC_LIBRARY.get(n.func)
-                if _sf is not None:
-                    _shadow_pv = [self.world.state[p] for p in n.parents]
-                    # Symbolic reference: always computed from FUNC_LIBRARY, never from the
-                    # active residual provider. When _residual_predictor is set (hybrid mode),
-                    # _passive_ok/_passive_stressed are provider-derived; comparing shadow
-                    # against those would make false_ok_vs_symbolic meaningless in learned
-                    # provider stages. The symbolic reference stays invariant across stages.
-                    _symbolic_residual_value = abs(self.world.state[var] - _sf(_shadow_pv))
-                    _symbolic_passive_ok = _symbolic_residual_value <= n.current_tolerance
-                    _symbolic_passive_stressed = not _symbolic_passive_ok
-
-                    # Build a ResidualFeatureVector for feature-conditioned calibration.
-                    # Only uses already-visible agent/world state — no hidden truth.
-                    _shadow_fv = ResidualFeatureVector(
-                        var=var,
-                        cycle=cycle,
-                        parents=tuple(n.parents),
-                        func=n.func,
-                        parent_vals=tuple(_shadow_pv),
-                        actual=self.world.state[var],
-                        tolerance=n.current_tolerance,
-                        consequence_tier=self._consequence_tier(var),
-                        full_audits=n.full_audits,
-                        sentinel_count=len(n.sentinels),
-                        cert_age=(cycle - n.first_certified_cycle) if n.first_certified_cycle > 0 else 0,
-                    )
-
-                    # predict_shadow BEFORE observe — shadow must not train on the
-                    # current sample before predicting it. This order is the core
-                    # honesty guarantee: the predictor sees only history, not the future.
-                    _sp = self._shadow_residual_predictor.predict_shadow(  # type: ignore[union-attr]
-                        var, n.func, n.current_tolerance, fv=_shadow_fv
-                    )
-                    _sp_insufficient = self._shadow_residual_predictor._last_call_insufficient  # type: ignore[union-attr]
-
-                    # observe AFTER predicting — calibrator learns from the actual
-                    # symbolic residual using FUNC_LIBRARY (never from provider output).
-                    self._shadow_residual_predictor.observe(  # type: ignore[union-attr]
-                        n.func, _symbolic_residual_value, fv=_shadow_fv
-                    )
-
-                    # Track per-call counters
-                    self._shadow_residual_calls += 1
-                    if _sp_insufficient:
-                        self._shadow_residual_insufficient += 1
-                        self._shadow_residual_stressed += 1
-                    elif _sp.ok:
-                        self._shadow_residual_ok += 1
-                        _shadow_ok_vars.add(var)
-                    else:
-                        self._shadow_residual_stressed += 1
-
-                    # Compare shadow against FUNC_LIBRARY symbolic decision, not provider.
-                    # false_ok_vs_symbolic = shadow predicted ok when FUNC_LIBRARY said stressed.
-                    if _sp.ok == _symbolic_passive_ok:
-                        self._shadow_agree_symbolic += 1
-                    if _sp.ok and _symbolic_passive_stressed:
-                        self._shadow_false_ok_vs_symbolic += 1
-                    if _sp.stressed and _symbolic_passive_ok:
-                        self._shadow_false_stress_vs_symbolic += 1
-                    if _sp.ok:
-                        self._shadow_would_save_iv += len(n.sentinels)
-                        if _symbolic_passive_stressed:
-                            self._shadow_would_miss_symbolic_stress += len(n.sentinels)
-
-                    if self._shadow_key_authority is not None:
-                        _meta = self._shadow_residual_predictor.last_prediction_metadata  # type: ignore[union-attr]
-                        _key_used = _meta.get("key_used")
-                        _key_type = _meta.get("key_type")
-                        if self._shadow_residual_predictor._is_feature_mode:  # type: ignore[union-attr]
-                            _authority_key = (
-                                _key_used
-                                if _key_used is not None
-                                else ShadowResidualKeyAuthority.KEY_INSUFFICIENT
-                            )
-                            _authority_key_type = _key_type
-                            self._shadow_key_authority.record_prediction(
-                                key=_authority_key,
-                                key_type=_authority_key_type,
-                                shadow_ok=_sp.ok,
-                                shadow_stressed=_sp.stressed,
-                                symbolic_ok=_symbolic_passive_ok,
-                                symbolic_stressed=_symbolic_passive_stressed,
-                                would_save_iv=len(n.sentinels) if _sp.ok else 0,
-                                would_miss_symbolic_stress=(
-                                    len(n.sentinels)
-                                    if _sp.ok and _symbolic_passive_stressed
-                                    else 0
-                                ),
-                                cycle=cycle,
-                            )
-                            if _sp.ok:
-                                _shadow_ok_var_keys[var] = (
-                                    _authority_key,
-                                    _authority_key_type,
-                                )
-
-                    # Feature-calibrator key-usage and false-ok-per-key counters.
-                    if self._shadow_residual_predictor._is_feature_mode:  # type: ignore[union-attr]
-                        _lku = self._shadow_residual_predictor._last_key_used  # type: ignore[union-attr]
-                        if _lku is None:
-                            self._shadow_feature_key_insufficient += 1
-                        elif _lku[0] == "func_var":
-                            self._shadow_feature_key_func_var += 1
-                            if _sp.ok and _symbolic_passive_stressed:
-                                self._shadow_feature_fok_func_var += 1
-                        elif _lku[0] == "func_tier_parent":
-                            self._shadow_feature_key_func_tier_parentcount += 1
-                            if _sp.ok and _symbolic_passive_stressed:
-                                self._shadow_feature_fok_func_tier_parentcount += 1
-                        elif _lku[0] == "func_tier":
-                            self._shadow_feature_key_func_tier += 1
-                            if _sp.ok and _symbolic_passive_stressed:
-                                self._shadow_feature_fok_func_tier += 1
-                        elif _lku[0] == "func":
-                            self._shadow_feature_key_func += 1
-                            if _sp.ok and _symbolic_passive_stressed:
-                                self._shadow_feature_fok_func += 1
-                        else:  # "global"
-                            self._shadow_feature_key_global += 1
-                            if _sp.ok and _symbolic_passive_stressed:
-                                self._shadow_feature_fok_global += 1
 
             # Parked sentinel skip: leaf cert redundant — higher handle covered
             # this var for _PARK_W+ cycles with no unique failures.
@@ -4724,22 +3773,6 @@ class ChainedAgent:
                     self._live_set.add(var)
                 _sentinel_failed_vars[var] = (f"sentinel: {reason}", _sentinel_max_dev)
                 self.sentinel_miss_count += 1
-                # Shadow false-OK vs active sentinel: shadow said ok but sentinel
-                # failed this cycle. Increments without changing any decision.
-                if var in _shadow_ok_vars:
-                    self._shadow_false_ok_vs_active_sentinel += 1
-                    self._shadow_would_miss_active_failure += len(n.sentinels)
-                    if (
-                        self._shadow_key_authority is not None
-                        and var in _shadow_ok_var_keys
-                    ):
-                        _authority_key, _authority_key_type = _shadow_ok_var_keys[var]
-                        self._shadow_key_authority.record_active_failure(
-                            key=_authority_key,
-                            key_type=_authority_key_type,
-                            would_miss_active_failure=len(n.sentinels),
-                            cycle=cycle,
-                        )
                 # Utility accounting: was a higher handle also firing for this var?
                 if var in _regime_failed_vars:
                     n.failures_also_caught_by_higher += 1
@@ -4804,11 +3837,6 @@ class ChainedAgent:
                 # urgent). T2 → -2.0, T1 → -1.0, T0 → 0.0. A*-style cost/benefit
                 # weighting is reserved for a later stage.
                 _ra_priority = -float(self._consequence_tier(_ra_var))
-                if (
-                    self._uncertainty_consolidation_mode == "assist"
-                    and "repair_priority_bonus" in self._uncertainty_assist_vars.get(_ra_var, set())
-                ):
-                    _ra_priority -= 0.25
                 if (
                     self._authority_strength_mode == "assist"
                     and _ra_var in self._authority_strength_repair_priority_vars

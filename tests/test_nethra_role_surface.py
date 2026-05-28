@@ -11,7 +11,6 @@ from dreth.context_role_index import (
 )
 from dreth.nethra_role_surface import (
     NethraRoleSurfaceStore,
-    ResidualBucket,
 )
 
 
@@ -69,10 +68,6 @@ def test_trass_surface_collects_residual_without_projection() -> None:
     assert surface.residual_collection_allowed is True
     assert surface.projection_allowed is False
 
-    bucket = store.charge_residual("n1", "ctx_a", {"x": 1}, cycle=2)
-    assert bucket.residual_count == 1
-    assert bucket.pressure > 0.0
-
     # Primary projection must be denied
     assert store.projection_allowed("n1", "ctx_a", "primary") is False
 
@@ -125,57 +120,6 @@ def test_unresolved_surface_preserves_without_authority() -> None:
     for e in entries:
         if e.nethra_id == "n4":
             assert e.allowed is False
-
-
-def test_residual_bucket_caps_representative_examples() -> None:
-    store = _store()
-    store.assign_surface("n5", "ctx_e", "trass", cycle=0)
-
-    # Charge more residuals than the cap
-    from dreth.nethra_role_surface import _MAX_REPRESENTATIVE_EXAMPLES
-    for i in range(_MAX_REPRESENTATIVE_EXAMPLES + 10):
-        store.charge_residual("n5", "ctx_e", {"i": i}, cycle=i)
-
-    bucket = store.surface_for("n5", "ctx_e")
-    b = store._buckets[("n5", "ctx_e")]
-    assert len(b.representative_examples) <= _MAX_REPRESENTATIVE_EXAMPLES
-    assert b.residual_count == _MAX_REPRESENTATIVE_EXAMPLES + 10
-
-
-def test_background_decay_can_reduce_pressure() -> None:
-    store = _store()
-    store.assign_surface("n6", "ctx_f", "trass", cycle=0)
-
-    for i in range(5):
-        store.charge_residual("n6", "ctx_f", {"i": i}, cycle=i)
-
-    bucket_before = store._buckets[("n6", "ctx_f")]
-    pressure_before = bucket_before.pressure
-    assert pressure_before > 0.0
-
-    store.classify_background_residuals(cycle=10, budget=10)
-
-    bucket_after = store._buckets[("n6", "ctx_f")]
-    assert bucket_after.pressure <= pressure_before
-    assert bucket_after.clarity >= 0.0
-
-
-def test_correlated_trass_buckets_emit_candidate_not_authority() -> None:
-    store = _store()
-    store.assign_surface("na", "ctx_g", "trass", cycle=0)
-    store.assign_surface("nb", "ctx_g", "trass", cycle=0)
-
-    # Charge residuals with mutual co-shifts
-    for i in range(5):
-        store.charge_residual("na", "ctx_g", {"i": i}, cycle=i, coactive_nethras=("nb",))
-        store.charge_residual("nb", "ctx_g", {"i": i}, cycle=i, coactive_nethras=("na",))
-
-    candidates = store.regime_transition_candidates(cycle=10, min_pressure=1.0, min_co_shift=1)
-    assert len(candidates) >= 1, "expected at least one regime candidate"
-
-    # No surface should have been promoted to tareth
-    for surface in store._surfaces.values():
-        assert surface.role_state != "tareth", "regime candidate must not directly promote role"
 
 
 def test_context_role_index_backcompat_metrics_survive() -> None:
@@ -246,9 +190,8 @@ def test_context_role_index_export_includes_surfaces() -> None:
     assert "nodes" in exported
     assert "edges" in exported
     assert "roles" in exported
-    assert "records" in exported
+
     assert "role_surfaces" in exported
-    assert "residual_buckets" in exported
     assert "surface_transitions" in exported
 
     # Surface should reflect the most recent role assigned

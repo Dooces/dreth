@@ -5,10 +5,10 @@ import sys
 import tempfile
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from dreth.nethra_mind_store import NethraMindStore, effective_use_right
+from dreth.learner.nethra_mind_store import NethraMindStore, effective_use_right
 from dreth.nethra_runtime_memory import PersistentNethraIndex
 
 
@@ -198,7 +198,7 @@ def test_record_mode_equals_off_with_compacted_mind_loaded():
         assert idx.runtime_metrics()["nethra_memory_behavior_effects"] == 0
 
 
-def test_assist_reorders_using_compacted_mind_with_behavior_effect_attribution():
+def test_assist_reorders_using_ranking_hint_from_compacted_mind():
     store = NethraMindStore()
     store.ingest_record(
         _record_row(
@@ -230,10 +230,10 @@ def test_assist_reorders_using_compacted_mind_with_behavior_effect_attribution()
             hook="parent_candidates",
             cycle=50,
         )
-        # x2 (candidate 2) should be ranked first
-        assert list(ranked)[0] == 2
+        # x2 is the ranking_hint atom → candidate 2 moves to front
+        assert tuple(ranked) == (2, 1)
         m = idx.runtime_metrics()
-        assert m["nethra_memory_behavior_effects"] >= 1
+        assert m["nethra_memory_behavior_effects"] == 1
         assert m["nethra_memory_authority_effects"] == 0
 
 
@@ -541,7 +541,7 @@ def test_proposal_id_record_id_cycle_differ_no_new_node():
 
 
 def test_max_node_cap_prunes_low_salience_nodes():
-    from dreth.nethra_mind_store import _MAX_NODES
+    from dreth.learner.nethra_mind_store import _MAX_NODES
 
     store = NethraMindStore()
     # Create _MAX_NODES + 50 distinct nodes (unique atoms prevent assimilation folding)
@@ -559,7 +559,7 @@ def test_max_node_cap_prunes_low_salience_nodes():
 
 
 def test_invalidators_failure_counts_survive_pruning():
-    from dreth.nethra_mind_store import _MAX_NODES
+    from dreth.learner.nethra_mind_store import _MAX_NODES
 
     store = NethraMindStore()
     # Create distinct nodes that exceed the cap (unique atoms prevent assimilation folding)
@@ -705,7 +705,7 @@ def test_write_report_sections_present_with_new_sections():
 def test_mind_node_loads_without_surface_fields_from_old_file(tmp_path):
     """Old compact files that lack role_surfaces/residual_buckets load cleanly."""
     import json
-    from dreth.nethra_mind_store import NethraMindStore
+    from dreth.learner.nethra_mind_store import NethraMindStore
 
     old_node = {
         "entry_kind": "nethra_mind_node",
@@ -733,7 +733,7 @@ def test_mind_node_loads_without_surface_fields_from_old_file(tmp_path):
 def test_mind_node_serializes_surface_fields_in_new_file(tmp_path):
     """New compact files include role_surfaces, residual_buckets, surface_transitions."""
     import json
-    from dreth.nethra_mind_store import NethraMindStore, NethraMindNode
+    from dreth.learner.nethra_mind_store import NethraMindStore, NethraMindNode
 
     store = NethraMindStore()
     store.upsert_node(
@@ -765,7 +765,7 @@ def test_mind_node_serializes_surface_fields_in_new_file(tmp_path):
 def test_mind_compaction_serializes_surface_buckets(tmp_path):
     """Compacted mind output contains role_surfaces and residual_buckets on nodes."""
     import json
-    from dreth.nethra_mind_store import NethraMindStore
+    from dreth.learner.nethra_mind_store import NethraMindStore
 
     store = NethraMindStore()
     store.upsert_node("n_compact", touched_atoms=["x1"], use_right="ranking_hint")
@@ -786,7 +786,7 @@ def test_mind_compaction_serializes_surface_buckets(tmp_path):
 
 def test_repeated_residuals_do_not_write_unbounded_raw_rows(tmp_path):
     """After many partial-overlap ingestions, residual rows stay bounded."""
-    from dreth.nethra_mind_store import NethraMindStore
+    from dreth.learner.nethra_mind_store import NethraMindStore
     import json
 
     store = NethraMindStore()
@@ -816,7 +816,7 @@ def test_repeated_residuals_do_not_write_unbounded_raw_rows(tmp_path):
 def test_authority_allowed_remains_false_in_compacted_mind(tmp_path):
     """After compaction and reload, authority_allowed and authority_effect_count stay zero."""
     import json
-    from dreth.nethra_mind_store import NethraMindStore
+    from dreth.learner.nethra_mind_store import NethraMindStore
 
     store = NethraMindStore()
     store.upsert_node("n_auth", touched_atoms=["x1"], use_right="ranking_hint")

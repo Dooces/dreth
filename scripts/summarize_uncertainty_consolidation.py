@@ -14,7 +14,7 @@ from typing import Any, Iterable, TextIO
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from dreth.uncertainty_consolidation import (
+from dreth.learner.uncertainty_consolidation import (
     cluster_uncertainty_cases,
     extract_uncertainty_cases_from_rows,
     summarize_clusters,

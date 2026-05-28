@@ -6,10 +6,10 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from dreth.nethra_scaffold_sleep import (  # noqa: E402
+from dreth.learner.nethra_scaffold_sleep import (  # noqa: E402
     NethraScaffoldSleep,
     ScaffoldAbstraction,
     ScaffoldComposition,
@@ -260,7 +260,7 @@ def test_hidden_truth_debug_fields_are_ignored():
 
 def test_no_runtime_behavior_changes_or_agent_imports():
     import inspect
-    import dreth.nethra_scaffold_sleep as mod
+    import dreth.learner.nethra_scaffold_sleep as mod
 
     source = inspect.getsource(mod)
     assert "from dreth.agent" not in source

@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from .memory_sleep import MemorySleepConsolidator, MemorySleepSummary
-from .nethra_memory_store import NethraMemoryStore
+from dreth.nethra_memory_store import NethraMemoryStore
 
 
 @dataclass

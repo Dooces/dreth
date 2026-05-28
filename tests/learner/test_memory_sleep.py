@@ -6,10 +6,10 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from dreth.memory_sleep import (
+from dreth.learner.memory_sleep import (
     HIDDEN_TRUTH_LIKE_FIELDS,
     MemorySleepConsolidator,
     MemorySleepSummary,
@@ -612,7 +612,7 @@ def test_aggregate_zero_fields_diagnosed_when_export_has_per_record_data():
 
 def test_no_imports_from_agent():
     """memory_sleep module must not import from agent.py."""
-    import dreth.memory_sleep as ms_mod
+    import dreth.learner.memory_sleep as ms_mod
     import inspect
     source = inspect.getsource(ms_mod)
     assert "from dreth.agent" not in source

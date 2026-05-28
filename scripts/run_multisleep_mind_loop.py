@@ -158,7 +158,7 @@ def build_run_sleep_delta(
     """
     sys.path.insert(0, str(cwd))
 
-    from dreth.memory_sleep import MemorySleepConsolidator
+    from dreth.learner.memory_sleep import MemorySleepConsolidator
     from dreth.nethra_memory_store import NethraMemoryStore
 
     c = MemorySleepConsolidator()
@@ -171,6 +171,13 @@ def build_run_sleep_delta(
     temp = c.extract_temporal_records_if_available(rows)
     exp = c.extract_experience_events(rows)
     mem = c.extract_nethra_memory_records(rows)
+
+    # Experience events and memory records were offloaded to the delta by batch_run.
+    # Read them back so sleep can use them for build_sleep_products.
+    if delta_path.exists() and delta_path.stat().st_size > 0:
+        delta_rows = c.load_jsonl_rows(delta_path)
+        exp = exp + c.extract_experience_events(delta_rows)
+        mem = mem + c.extract_nethra_memory_records(delta_rows)
 
     proposals = c.build_proposals(bg, cr, unc, auth, temp, min_sources=min_sources)
     products = c.build_sleep_products(mem, exp)

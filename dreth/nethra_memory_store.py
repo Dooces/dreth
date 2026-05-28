@@ -14,8 +14,13 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
-from .memory_sleep import HIDDEN_TRUTH_LIKE_FIELDS
-
+HIDDEN_TRUTH_LIKE_FIELDS: frozenset[str] = frozenset({
+    "truth_parents",
+    "truth_func",
+    "truth_delayed_parents",
+    "truth_latents",
+    "debug_blind_challenge_manifest",
+})
 
 MEMORY_RECORD_TYPES: frozenset[str] = frozenset({
     "background_nethra",
@@ -552,7 +557,7 @@ def records_from_batch_record(row: dict[str, Any]) -> list[NethraMemoryRecord]:
                 for role in (payload.get("source_roles") or [])
             ],
             evidence_refs=[nid] if nid else [],
-            use_right="ranking_hint" if payload.get("parent_sets") else "feature_only",
+            use_right="record_only",
             salience=float(payload.get("salience_score", payload.get("cheap_recognition_score", 0.0)) or 0.0),
             source="runtime",
             created_cycle=int(payload.get("first_seen_cycle", 0) or 0),
@@ -584,7 +589,7 @@ def records_from_batch_record(row: dict[str, Any]) -> list[NethraMemoryRecord]:
                 "cycle": int(payload.get("last_seen_cycle", payload.get("cycle", 0)) or 0),
             }],
             evidence_refs=[nid] if nid else [],
-            use_right="ranking_hint" if payload.get("learned_parents") else "feature_only",
+            use_right="record_only",
             salience=0.2,
             source="runtime",
             created_cycle=int(payload.get("first_seen_cycle", payload.get("cycle", 0)) or 0),

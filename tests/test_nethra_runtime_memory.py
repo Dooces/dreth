@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from dreth.nethra_memory_store import ExperienceEvent, NethraMemoryRecord, NethraMemoryStore
-from dreth.nethra_runtime_memory import PersistentNethraIndex, SalienceScorer
+from dreth.nethra_runtime_memory import PersistentNethraIndex
 
 
 def _handle(
@@ -71,7 +71,7 @@ def test_record_mode_loads_and_records_matches_without_reordering():
     assert len(index.export_experience_events()) == 1
 
 
-def test_assist_mode_ranking_hint_reorders_existing_candidates_with_attribution():
+def test_assist_mode_reorders_using_ranking_hint():
     index = PersistentNethraIndex(mode="assist", run_id="run-b", seed=2)
     index.add_records([_handle("h2", ["x2"], salience=2.0)])
     ranked = index.rank_candidates(
@@ -81,6 +81,7 @@ def test_assist_mode_ranking_hint_reorders_existing_candidates_with_attribution(
         hook="parent_candidates",
         cycle=10,
     )
+    # x2 is ranking_hint → candidate 2 moves to front
     assert ranked == (2, 1)
     metrics = index.runtime_metrics()
     assert metrics["nethra_memory_behavior_effects"] == 1
@@ -115,40 +116,6 @@ def test_sleep_hard_filter_is_rejected_on_load():
     assert index.records[0].use_right == "record_only"
     assert index.records[0].authority_allowed is False
     assert "sleep_hard_filter_rejected" in index.records[0].invalidators
-
-
-def test_salience_specific_useful_handle_beats_frequent_broad_handle():
-    scorer = SalienceScorer(current_cycle=10)
-    broad = _handle(
-        "broad",
-        ["x0", "x1", "x2", "x3", "x4"],
-        success=20,
-        salience=0.2,
-    )
-    specific = _handle(
-        "specific",
-        ["x2"],
-        success=2,
-        salience=0.2,
-    )
-    b = scorer.score(broad, active_atoms=["x2"], context_key="parent_candidates|x0|vis=3")
-    s = scorer.score(specific, active_atoms=["x2"], context_key="parent_candidates|x0|vis=3")
-    assert s.score > b.score
-    assert b.components["broad_atom_penalty"] < 0
-    assert s.components["specificity"] > b.components["specificity"]
-
-
-def test_failed_and_stale_handle_downranks():
-    scorer = SalienceScorer(current_cycle=1000)
-    useful = _handle("useful", ["x1"], success=2, failure=0)
-    useful.last_used_cycle = 995
-    useful.last_success_cycle = 995
-    failed = _handle("failed", ["x1"], success=2, failure=4)
-    stale = _handle("stale", ["x1"], success=2, failure=0)
-    stale.last_used_cycle = 1
-    stale.last_success_cycle = 1
-    assert scorer.score(useful, active_atoms=["x1"], context_key="parent_candidates|x0|vis=3").score > scorer.score(failed, active_atoms=["x1"], context_key="parent_candidates|x0|vis=3").score
-    assert scorer.score(useful, active_atoms=["x1"], context_key="parent_candidates|x0|vis=3").score > scorer.score(stale, active_atoms=["x1"], context_key="parent_candidates|x0|vis=3").score
 
 
 def test_store_appends_and_reloads_experience_events():

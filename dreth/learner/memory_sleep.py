@@ -549,10 +549,45 @@ class MemorySleepConsolidator:
                 "failures": 0,
                 "successes": 0,
                 "behavior_effects": 0,
+                "is_structure_hint": False,
             }
         )
         for obs in memory_records:
             rec = obs.rec
+            # context_role records with parent info → build selective parent_candidates hints.
+            # These encode certified parents as the preferred set, giving differential signal
+            # that the ranker's random initial ordering cannot mask.
+            if str(rec.get("record_type", "")) == "context_role":
+                vars_list = [int(v) for v in (rec.get("vars") or []) if _intlike(v)]
+                n_vars = int(rec.get("n_vars", 0) or 0)
+                if vars_list and n_vars > 0:
+                    target_var = vars_list[0]
+                    parent_vars: list[int] = []
+                    for ref in (rec.get("touched_structure_refs") or []):
+                        ref_s = str(ref)
+                        if ref_s.startswith("parents:") and ref_s[8:].strip():
+                            try:
+                                parent_vars = [int(p) for p in ref_s[8:].split(",") if p.strip()]
+                            except ValueError:
+                                pass
+                            break
+                    if parent_vars:
+                        parent_context = f"parent_candidates|x{target_var}|vis={n_vars}"
+                        members = [str(n) for n in (rec.get("member_nethras") or [])]
+                        if rec.get("nethra_id"):
+                            members.append(str(rec["nethra_id"]))
+                        refs = [str(r) for r in (rec.get("touched_structure_refs") or [])]
+                        for parent_var in parent_vars:
+                            p_atom = f"x{parent_var}"
+                            bucket = by_context_atom[(parent_context, p_atom)]
+                            bucket["atoms"].add(p_atom)
+                            bucket["refs"].update(refs)
+                            bucket["members"].update(members)
+                            bucket["records"].append(rec)
+                            bucket["failures"] += int(rec.get("failure_count", 0) or 0)
+                            bucket["successes"] += int(rec.get("success_count", 0) or 0)
+                            bucket["is_structure_hint"] = True
+                        continue  # skip normal bucketing for this record
             context = str(rec.get("context_scope") or (rec.get("contexts") or [""])[0])
             atoms = [str(a) for a in (rec.get("touched_atoms") or [])]
             if not atoms:
@@ -572,14 +607,36 @@ class MemorySleepConsolidator:
         for obs in experience_events:
             rec = obs.rec
             context = str(rec.get("context_key", ""))
-            atoms = [str(a) for a in (rec.get("active_atoms") or [])]
             members = [str(n) for n in (rec.get("active_nethras") or [])]
-            for atom in atoms or [""]:
+            behavior_effect = int(rec.get("behavior_effect", 0) or 0)
+            if behavior_effect > 0:
+                # For reorder events, only credit the atoms that actually moved earlier —
+                # crediting all active_atoms would make preferred = all candidates again.
+                cands_before = [int(c) for c in (rec.get("candidates_before") or []) if _intlike(c)]
+                cands_after = [int(c) for c in (rec.get("candidates_after") or []) if _intlike(c)]
+                if cands_before and cands_after:
+                    before_pos = {c: i for i, c in enumerate(cands_before)}
+                    after_pos = {c: i for i, c in enumerate(cands_after)}
+                    boosted = [
+                        c for c in cands_after
+                        if after_pos.get(c, 99) < before_pos.get(c, 99)
+                    ]
+                    atoms_to_use = [f"x{c}" for c in boosted] if boosted else [
+                        str(a) for a in (rec.get("active_atoms") or [])
+                    ]
+                else:
+                    atoms_to_use = [str(a) for a in (rec.get("active_atoms") or [])]
+            else:
+                atoms_to_use = [str(a) for a in (rec.get("active_atoms") or [])]
+            for atom in atoms_to_use or [""]:
                 bucket = by_context_atom[(context, atom)]
                 bucket["members"].update(members)
-                bucket["atoms"].update(atoms)
+                # Do NOT add active_atoms to bucket["atoms"] — they are the full query
+                # atom set and would make touched_atoms too broad. Only memory records
+                # contribute selective atoms; experience events contribute membership/
+                # behavioral signal only.
                 bucket["events"].append(rec)
-                bucket["behavior_effects"] += int(rec.get("behavior_effect", 0) or 0)
+                bucket["behavior_effects"] += behavior_effect
                 if rec.get("success"):
                     bucket["successes"] += 1
                 if rec.get("failure_reason"):
@@ -607,6 +664,14 @@ class MemorySleepConsolidator:
                 reason = "prior assist behavior effect survived visible audit path"
                 salience_delta = 0.4 + 0.1 * successes
                 invalidators = []
+            elif bucket["is_structure_hint"] and not failures:
+                # Structural: certified parent configuration from context_role records.
+                # Provides differential signal that experience-event-only bootstrapping cannot:
+                # preferred = only the true parents, not all candidates.
+                use_right = "ranking_hint"
+                reason = "structural: certified parent configuration from context_role"
+                salience_delta = 0.2
+                invalidators = []
             else:
                 use_right = "feature_only"
                 reason = "familiar structure recurrence"
@@ -615,7 +680,7 @@ class MemorySleepConsolidator:
             products.append(SleepProduct(
                 proposal_id=f"sleep_{i:06d}_{abs(hash((context, atom))) % 10_000_000}",
                 member_nethras=sorted(bucket["members"]),
-                touched_atoms=sorted(bucket["atoms"]),
+                touched_atoms=sorted(bucket["atoms"]) or [atom],
                 touched_structure_refs=sorted(bucket["refs"]),
                 proposed_use_right=use_right,
                 proposed_context_scope=context,

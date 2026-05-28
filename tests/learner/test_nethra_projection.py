@@ -4,7 +4,7 @@ from __future__ import annotations
 import pytest
 from unittest.mock import MagicMock
 
-from dreth.nethra_projection import ProjectionIndex, ProjectionEntry, _HOOK_USE_RIGHTS
+from dreth.learner.nethra_projection import ProjectionIndex, ProjectionEntry, _HOOK_USE_RIGHTS
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -200,7 +200,7 @@ def test_index_node_from_row_use_right_summary_fallback():
 def test_projection_populated_after_store_load(tmp_path):
     """After loading a compact mind, ProjectionIndex inside the store is populated."""
     import json
-    from dreth.nethra_mind_store import NethraMindStore
+    from dreth.learner.nethra_mind_store import NethraMindStore
 
     mind_file = tmp_path / "mind.jsonl"
     node_row = {
@@ -224,7 +224,7 @@ def test_projection_populated_after_store_load(tmp_path):
 
 def test_projection_populated_after_upsert(tmp_path):
     """After upsert_node, the projection index contains the node."""
-    from dreth.nethra_mind_store import NethraMindStore
+    from dreth.learner.nethra_mind_store import NethraMindStore
 
     store = NethraMindStore()
     store.upsert_node(
