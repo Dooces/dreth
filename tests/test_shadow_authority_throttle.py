@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().source_edges[1]
 sys.path.insert(0, str(ROOT))
 
 from dreth.shadow_authority_throttle import (
@@ -35,9 +35,9 @@ def _item(**overrides):
 
 def test_classification_ignores_truth_fields() -> None:
     item = _item(
-        truth_parents=[1, 2, 3],
+        truth_source_edges=[1, 2, 3],
         truth_func="HIDDEN_FUNC",
-        truth_delayed_parents=[4],
+        truth_delayed_source_edges=[4],
         strong_observations=4,
         sentinel_count=3,
         fit_history_count=3,
@@ -54,7 +54,7 @@ def test_classification_ignores_truth_fields() -> None:
     item_no_truth = {
         k: v
         for k, v in item.items()
-        if k not in ("truth_parents", "truth_func", "truth_delayed_parents")
+        if k not in ("truth_source_edges", "truth_func", "truth_delayed_source_edges")
     }
     assert (
         classify_visible_authority_evidence(item)
@@ -426,9 +426,9 @@ def test_extract_evidence_triggers_alternatives_or_ties() -> None:
 
 def test_extract_evidence_triggers_ignores_truth_fields() -> None:
     item = _item(
-        truth_parents=[1, 2],
+        truth_source_edges=[1, 2],
         truth_func="HIDDEN",
-        truth_delayed_parents=[3],
+        truth_delayed_source_edges=[3],
         recent_revocations=0,
         recent_detected_drift=0,
         strong_observations=4,
@@ -439,7 +439,7 @@ def test_extract_evidence_triggers_ignores_truth_fields() -> None:
     item_no_truth = {
         k: v
         for k, v in item.items()
-        if k not in ("truth_parents", "truth_func", "truth_delayed_parents")
+        if k not in ("truth_source_edges", "truth_func", "truth_delayed_source_edges")
     }
     assert extract_evidence_triggers(item).active_names() == extract_evidence_triggers(item_no_truth).active_names()
 

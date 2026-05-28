@@ -22,7 +22,7 @@ from __future__ import annotations
 #   _collapse_tied_frontier — requires stable_count >= 3 AND distinct_contexts_seen >= 2
 #
 # What makes authoritative nethras operative here:
-#   available_parents in _full_audit_var is built only from vars with tareth
+#   available_source_edges in _full_audit_var is built only from vars with tareth
 #   authority records. A variable's current authority directly controls what hypotheses are
 #   enumerated for every variable that might depend on it.
 #
@@ -46,18 +46,18 @@ from __future__ import annotations
 #   Certs fire by default; only observed failure or an active dependency event
 #   earns revocation. Sentinel failure and downstream contradiction defeat cert
 #   authority in the relevant scope. Structural or scope changes revoke only when they are themselves
-#   dependency events (parent set changed, contradicting evidence in expanded
+#   dependency events (source_edge set changed, contradicting evidence in expanded
 #   context). The verdict belongs to the scope, not the hypothesis.
 #
 # FALSE-TRASS: Two locally-trass nethras can jointly be tareth. Composition
 #   requires a joint re-test. Local authority does not propagate upward.
 #
 # MORPHOLOGY ≠ CAUSE:
-#   Morphology (same parents, same operator, close scores) is structural —
+#   Morphology (same source_edges, same operator, close scores) is structural —
 #   readable from candidate shape with no interventions required.
 #   Cause (genuine equivalence, library gap, under-probing) requires
 #   separating probes and regime-survival evidence across distinct regimes.
-#   Pattern-matching on scores or parent structure is morphology, never cause.
+#   Pattern-matching on scores or source_edge structure is morphology, never cause.
 #
 # AMBIGUITY IS FIRST-CLASS: Insufficient evidence → TiedFrontier survives.
 #   Collapse requires regime-survival proof. Score proximity does not justify
@@ -84,9 +84,9 @@ from .regime import RegimeRegister, CertEvent as RegimeCertEvent
 from .records import CycleRecord, FitDiagnostic
 from .summary import RunAnalyzer, SummaryRenderer
 from .hybrid import (
-    ResidualPredictor, ParentRanker, ProbeProposer, ExpertRouter,
-    SensitivityParentRanker,
-    ParentProposalDiagnostics, ProbeProposalDiagnostics,
+    ResidualPredictor, source_edgeRanker, ProbeProposer, ExpertRouter,
+    Sensitivitysource_edgeRanker,
+    source_edgeProposalDiagnostics, ProbeProposalDiagnostics,
 )
 from .repair_agenda import RepairAgenda, RepairAgendaItem
 from .context_role_index import (
@@ -198,7 +198,7 @@ class ChainedAgent:
       cost_low/high_threshold: dispatch boundaries
       envelope_certify_after: deltas needed before envelope certification
       priority_audit_budget:  max full audits per cycle (default n_vars//2)
-      parent_screen_m:        per-target sensitivity screen top-M candidates
+      source_edge_screen_m:        per-target sensitivity screen top-M candidates
                               (0 = disabled, use certified-only pool; default 8)
     """
 
@@ -224,9 +224,9 @@ class ChainedAgent:
         salience_targets: Optional[Set[int]] = None,
         consequence_weight: bool = True,
         frontier_k: int = 4,
-        parent_screen_m: int = 8,
+        source_edge_screen_m: int = 8,
         residual_predictor: Optional[ResidualPredictor] = None,
-        parent_ranker: Optional[ParentRanker] = None,
+        source_edge_ranker: Optional[source_edgeRanker] = None,
         probe_proposer: Optional[ProbeProposer] = None,
         expert_router: Optional[ExpertRouter] = None,
         repair_agenda_enabled: bool = False,
@@ -348,7 +348,7 @@ class ChainedAgent:
         # Tie tracking: per-var, per-tie-set count of how often that exact set
         # of hypotheses tied for rank 1 across audits. Always-on diagnostic.
         # Used by extension module to detect stable equivalence classes.
-        # tie_log[var][frozenset({(parents, func), ...})] = count
+        # tie_log[var][frozenset({(source_edges, func), ...})] = count
         self.tie_log: Dict[int, Dict[FrozenSet[Tuple[Tuple[int, ...], str]], int]] = {}
 
         # Probe retention cap: if >0, only keep per-probe arrays for the most
@@ -367,15 +367,15 @@ class ChainedAgent:
         self.extension: Optional[AgentExtension] = None
         self.extension_modes: Set[str] = set()
 
-        # Topological order cache. Invalidated when parent structure changes.
+        # Topological order cache. Invalidated when source_edge structure changes.
         self._topo_cache: Optional[List[int]] = None
         self._topo_cache_visible_count: int = -1
 
         # Sparse init: how many vars to full-audit at cold start.
         self.frontier_k: int = frontier_k
-        # Per-target parent screen: top-M candidates by sensitivity to this target.
+        # Per-target source_edge screen: top-M candidates by sensitivity to this target.
         # 0 = disabled (use certified-only pool, old behavior).
-        self.parent_screen_m: int = parent_screen_m
+        self.source_edge_screen_m: int = source_edge_screen_m
         # Vars screened as causally inert at init (no downstream movement across
         # 0.05/0.95 perturbation range). Not admitted to frontier unless woken by
         # a descendant sentinel failure or direct dependency event.
@@ -407,7 +407,7 @@ class ChainedAgent:
         self._woken_count = 0         # times a parked var was woken
 
         # Passive residual monitoring counters.
-        # Passive: compute expected-next-state from certified func(parents) against
+        # Passive: compute expected-next-state from certified func(source_edges) against
         # actual world.state. If residual within envelope → skip active sentinel
         # (saves IVs). If stressed → run active sentinel. Stressed co-occurrences
         # feed the regime register as candidate evidence.
@@ -424,7 +424,7 @@ class ChainedAgent:
         else:
             self._residual_predictor = None
 
-        self._parent_ranker: Optional[ParentRanker] = parent_ranker
+        self._source_edge_ranker: Optional[source_edgeRanker] = source_edge_ranker
         self._probe_proposer: Optional[ProbeProposer] = probe_proposer
         self._expert_router: Optional[ExpertRouter] = expert_router
 
@@ -433,13 +433,13 @@ class ChainedAgent:
         self._hybrid_residual_predictor_calls: int = 0
         self._hybrid_residual_ok: int = 0
         self._hybrid_residual_stressed: int = 0
-        self._hybrid_parent_ranker_calls: int = 0
+        self._hybrid_source_edge_ranker_calls: int = 0
         self._hybrid_probe_proposer_calls: int = 0
         self._hybrid_expert_router_calls: int = 0
-        self._parent_proposal_diagnostics = ParentProposalDiagnostics()
+        self._source_edge_proposal_diagnostics = source_edgeProposalDiagnostics()
         self._probe_proposal_diagnostics = ProbeProposalDiagnostics()
-        self._pending_parent_rankings: Dict[int, Tuple[int, ...]] = {}
-        self._pending_parent_sources: Dict[int, Dict[int, str]] = {}
+        self._pending_source_edge_rankings: Dict[int, Tuple[int, ...]] = {}
+        self._pending_source_edge_sources: Dict[int, Dict[int, str]] = {}
         # Optional diagnostic observer. It may inspect audit inputs/results, but
         # no authority path reads it and no decision is allowed to depend on it.
         self._diagnostic_audit_observer: Optional[Any] = None
@@ -593,15 +593,15 @@ class ChainedAgent:
         if self._context_role_index is None:
             return ""
         n = self.ledger.vars[var]
-        nid = var_fit_id(var, tuple(n.parents), n.func)
+        nid = var_fit_id(var, tuple(n.source_edges), n.func)
         self._context_role_index.add_or_update_node(NethraNode(
             nethra_id=nid,
             kind="var_fit",
             target_var=var,
-            components=tuple(sorted((var, *n.parents))),
-            learned_parents=tuple(n.parents),
+            components=tuple(sorted((var, *n.source_edges))),
+            learned_source_edges=tuple(n.source_edges),
             learned_func=n.func,
-            signature=f"x{var}:{n.func}({','.join(map(str, n.parents))})",
+            signature=f"x{var}:{n.func}({','.join(map(str, n.source_edges))})",
             first_seen_cycle=cycle,
             last_seen_cycle=cycle,
             observations=1,
@@ -647,7 +647,7 @@ class ChainedAgent:
                 operation=operation,
                 var=var,
                 visible=self.world.visible_count,
-                parents=tuple(n.parents),
+                source_edges=tuple(n.source_edges),
             ),
             operation=operation,
             role=role,  # type: ignore[arg-type]
@@ -667,7 +667,7 @@ class ChainedAgent:
             skip_role=n.role_for("skip"),
             route_role=route_role,
             uncertainty_signals=uncertainty_signals,
-            validity_scope=validity_scope or tuple(sorted((var, *n.parents))),
+            validity_scope=validity_scope or tuple(sorted((var, *n.source_edges))),
         ))
 
     def _context_role_index_record_candidate(
@@ -676,7 +676,7 @@ class ChainedAgent:
         prefix: str,
         kind: str,
         var: int,
-        parents: Tuple[int, ...],
+        source_edges: Tuple[int, ...],
         func: str,
         cycle: int,
         source: str,
@@ -687,15 +687,15 @@ class ChainedAgent:
     ) -> str:
         if self._context_role_index is None:
             return ""
-        nid = candidate_id(prefix, var, parents, func)
+        nid = candidate_id(prefix, var, source_edges, func)
         self._context_role_index.add_or_update_node(NethraNode(
             nethra_id=nid,
             kind=kind,  # type: ignore[arg-type]
             target_var=var,
-            components=tuple(sorted((var, *parents))),
-            learned_parents=tuple(parents),
+            components=tuple(sorted((var, *source_edges))),
+            learned_source_edges=tuple(source_edges),
             learned_func=func,
-            signature=f"x{var}:{func}({','.join(map(str, parents))})",
+            signature=f"x{var}:{func}({','.join(map(str, source_edges))})",
             first_seen_cycle=cycle,
             last_seen_cycle=cycle,
             observations=1,
@@ -710,7 +710,7 @@ class ChainedAgent:
             role=role,
             evidence_summary=f"score={score}",
             fit_diag=fit_diag,
-            validity_scope=tuple(sorted((var, *parents))),
+            validity_scope=tuple(sorted((var, *source_edges))),
         )
         return nid
 
@@ -1042,8 +1042,8 @@ class ChainedAgent:
 
         Only scales UP from the base budget. The base is the floor: with
         small restricted spaces the probe-per-hypothesis ratio is already
-        sufficient at the base value, and reducing it further makes 1-parent
-        vs 2-parent discrimination unreliable. Scaling up for large unrestricted
+        sufficient at the base value, and reducing it further makes 1-source_edge
+        vs 2-source_edge discrimination unreliable. Scaling up for large unrestricted
         spaces compensates for the higher ambiguity there.
 
           n_hyp ≤ 225  → base probes   (default 30)
@@ -1054,7 +1054,7 @@ class ChainedAgent:
         for n_available ≤ 14) always runs at base. Unrestricted enumeration
         (n_vars²-scale hypothesis spaces) gets proportionally more budget,
         so early-cycle cold-start fits improve without undersampling the
-        small-available-parent regime.
+        small-available-source_edge regime.
 
         Authority scales implicitly: for hypothesis spaces that exceed
         2 × base even at the cap, probe-per-hypothesis ratio still falls —
@@ -1065,29 +1065,29 @@ class ChainedAgent:
 
     def _full_audit_var(self, var: int, cycle: int) -> Tuple[Tuple[int, ...], str, int, int, FitDiagnostic]:
         """Run a full hypothesis-space search for one variable. Steps:
-          1. Build available_parents set (exclude only cert-excluded candidates)
+          1. Build available_source_edges set (exclude only cert-excluded candidates)
           2. Call fit_var which enumerates, scores, and ranks hypotheses
           3. Record FitDiagnostic for offline analysis
-        Returns (best_parents, best_func, best_score, second_score, fit_diag).
+        Returns (best_source_edges, best_func, best_score, second_score, fit_diag).
         fit_diag is passed explicitly to _install_var — no side-channel.
         Increments full_audit_count and total_interventions."""
         cycle = int(getattr(cycle, "cycle", cycle))
         self.full_audit_count += 1
         n = self.ledger.vars[var]
-        # available_parents: either from a per-target sensitivity screen (sparse
-        # mode, parent_screen_m > 0) or from the certified/trass pool (full mode).
+        # available_source_edges: either from a per-target sensitivity screen (sparse
+        # mode, source_edge_screen_m > 0) or from the certified/trass pool (full mode).
         #
         # Screen path: probe every candidate at 0.05/0.95, rank by |Δtarget|,
         # keep top M. Does not require candidates to be pre-certified — any var
-        # can be a parent as long as it moves the target. Route certs (trass role
+        # can be a source_edge as long as it moves the target. Route certs (trass role
         # for this target) are respected: explicitly excluded vars are dropped.
         #
         # Certified pool path (legacy): include certified/trass/proposed+sentinel
         # vars that haven't been route-cert-excluded for this target.
         # Q4: no joint composition test. Individual route certs (when they exist)
         # won't guarantee the combination is non-redundant.
-        if self.parent_screen_m > 0:
-            available = self._screen_candidate_parents(var, self.parent_screen_m)
+        if self.source_edge_screen_m > 0:
+            available = self._screen_candidate_source_edges(var, self.source_edge_screen_m)
         else:
             available = {
                 other_var for other_var, other_n in self.ledger.vars.items()
@@ -1120,7 +1120,7 @@ class ChainedAgent:
             "var": var,
             "status_before": n.status,
             "role_before": n.role_for("skip"),
-            "available_parents": tuple(sorted(available)),
+            "available_source_edges": tuple(sorted(available)),
         }
         # P1-B: if this var has an active TiedFrontier with separating probes,
         # inject them as forced inclusions so the tie has a chance to resolve.
@@ -1185,26 +1185,26 @@ class ChainedAgent:
                     operation="probe_candidates",
                     var=var,
                     visible=self.world.visible_count,
-                    parents=tuple(sorted(available)),
+                    source_edges=tuple(sorted(available)),
                 ),
                 probes=tuple(_merged_probes),
                 cycle=cycle,
             )
 
         result = fit_var(var, self.world, self.rng, budget,
-                         n.current_tolerance, available_parents=available, diag=diag_dict,
+                         n.current_tolerance, available_source_edges=available, diag=diag_dict,
                          near_tie_margin=self.near_tie_margin,
                          forced_probes=_merged_probes)
         self.total_interventions += budget
 
-        # ExpertRouter: diagnostic call only. Output is NOT used to choose parents,
+        # ExpertRouter: diagnostic call only. Output is NOT used to choose source_edges,
         # choose function, score hypotheses, authorize skips, or issue certs.
         # Route metadata is stored as a structured LedgerEvent for offline analysis.
         if self._expert_router is not None:
             _er_context: Dict = {
                 "cycle": cycle,
                 "budget": budget,
-                "best_parents": tuple(result[0]),
+                "best_source_edges": tuple(result[0]),
                 "best_func": result[1],
             }
             _, _er_meta = self._expert_router.route(var, available, _er_context)
@@ -1219,13 +1219,13 @@ class ChainedAgent:
             var=int(diag_dict["var"]),
             status_before=str(diag_dict["status_before"]),
             role_before=str(diag_dict["role_before"]),
-            available_parents=tuple(diag_dict["available_parents"]),
+            available_source_edges=tuple(diag_dict["available_source_edges"]),
             restricted=bool(diag_dict.get("restricted", False)),
             hypothesis_count=int(diag_dict.get("hypothesis_count", -1)),
             best_score=int(diag_dict.get("best_score", -1)),
             second_score=int(diag_dict.get("second_score", -1)),
             margin=int(diag_dict.get("margin", -1)),
-            best_parents=tuple(diag_dict.get("best_parents", ())),
+            best_source_edges=tuple(diag_dict.get("best_source_edges", ())),
             best_func=str(diag_dict.get("best_func", "?")),
             failure_class=str(diag_dict.get("failure_class", "unknown")),
             probes=tuple(diag_dict.get("probes", ())),
@@ -1236,14 +1236,14 @@ class ChainedAgent:
             near_tie_context_key=int(diag_dict.get("near_tie_context_key", 0)),
         )
         self.fit_diagnostics.append(fd)
-        if self._parent_ranker is not None and var in self._pending_parent_rankings:
-            _ranked = self._pending_parent_rankings.pop(var, ())
-            _sources = self._pending_parent_sources.pop(var, {})
-            self._parent_proposal_diagnostics.record_fit(_ranked, tuple(result[0]), _sources)
-            if hasattr(self._parent_ranker, "observe_fit_result"):
-                self._parent_ranker.observe_fit_result(var, tuple(result[0]), int(fd.margin))  # type: ignore[attr-defined]
-            if hasattr(self._parent_ranker, "observe_probe_results"):
-                self._parent_ranker.observe_probe_results(var, fd.probes, fd.actuals)  # type: ignore[attr-defined]
+        if self._source_edge_ranker is not None and var in self._pending_source_edge_rankings:
+            _ranked = self._pending_source_edge_rankings.pop(var, ())
+            _sources = self._pending_source_edge_sources.pop(var, {})
+            self._source_edge_proposal_diagnostics.record_fit(_ranked, tuple(result[0]), _sources)
+            if hasattr(self._source_edge_ranker, "observe_fit_result"):
+                self._source_edge_ranker.observe_fit_result(var, tuple(result[0]), int(fd.margin))  # type: ignore[attr-defined]
+            if hasattr(self._source_edge_ranker, "observe_probe_results"):
+                self._source_edge_ranker.observe_probe_results(var, fd.probes, fd.actuals)  # type: ignore[attr-defined]
         if self._probe_proposer is not None:
             self._probe_proposal_diagnostics.record_fit(
                 _provider_probes,
@@ -1263,8 +1263,8 @@ class ChainedAgent:
                 oldest.actuals = ()
                 oldest.pick_preds = ()
                 oldest.truth_preds = None
-        parents, func, score, second = result
-        return parents, func, score, second, fd
+        source_edges, func, score, second = result
+        return source_edges, func, score, second, fd
 
     def _certify_operation_role(self, var: int, cycle: int) -> str:
         """Substitution test: does perturbing `var` change other visible vars
@@ -1297,7 +1297,7 @@ class ChainedAgent:
                 ))
                 self.ledger.issue_cert(
                     var, "skip", "tareth", "skip",
-                    context_parents=tuple(n.parents) if n.parents else (),
+                    context_source_edges=tuple(n.source_edges) if n.source_edges else (),
                     context_visible=self.world.visible_count, context_cycle=cycle,
                     targets=(), substitutions_tested=("declared_salience",),
                     changes=0, trials=0,
@@ -1400,7 +1400,7 @@ class ChainedAgent:
         self.ledger.issue_cert(
             var, "skip", role,
             "skip" if role == "tareth" else "none",
-            context_parents=tuple(n.parents) if n.parents else (),
+            context_source_edges=tuple(n.source_edges) if n.source_edges else (),
             context_visible=self.world.visible_count,
             context_cycle=cycle,
             targets=filtered_targets,
@@ -1461,7 +1461,7 @@ class ChainedAgent:
     def _test_joint_false_trass(self, var_a: int, var_b: int, cycle: int) -> str:
         """Joint substitution test for two individually-trass vars.
 
-        This method uses the agent's believed parent structure, not the true
+        This method uses the agent's believed source_edge structure, not the true
         causal structure. It will miss joint effects when the agent's hypothesis
         about ancestry is wrong.
 
@@ -1586,7 +1586,7 @@ class ChainedAgent:
                     kind="composite",
                     target_var=probe_j,
                     components=tuple(sorted((var_a, var_b, probe_j))),
-                    learned_parents=(var_a, var_b),
+                    learned_source_edges=(var_a, var_b),
                     learned_func="joint_interaction",
                     signature=f"x{var_a},x{var_b}->x{probe_j}",
                     first_seen_cycle=cycle,
@@ -1594,8 +1594,8 @@ class ChainedAgent:
                     observations=1,
                     active_probe_count=total_trials,
                     composition_links=(
-                        var_fit_id(var_a, tuple(self.ledger.vars[var_a].parents), self.ledger.vars[var_a].func),
-                        var_fit_id(var_b, tuple(self.ledger.vars[var_b].parents), self.ledger.vars[var_b].func),
+                        var_fit_id(var_a, tuple(self.ledger.vars[var_a].source_edges), self.ledger.vars[var_a].func),
+                        var_fit_id(var_b, tuple(self.ledger.vars[var_b].source_edges), self.ledger.vars[var_b].func),
                     ),
                     source="composite",
                 ))
@@ -1626,7 +1626,7 @@ class ChainedAgent:
                     "role": _cert.role,
                     "revoked_by": _cert.revoked_by,
                 }
-                if not _cert.context_parents:
+                if not _cert.context_source_edges:
                     _joint_updates = {
                         "role": "untested",
                         "revoked_by": "composite_failure",
@@ -1646,15 +1646,15 @@ class ChainedAgent:
 
     def _is_ancestor(self, v: int, target: int, _visited: Optional[Set[int]] = None) -> bool:
         """True if v is in the causal ancestry of target per the agent's ledger.
-        Uses the agent's believed parent structure, not the true causal graph."""
+        Uses the agent's believed source_edge structure, not the true causal graph."""
         if _visited is None:
             _visited = set()
-        parents = self.ledger.vars[target].parents
-        if not parents:
+        source_edges = self.ledger.vars[target].source_edges
+        if not source_edges:
             return False
-        if v in parents:
+        if v in source_edges:
             return True
-        for p in parents:
+        for p in source_edges:
             if p not in _visited:
                 _visited.add(p)
                 if self._is_ancestor(v, p, _visited):
@@ -1806,21 +1806,21 @@ class ChainedAgent:
             return
 
         # Union-find to identify connected components.
-        parent: Dict[int, int] = {}
+        source_edge: Dict[int, int] = {}
         def find(x: int) -> int:
-            while parent.get(x, x) != x:
-                parent[x] = parent.get(parent.get(x, x), x)
-                x = parent[x]
+            while source_edge.get(x, x) != x:
+                source_edge[x] = source_edge.get(source_edge.get(x, x), x)
+                x = source_edge[x]
             return x
         def union(x: int, y: int) -> None:
-            parent[find(x)] = find(y)
+            source_edge[find(x)] = find(y)
 
         for cn in self.ledger.composites:
             a, b = cn.members
-            if a not in parent:
-                parent[a] = a
-            if b not in parent:
-                parent[b] = b
+            if a not in source_edge:
+                source_edge[a] = a
+            if b not in source_edge:
+                source_edge[b] = b
             union(a, b)
 
         # Group composites by component root.
@@ -2000,7 +2000,7 @@ class ChainedAgent:
         failure sites in run_cycle). For each uncertain var, finds trass ancestors
         and runs joint false-trass test on pairs.
 
-        This method uses the agent's believed parent structure, not the true
+        This method uses the agent's believed source_edge structure, not the true
         causal structure. It will miss joint effects when the agent's hypothesis
         about ancestry is wrong.
         """
@@ -2123,20 +2123,20 @@ class ChainedAgent:
         prediction simplifies to a near-constant. Returns count added.
 
         Method:
-          1. For each parent of var, treat it as a candidate gate variable.
+          1. For each source_edge of var, treat it as a candidate gate variable.
           2. Try 3 anchor target values (low/mid/high: 0.15, 0.5, 0.85).
-          3. Sample budget×{1..4} parent-value tuples where gate-var is near
-             target ±tol and other parents are random over [0,1].
+          3. Sample budget×{1..4} source_edge-value tuples where gate-var is near
+             target ±tol and other source_edges are random over [0,1].
           4. Compute predictions; if all are within tolerance of the mean,
              this gate-condition produces a stable simplified value.
           5. Store as a Compression if not already present for this gate.
 
-        Varying non-gate parents over the full range is essential — a
-        compression must hold across all values of other parents, not just
+        Varying non-gate source_edges over the full range is essential — a
+        compression must hold across all values of other source_edges, not just
         their current world-state values.
         """
         n = self.ledger.vars[var]
-        if not n.parents:
+        if not n.source_edges:
             return 0
         if not self._authority_strength_derivation_allowed(
             var,
@@ -2147,20 +2147,20 @@ class ChainedAgent:
             return 0
         if any(
             not self._authority_strength_derivation_allowed(
-                parent,
+                source_edge,
                 cycle=cycle,
                 blocked_handle_kind="compression",
                 blocked_target=f"x{var}",
             )
-            for parent in n.parents
+            for source_edge in n.source_edges
         ):
             return 0
 
         budget = self.compression_discovery_budget
-        candidate_gates = list(n.parents)
+        candidate_gates = list(n.source_edges)
         added = 0
 
-        # Sample candidate target values for each gating parent (3 anchors per parent)
+        # Sample candidate target values for each gating source_edge (3 anchors per source_edge)
         for gate_var in candidate_gates:
             gate_n = self.ledger.vars[gate_var]
             gate_tol = gate_n.current_tolerance
@@ -2171,14 +2171,14 @@ class ChainedAgent:
                 attempts = 0
                 while len(samples) < budget and attempts < budget * 4:
                     attempts += 1
-                    # v28+: vary ALL parents (including gate_var near target).
-                    # Previously held non-gate parents at current world.state
+                    # v28+: vary ALL source_edges (including gate_var near target).
+                    # Previously held non-gate source_edges at current world.state
                     # which falsely declared compressions that only held at
-                    # current values of other parents. A real compression
-                    # must hold across the full range of other parent values
+                    # current values of other source_edges. A real compression
+                    # must hold across the full range of other source_edge values
                     # when gate_var is near target.
                     par_vals_list = []
-                    for p in n.parents:
+                    for p in n.source_edges:
                         if p == gate_var:
                             v = max(0.0, min(1.0, target + self.rng.uniform(-gate_tol, gate_tol)))
                         else:
@@ -2225,11 +2225,11 @@ class ChainedAgent:
         n.compression_misses_lifetime += 1
         return None
 
-    def _install_var(self, var: int, parents: Tuple[int, ...], func: str,
+    def _install_var(self, var: int, source_edges: Tuple[int, ...], func: str,
                      score: int, second: int, cycle: int,
                      fit_diag: Optional[FitDiagnostic] = None) -> bool:
         """Apply the result of a full audit. Returns semantic_changed (True if
-        the new fit is not same-parent tied churn).
+        the new fit is not same-source_edge tied churn).
 
         Pipeline:
           1. update_var: archive old fit if signature changed; reset state
@@ -2238,11 +2238,11 @@ class ChainedAgent:
           3. If role becomes "trass": collapse, return early.
           4. Otherwise (role tareth or still-untested):
              a. Increment strong_observations (or reset to 1 if semantic_changed).
-             b. If any current parent is trass-classified, force re-test of
-                that parent's role (contradiction — fit depends on supposedly-
+             b. If any current source_edge is trass-classified, force re-test of
+                that source_edge's role (contradiction — fit depends on supposedly-
                 irrelevant var).
              c. If no sentinels yet and strong_obs ≥ 1: select sentinels using
-                current available_parents. They go live next cycle.
+                current available_source_edges. They go live next cycle.
              d. If strong_obs ≥ promote_after AND sentinels exist: promote
                 status to "certified" (informational confidence label).
                 Else if status was "uncertain"/"quarantined": back to "proposed".
@@ -2251,14 +2251,14 @@ class ChainedAgent:
         """
         margin = score - second
         old_n = self.ledger.vars[var]
-        old_parents = tuple(old_n.parents)
+        old_source_edges = tuple(old_n.source_edges)
         old_func = old_n.func
-        new_parents = tuple(parents)
+        new_source_edges = tuple(source_edges)
         new_func = func
-        syntactic_changed = (old_parents, old_func) != (new_parents, new_func)
-        parents_changed = old_parents != new_parents
-        old_hyp = (old_parents, old_func)
-        new_hyp = (new_parents, new_func)
+        syntactic_changed = (old_source_edges, old_func) != (new_source_edges, new_func)
+        source_edges_changed = old_source_edges != new_source_edges
+        old_hyp = (old_source_edges, old_func)
+        new_hyp = (new_source_edges, new_func)
         tie_set = frozenset()
         near_tie_candidates: Tuple = ()
         near_tie_context_key: int = 0
@@ -2269,35 +2269,35 @@ class ChainedAgent:
             near_tie_candidates = fit_diag.near_tie_candidates
             near_tie_context_key = fit_diag.near_tie_context_key
         near_tie_set = frozenset((p, f) for p, f, _ in near_tie_candidates)
-        same_parent_tied_churn = (
+        same_source_edge_tied_churn = (
             syntactic_changed
-            and not parents_changed
+            and not source_edges_changed
             and old_hyp in tie_set
             and new_hyp in tie_set
         )
-        semantic_changed = syntactic_changed and not same_parent_tied_churn
-        ledger_reset_needed = semantic_changed or parents_changed
+        semantic_changed = syntactic_changed and not same_source_edge_tied_churn
+        ledger_reset_needed = semantic_changed or source_edges_changed
 
         self.ledger.update_var(
-            var, new_parents, new_func, cycle,
+            var, new_source_edges, new_func, cycle,
             reset_state=ledger_reset_needed,
         )
 
-        # Parent structure, not operator churn, determines DAG topo invalidation.
-        if parents_changed:
+        # source_edge structure, not operator churn, determines DAG topo invalidation.
+        if source_edges_changed:
             self._invalidate_topo_cache()
-            # Wake previously-inert parents now known to causally affect `var`.
+            # Wake previously-inert source_edges now known to causally affect `var`.
             # Inert vars are skipped by the cheap salience screen at initialize time
             # because their individual effect is below DEFAULT_TOLERANCE. When a
-            # structural event (e.g., JOINT_SHOCK) causes the parent screen to
+            # structural event (e.g., JOINT_SHOCK) causes the source_edge screen to
             # discover them as real causes, they must be audited and certified.
-            for _p in new_parents:
+            for _p in new_source_edges:
                 if _p < self.world.visible_count and _p in self._inert_vars:
                     self._inert_vars.discard(_p)
                     if self._live_set is not None:
                         self._live_set.add(_p)
                     self.ledger.event_log.append(
-                        f"c{cycle}: x{_p} woken from inert (new parent of x{var})"
+                        f"c{cycle}: x{_p} woken from inert (new source_edge of x{var})"
                     )
 
         n = self.ledger.vars[var]
@@ -2329,12 +2329,12 @@ class ChainedAgent:
             n.strong_observations = 1
             n.consecutive_sentinel_failures = 0  # world genuinely changed
 
-        # v28+: if the current fit lists a parent that's currently trass, that's
-        # a contradiction — we declared the parent "doesn't matter operationally"
+        # v28+: if the current fit lists a source_edge that's currently trass, that's
+        # a contradiction — we declared the source_edge "doesn't matter operationally"
         # but our fit for `var` depends on it. Force re-test of those trass vars.
         # Run on EVERY audit (not just sig_changed): the trass classification
         # could have happened after this var was fit, making it newly contradictory.
-        for p in parents:
+        for p in source_edges:
             if p < self.world.visible_count:
                 pn = self.ledger.vars[p]
                 if pn.role_for("skip") == "trass":
@@ -2343,7 +2343,7 @@ class ChainedAgent:
                         pn.status = "proposed"
                     self.ledger.event_log.append(
                         f"c{cycle}: x{p} role re-test triggered "
-                        f"(picked as parent by x{var} despite trass status)"
+                        f"(picked as source_edge by x{var} despite trass status)"
                     )
 
         # Sentinel attachment: as soon as the fit is stable for ONE cycle,
@@ -2353,7 +2353,7 @@ class ChainedAgent:
         # confidence label) and means the same fit has been stable for
         # promote_after consecutive cycles.
         if not n.sentinels and n.strong_observations >= 1:
-            # Sentinel parent pool: include all vars not cert-excluded for route.
+            # Sentinel source_edge pool: include all vars not cert-excluded for route.
             # Per-target route certs gate exclusion (invariant 50 — route/include by default).
             available = {
                 other_var for other_var, other_n in self.ledger.vars.items()
@@ -2371,9 +2371,9 @@ class ChainedAgent:
             # Revert: replace _eff_sentinel_count arg with self.sentinel_count and delete this line.
             _eff_sentinel_count = self.sentinel_count + self._consequence_tier(var) * 2
             sentinels, expected = select_var_sentinels(
-                var, parents, func, self.world, self.rng,
+                var, source_edges, func, self.world, self.rng,
                 _eff_sentinel_count, self.sentinel_pool, n.current_tolerance,
-                available_parents=available,
+                available_source_edges=available,
             )
             if sentinels:
                 n.sentinels = sentinels
@@ -2396,7 +2396,7 @@ class ChainedAgent:
             n.status = "proposed"
 
         if just_promoted:
-            # Route certs: counterfactual fit per non-parent candidate.
+            # Route certs: counterfactual fit per non-source_edge candidate.
             # Earned at promotion — the fit is stable enough to trust the comparison.
             if self._authority_strength_derivation_allowed(
                 var,
@@ -2417,11 +2417,11 @@ class ChainedAgent:
                          or other_n.role_for("skip") == "trass"
                          or (other_n.status == "proposed" and bool(other_n.sentinels)))
                 }
-                self._certify_route_certs(var, new_parents, avail_for_route, cycle, fit_diag)
+                self._certify_route_certs(var, new_source_edges, avail_for_route, cycle, fit_diag)
                 # Audit cert: stable fit earned enough observations; mark as reusable.
                 self.ledger.issue_cert(
                     var, "audit", "reusable", "guarded_reuse",
-                    context_parents=new_parents,
+                    context_source_edges=new_source_edges,
                     context_visible=self.world.visible_count,
                     context_cycle=cycle,
                     targets=(),
@@ -2434,14 +2434,14 @@ class ChainedAgent:
             # increment its revival_count and track the context.
             context_key = near_tie_context_key
             for alt in n.dormant_alternatives:
-                if alt.parents == new_parents and alt.func == new_func:
+                if alt.source_edges == new_source_edges and alt.func == new_func:
                     alt.revival_count += 1
                     alt.context_keys_seen.add(context_key)
                     alt.last_seen_cycle = cycle
                     if alt.revival_count >= 2 and len(alt.context_keys_seen) >= 2:
                         self.ledger.event_log.append(
                             f"c{cycle}: x{var} dormant alternative "
-                            f"{alt.func}({list(alt.parents)}) achieved frontier_survival "
+                            f"{alt.func}({list(alt.source_edges)}) achieved frontier_survival "
                             f"(revivals={alt.revival_count} contexts={len(alt.context_keys_seen)})"
                         )
 
@@ -2505,17 +2505,17 @@ class ChainedAgent:
         return semantic_changed
 
     def _certify_route_certs(
-        self, var: int, parents: Tuple[int, ...], available: Set[int], cycle: int,
+        self, var: int, source_edges: Tuple[int, ...], available: Set[int], cycle: int,
         fit_diag: Optional[FitDiagnostic] = None,
     ) -> None:
         """Issue per-candidate route certs for target `var` at promotion time.
 
         Only certifies candidates that were ACTIVELY COMPETING in the last audit
-        (appeared in near_tie_candidates but not in the winner's parents). A clean
+        (appeared in near_tie_candidates but not in the winner's source_edges). A clean
         fit with no near-ties earns no route certs — invariant 2: use succeeds → do
         nothing. Proactively scanning all available vars violates invariant 17.
 
-        For each competing non-parent candidate P:
+        For each competing non-source_edge candidate P:
           - Fit `var` with P excluded from available.
           - Same winner as the baseline → P is route-trass (safe to exclude).
           - Different winner → P is route-tareth (P influences the ranking).
@@ -2528,13 +2528,13 @@ class ChainedAgent:
         if fit_diag is None or not fit_diag.near_tie_candidates:
             return  # clean fit, no competition → invariant 2, nothing earned
 
-        # Build candidate pool: vars in near-tie parents that aren't in winner.
-        parents_set = set(parents)
+        # Build candidate pool: vars in near-tie source_edges that aren't in winner.
+        source_edges_set = set(source_edges)
         competing = {
             p
-            for cand_parents, _, _ in fit_diag.near_tie_candidates
-            for p in cand_parents
-            if p not in parents_set and p in available
+            for cand_source_edges, _, _ in fit_diag.near_tie_candidates
+            for p in cand_source_edges
+            if p not in source_edges_set and p in available
             and self._authority_strength_derivation_allowed(
                 p,
                 cycle=cycle,
@@ -2546,33 +2546,33 @@ class ChainedAgent:
             return
 
         n = self.ledger.vars[var]
-        # Skip candidates already certified in this parent context — re-promotion
+        # Skip candidates already certified in this source_edge context — re-promotion
         # does not earn a re-test if the evidence context hasn't changed.
         competing = {
             p for p in competing
             if p not in n.route_certs
-            or n.route_certs[p].context_parents != tuple(parents)
+            or n.route_certs[p].context_source_edges != tuple(source_edges)
         }
         if not competing:
             return
 
         rc_budget = max(6, self.intervention_budget // 3)
-        base_parents = tuple(parents)
+        base_source_edges = tuple(source_edges)
         base_func = n.func
 
         for p in competing:
             avail_excl = available - {p}
-            if len(avail_excl) < len(parents_set):
+            if len(avail_excl) < len(source_edges_set):
                 continue
-            excl_parents, excl_func, _, _ = fit_var(
+            excl_source_edges, excl_func, _, _ = fit_var(
                 var, self.world, self.rng, rc_budget,
-                n.current_tolerance, available_parents=avail_excl,
+                n.current_tolerance, available_source_edges=avail_excl,
             )
-            same_winner = (base_parents == excl_parents and base_func == excl_func)
+            same_winner = (base_source_edges == excl_source_edges and base_func == excl_func)
             role: Role = "trass" if same_winner else "tareth"
             self.ledger.issue_route_cert(
                 var, p, role,
-                context_parents=tuple(parents),
+                context_source_edges=tuple(source_edges),
                 context_visible=self.world.visible_count,
                 context_cycle=cycle,
                 targets=(var,),
@@ -2582,13 +2582,13 @@ class ChainedAgent:
                 earned_by="counterfactual_fit",
             )
             if self._context_role_index is not None:
-                nid = f"route:x{p}->x{var}:{base_func}({','.join(map(str, base_parents))})"
+                nid = f"route:x{p}->x{var}:{base_func}({','.join(map(str, base_source_edges))})"
                 self._context_role_index.add_or_update_node(NethraNode(
                     nethra_id=nid,
                     kind="route_handle",
                     target_var=var,
-                    components=tuple(sorted((var, p, *base_parents))),
-                    learned_parents=tuple(base_parents),
+                    components=tuple(sorted((var, p, *base_source_edges))),
+                    learned_source_edges=tuple(base_source_edges),
                     learned_func=base_func,
                     signature=f"x{p}->x{var}:{role}",
                     first_seen_cycle=cycle,
@@ -2606,7 +2606,7 @@ class ChainedAgent:
                     evidence_summary="counterfactual_fit same_winner=" + str(same_winner),
                     fit_diag=fit_diag,
                     route_role=role,
-                    validity_scope=tuple(sorted((var, p, *base_parents))),
+                    validity_scope=tuple(sorted((var, p, *base_source_edges))),
                 )
 
     def _derive_separating_probes(
@@ -2625,7 +2625,7 @@ class ChainedAgent:
         if fit_diag is None or not fit_diag.probes:
             return ()
         probes = fit_diag.probes  # Tuple[Tuple[int, float], ...]
-        candidates = list(frontier.candidates)  # List[(parents, func)]
+        candidates = list(frontier.candidates)  # List[(source_edges, func)]
         if len(candidates) < 2:
             return ()
         from .functions import FUNC_LIBRARY
@@ -2636,11 +2636,11 @@ class ChainedAgent:
             intervened = list(state)
             intervened[iv_var] = iv_val
             preds = []
-            for cand_parents, cand_func in candidates:
+            for cand_source_edges, cand_func in candidates:
                 fn = FUNC_LIBRARY.get(cand_func)
                 if fn is None:
                     continue
-                args = [intervened[p] for p in cand_parents]
+                args = [intervened[p] for p in cand_source_edges]
                 preds.append(fn(args) if args else 0.0)
             if len(preds) < 2:
                 continue
@@ -2704,7 +2704,7 @@ class ChainedAgent:
             for h in existing.candidates - near_tie_set:
                 n.dormant_alternatives.append(
                     DormantAlternative(
-                        parents=h[0], func=h[1],
+                        source_edges=h[0], func=h[1],
                         last_score=existing.scores.get(h, 0),
                         last_seen_cycle=cycle,
                     )
@@ -2728,7 +2728,7 @@ class ChainedAgent:
             for h in existing.candidates - near_tie_set:
                 n.dormant_alternatives.append(
                     DormantAlternative(
-                        parents=h[0], func=h[1],
+                        source_edges=h[0], func=h[1],
                         last_score=existing.scores.get(h, 0),
                         last_seen_cycle=cycle,
                     )
@@ -2770,7 +2770,7 @@ class ChainedAgent:
                 if h != winning_hyp:
                     n.dormant_alternatives.append(
                         DormantAlternative(
-                            parents=h[0], func=h[1],
+                            source_edges=h[0], func=h[1],
                             last_score=f.scores.get(h, 0),
                             last_seen_cycle=cycle,
                         )
@@ -2789,7 +2789,7 @@ class ChainedAgent:
                 and self._authority_strength_preserve_remaining > 0
             ):
                 existing_alt = {
-                    (tuple(alt.parents), alt.func)
+                    (tuple(alt.source_edges), alt.func)
                     for alt in n.dormant_alternatives
                 }
                 archived = 0
@@ -2800,7 +2800,7 @@ class ChainedAgent:
                         continue
                     n.dormant_alternatives.append(
                         DormantAlternative(
-                            parents=h[0], func=h[1],
+                            source_edges=h[0], func=h[1],
                             last_score=f.scores.get(h, 0),
                             last_seen_cycle=cycle,
                         )
@@ -2862,7 +2862,7 @@ class ChainedAgent:
         margin = score - second
         evidence = [
             f"c{cycle}: x{var} fit unstable; streak={self.weak_streak[var]}",
-            f"current fit={n.func}({list(n.parents)}) score={score} second={second} margin={margin}",
+            f"current fit={n.func}({list(n.source_edges)}) score={score} second={second} margin={margin}",
             f"hypothesis keeps swinging across audits — library insufficient",
         ]
         self.ledger.propose_novelty(
@@ -2878,7 +2878,7 @@ class ChainedAgent:
 
         Two factors:
           - base_size: rough size of var's hypothesis space (constants,
-            1-parent, 2-parent options). Smaller is more tractable.
+            1-source_edge, 2-source_edge options). Smaller is more tractable.
           - decided_frac: fraction of OTHER visible vars that are
             provisionally committed (certified or proposed-with-sentinels)
             or classified trass. Higher = more reference frame.
@@ -2888,7 +2888,7 @@ class ChainedAgent:
         """
         n_total = self.world.visible_count
         n = self.ledger.vars[var]
-        n_par = len(n.parents)
+        n_par = len(n.source_edges)
         base_size = 2 if n_par == 0 else (2 * (n_total - 1) if n_par == 1 else 5 * (n_total - 1) * (n_total - 2) // 2 + 4)
         decided = 0
         for other_var, other_n in self.ledger.vars.items():
@@ -2920,7 +2920,7 @@ class ChainedAgent:
     def _consequence_tier(self, var: int) -> int:
         """Structural consequence tier under current beliefs.
 
-        Counts how many vars directly list `var` as a parent (direct downstream
+        Counts how many vars directly list `var` as a source_edge (direct downstream
         dependents). Used to scale sentinel count, promotion threshold, and
         dormancy threshold — importance affects the *action policy*, not scoring.
 
@@ -2953,8 +2953,8 @@ class ChainedAgent:
     # ── [/CONSEQUENCE-WEIGHT] ─────────────────────────────────────────────────
 
     def _cost_biased_topo_audit_order(self, needs_audit_set: Set[int]) -> List[int]:
-        """Return needs_audit vars in topological order (parents before children).
-        Uses the cached DFS topo order, which groups parent+child adjacently so
+        """Return needs_audit vars in topological order (source_edges before children).
+        Uses the cached DFS topo order, which groups source_edge+child adjacently so
         both are likely to land within the same cycle's audit budget.
         cost_weight priority for the audit queue is a future extension; for now
         the DFS order is preserved exactly to avoid budget-cutoff regressions."""
@@ -2963,13 +2963,13 @@ class ChainedAgent:
 
     def _topological_order(self, n_visible: int) -> List[int]:
         """Return visible variables in topological order based on current
-        parent maps (parents before children). Used for in-cycle processing
+        source_edge maps (source_edges before children). Used for in-cycle processing
         so sentinel failures can invalidate descendants BEFORE descendants
         take their own cheap-path skips. DFS-based; defensively handles
         cycles in current fits (shouldn't occur but doesn't loop).
 
         Caches the result. Invalidated by _invalidate_topo_cache
-        whenever a variable's parents change (sig_changed in _install_var).
+        whenever a variable's source_edges change (sig_changed in _install_var).
         """
         if (self._topo_cache is not None
             and self._topo_cache_visible_count == n_visible):
@@ -2979,12 +2979,12 @@ class ChainedAgent:
         in_progress: Set[int] = set()
 
         def visit(v: int):
-            """DFS helper. Marks v as in-progress, recurses into parents
+            """DFS helper. Marks v as in-progress, recurses into source_edges
             (only those <n_visible), then appends v to result on the way out."""
             if v in visited or v in in_progress: return
             in_progress.add(v)
             n = self.ledger.vars[v]
-            for p in n.parents:
+            for p in n.source_edges:
                 if p < n_visible:
                     visit(p)
             in_progress.discard(v)
@@ -2999,7 +2999,7 @@ class ChainedAgent:
 
     def _invalidate_topo_cache(self) -> None:
         """Drop the cached topological order. Called from _install_var when
-        a variable's signature changes (parents may have changed)."""
+        a variable's signature changes (source_edges may have changed)."""
         self._topo_cache = None
 
     def _maybe_demote(self, var: int, cycle: int) -> None:
@@ -3045,7 +3045,7 @@ class ChainedAgent:
 
         When parked, run_cycle skips the leaf sentinel each cycle unless a wake
         condition fires (regime sentinel fails, revalidation interval, or cert
-        invalidation via parent_change/sentinel_failure resets parked=False).
+        invalidation via source_edge_change/sentinel_failure resets parked=False).
         """
         n = self.ledger.vars[var]
         if n.parked:
@@ -3072,35 +3072,35 @@ class ChainedAgent:
             f"csuf={n.cycles_since_unique_failure}, rpass>={_PARK_K})"
         )
 
-    def _screen_candidate_parents(self, target: int, m: int) -> Set[int]:
+    def _screen_candidate_source_edges(self, target: int, m: int) -> Set[int]:
         """Per-target sensitivity screen. For each candidate var x, force x to
         0.05 and 0.95 and measure how much `target` moves. Return the top-M
         candidates by movement magnitude.
 
         Cost: 2 × (n_visible - 1) × predict_var_under_intervention calls.
-        Replaces the certified-only `available` set when parent_screen_m > 0.
+        Replaces the certified-only `available` set when source_edge_screen_m > 0.
 
         Only vars with non-zero movement compete; if fewer than M have any
         movement at all, the returned set may be smaller than M. Route certs
         (trass role) for this target are respected: positively-excluded vars
         are dropped from the result even if they score highly.
 
-        Provider path (when self._parent_ranker is set):
+        Provider path (when self._source_edge_ranker is set):
           Delegates ranking to the provider. ChainedAgent still applies route-cert
           exclusion AFTER ranking — providers must not touch certs. Intervention
-          cost is accounted here for SensitivityParentRanker (2 per candidate);
+          cost is accounted here for Sensitivitysource_edgeRanker (2 per candidate);
           other providers are responsible for their own cost outside this counter.
         """
         n = self.ledger.vars[target]
-        if self._parent_ranker is not None:
+        if self._source_edge_ranker is not None:
             candidates: Set[int] = {x for x in range(self.world.visible_count) if x != target}
-            ranking = self._parent_ranker.rank_parents(target, candidates, m)
-            self._hybrid_parent_ranker_calls += 1
+            ranking = self._source_edge_ranker.rank_source_edges(target, candidates, m)
+            self._hybrid_source_edge_ranker_calls += 1
             _ranking_diag = getattr(ranking, "diagnostics", {})
             self.total_interventions += int(_ranking_diag.get("sensitivity_rescue_interventions", 0))
-            # Mirror intervention cost for the default SensitivityParentRanker path,
+            # Mirror intervention cost for the default Sensitivitysource_edgeRanker path,
             # which runs 2 world calls per candidate (same as the inline loop below).
-            if isinstance(self._parent_ranker, SensitivityParentRanker):
+            if isinstance(self._source_edge_ranker, Sensitivitysource_edgeRanker):
                 self.total_interventions += 2 * len(candidates)
             # Route-cert exclusion: providers must not apply cert logic; ChainedAgent does it here.
             post_route = tuple(
@@ -3112,12 +3112,12 @@ class ChainedAgent:
                     self._nethra_memory_index.rank_candidates(
                         var=target,
                         context_key=nethra_context_key(
-                            operation="parent_candidates",
+                            operation="source_edge_candidates",
                             var=target,
                             visible=self.world.visible_count,
                         ),
                         candidates=post_route,
-                        hook="parent_candidates",
+                        hook="source_edge_candidates",
                         cycle=getattr(self, "_current_cycle_for_memory", 0),
                     )
                 )
@@ -3128,19 +3128,19 @@ class ChainedAgent:
                 for x in post_route
                 if source_by_candidate.get(x, "")
             }
-            self._parent_proposal_diagnostics.record_call(
+            self._source_edge_proposal_diagnostics.record_call(
                 tuple(ranking.ranked), post_route, _ranking_diag
             )
-            self._pending_parent_rankings[target] = post_route
-            self._pending_parent_sources[target] = post_route_sources
-            if excluded and hasattr(self._parent_ranker, "observe_route_exclusions"):
-                self._parent_ranker.observe_route_exclusions(target, excluded)  # type: ignore[attr-defined]
-            if self._probe_proposer is not None and hasattr(self._probe_proposer, "observe_parent_ranking_metadata"):
-                self._probe_proposer.observe_parent_ranking_metadata(  # type: ignore[attr-defined]
+            self._pending_source_edge_rankings[target] = post_route
+            self._pending_source_edge_sources[target] = post_route_sources
+            if excluded and hasattr(self._source_edge_ranker, "observe_route_exclusions"):
+                self._source_edge_ranker.observe_route_exclusions(target, excluded)  # type: ignore[attr-defined]
+            if self._probe_proposer is not None and hasattr(self._probe_proposer, "observe_source_edge_ranking_metadata"):
+                self._probe_proposer.observe_source_edge_ranking_metadata(  # type: ignore[attr-defined]
                     target, post_route, post_route_sources
                 )
-            elif self._probe_proposer is not None and hasattr(self._probe_proposer, "observe_parent_ranking"):
-                self._probe_proposer.observe_parent_ranking(target, post_route)  # type: ignore[attr-defined]
+            elif self._probe_proposer is not None and hasattr(self._probe_proposer, "observe_source_edge_ranking"):
+                self._probe_proposer.observe_source_edge_ranking(target, post_route)  # type: ignore[attr-defined]
             return set(post_route)
         # Inline path: existing behavior unchanged when no provider is set.
         visible = self.world.visible_count
@@ -3157,7 +3157,7 @@ class ChainedAgent:
         scored.sort(reverse=True)
         if self._nethra_memory_index is not None:
             context = nethra_context_key(
-                operation="parent_candidates",
+                operation="source_edge_candidates",
                 var=target,
                 visible=self.world.visible_count,
             )
@@ -3166,7 +3166,7 @@ class ChainedAgent:
                     var=target,
                     context_key=context,
                     candidates=tuple(x for _, x in scored),
-                    hook="parent_candidates",
+                    hook="source_edge_candidates",
                     cycle=getattr(self, "_current_cycle_for_memory", 0),
                 )
             )
@@ -3207,7 +3207,7 @@ class ChainedAgent:
 
           failure_signal         consecutive sentinel failures (most urgent)
         + consequence_weight     var's cost weight from ledger
-        + dep_score              1 per live var that currently believes this var as parent
+        + dep_score              1 per live var that currently believes this var as source_edge
         + uncertainty_age        time since last change, if never audited (novel vars age in)
         - clean_passes           skip count × 0.1 (penalises boring stable vars)
         """
@@ -3217,7 +3217,7 @@ class ChainedAgent:
         consequence = n.cost_weight
         dep_score = sum(
             1.0 for fv in (self._live_set or set())
-            if var in self.ledger.vars[fv].parents
+            if var in self.ledger.vars[fv].source_edges
         )
         uncertainty_age = (cycle - n.last_changed_cycle) * 0.01 if n.full_audits == 0 else 0.0
         clean_passes = n.skip_count * 0.1
@@ -3254,25 +3254,25 @@ class ChainedAgent:
         frontier = self._pick_initial_frontier(salient, self.frontier_k)
         first_pass_order = self._audit_priority_order(list(frontier))
         for var in first_pass_order:
-            parents, func, score, second, fd = self._full_audit_var(var, 0)
-            self._install_var(var, parents, func, score, second, 0, fd)
+            source_edges, func, score, second, fd = self._full_audit_var(var, 0)
+            self._install_var(var, source_edges, func, score, second, 0, fd)
         self._live_set = set(frontier)
 
     def on_variable_revealed(self, new_var: int, cycle: int) -> None:
         """Hook fired when world reveals a new variable. Audits the new var;
         existing certs are untouched — filter ledger: no recert without failure.
-        Trass-status vars are valid parent candidates (route certs, not skip certs,
-        gate available_parents; no route certs exist → nothing excluded by cert).
+        Trass-status vars are valid source_edge candidates (route certs, not skip certs,
+        gate available_source_edges; no route certs exist → nothing excluded by cert).
 
         Invalidates the topo cache because visible_count grew."""
         self._invalidate_topo_cache()
         if self._live_set is not None:
             self._live_set.add(new_var)
-        parents, func, score, second, fd = self._full_audit_var(new_var, cycle)
-        self._install_var(new_var, parents, func, score, second, cycle, fd)
+        source_edges, func, score, second, fd = self._full_audit_var(new_var, cycle)
+        self._install_var(new_var, source_edges, func, score, second, cycle, fd)
         self.ledger.event_log.append(
             f"c{cycle}: x{new_var} REVEALED — first audit complete; "
-            f"available parents at reveal time: "
+            f"available source_edges at reveal time: "
             f"{sorted(other for other, n in self.ledger.vars.items() if other != new_var and n.status in ('certified', 'trass', 'proposed'))}"
         )
 
@@ -3319,9 +3319,9 @@ class ChainedAgent:
         # event log. Cascade fires only after _install_var confirms sig_changed.
         _sentinel_failed_vars: Dict[int, Tuple[str, float]] = {}
 
-        # v28+: process variables in dependency order (parents first) so a
-        # parent's sentinel failure invalidates descendants BEFORE they take
-        # cheap-path skips based on now-invalid parent assumptions. Previously
+        # v28+: process variables in dependency order (source_edges first) so a
+        # source_edge's sentinel failure invalidates descendants BEFORE they take
+        # cheap-path skips based on now-invalid source_edge assumptions. Previously
         # the loop went in numeric order, which happened to align with
         # topological order in this toy because _random_dag builds low-to-high,
         # but that's an accidental coincidence — intent says topological.
@@ -3527,7 +3527,7 @@ class ChainedAgent:
                                 if "compress" not in n.certificates:
                                     self.ledger.issue_cert(
                                         var, "compress", "trass", "guarded_reuse",
-                                        context_parents=tuple(n.parents) if n.parents else (),
+                                        context_source_edges=tuple(n.source_edges) if n.source_edges else (),
                                         context_visible=self.world.visible_count,
                                         context_cycle=cycle,
                                         targets=tuple(gv for gv, _, _ in comp.gate),
@@ -3572,7 +3572,7 @@ class ChainedAgent:
                 continue
 
             # Passive residual check: compute expected-next-state from certified
-            # func(parents) at current world state. No interventions — O(1).
+            # func(source_edges) at current world state. No interventions — O(1).
             # If residual ≤ tolerance: passive says OK → skip active sentinel
             #   (save IVs; does NOT certify anything — only defers the probe).
             # If residual > tolerance: passive stressed → run active sentinel
@@ -3590,10 +3590,10 @@ class ChainedAgent:
             _passive_stressed = False
             if n.authoritative:
                 if self._residual_predictor is not None:
-                    _parent_vals = [self.world.state[p] for p in n.parents]
+                    _source_edge_vals = [self.world.state[p] for p in n.source_edges]
                     _rp = self._residual_predictor.predict_residual(
-                        var, n.parents, n.func,
-                        _parent_vals, self.world.state[var], n.current_tolerance,
+                        var, n.source_edges, n.func,
+                        _source_edge_vals, self.world.state[var], n.current_tolerance,
                     )
                     self._hybrid_residual_predictor_calls += 1
                     if _rp.ok:
@@ -3608,8 +3608,8 @@ class ChainedAgent:
                     # Inline path (hybrid-off / no provider): current behavior unchanged.
                     _f = FUNC_LIBRARY.get(n.func)
                     if _f is not None:
-                        _parent_vals = [self.world.state[p] for p in n.parents]
-                        _passive_pred = _f(_parent_vals)
+                        _source_edge_vals = [self.world.state[p] for p in n.source_edges]
+                        _passive_pred = _f(_source_edge_vals)
                         _passive_residual = abs(self.world.state[var] - _passive_pred)
                         if _passive_residual <= n.current_tolerance:
                             _passive_ok = True
@@ -3618,8 +3618,8 @@ class ChainedAgent:
                             self._passive_stress_count += 1
                             _passive_stressed_vars.add(var)
 
-            if self._parent_ranker is not None and hasattr(self._parent_ranker, "observe_residual_event"):
-                self._parent_ranker.observe_residual_event(var, cycle, _passive_stressed)  # type: ignore[attr-defined]
+            if self._source_edge_ranker is not None and hasattr(self._source_edge_ranker, "observe_residual_event"):
+                self._source_edge_ranker.observe_residual_event(var, cycle, _passive_stressed)  # type: ignore[attr-defined]
             if self._probe_proposer is not None and hasattr(self._probe_proposer, "observe_residual_event"):
                 self._probe_proposer.observe_residual_event(var, cycle, _passive_stressed)  # type: ignore[attr-defined]
 
@@ -3630,7 +3630,7 @@ class ChainedAgent:
             #   - covering regime sentinel failed (var in _regime_failed_vars)
             #   - sparse revalidation due (cycle % _PARK_REVALIDATE_INTERVAL == 0)
             #   - passive residual stressed (cert may be stale — recheck)
-            #   - cert was invalidated externally (parked reset on parent_change/sentinel_failure)
+            #   - cert was invalidated externally (parked reset on source_edge_change/sentinel_failure)
             if n.parked and n.authoritative:
                 _regime_failed = var in _regime_failed_vars
                 _revalidate = (cycle % _PARK_REVALIDATE_INTERVAL == 0)
@@ -3755,7 +3755,7 @@ class ChainedAgent:
                 # Case (b): world changed — local demotion only (graded cascade).
                 # Single sentinel miss earns local re-audit, not immediate
                 # descendant cascade. Cascade fires only after _install_var
-                # confirms sig_changed (genuine parent mutation). Noisy misses
+                # confirms sig_changed (genuine source_edge mutation). Noisy misses
                 # that resolve to the same fit produce zero cascade work.
                 n.consecutive_sentinel_failures += 1
                 self.ledger.vars[var].invalidate_certs("sentinel_failure")
@@ -3807,10 +3807,10 @@ class ChainedAgent:
             needs_audit.append(var)
 
         # v25: audit budget. Order by tractability, audit up to budget.
-        # v28+: audit in topological-then-tractability order. Parents in
+        # v28+: audit in topological-then-tractability order. source_edges in
         # needs_audit must be audited before their children so that when a
-        # child's parent gets re-fit this cycle, the child sees the corrected
-        # parent in available_parents. Within the same dependency level,
+        # child's source_edge gets re-fit this cycle, the child sees the corrected
+        # source_edge in available_source_edges. Within the same dependency level,
         # tractability ordering decides priority.
         needs_audit_set = set(needs_audit)
 
@@ -3881,7 +3881,7 @@ class ChainedAgent:
                     f"topological rank {i+1}/{len(priority_order)})"
                 )
                 continue
-            _pre_parents = tuple(self.ledger.vars[var].parents)
+            _pre_source_edges = tuple(self.ledger.vars[var].source_edges)
             _pre_func = self.ledger.vars[var].func
             _diag_token = None
             if self._diagnostic_audit_observer is not None:
@@ -3890,28 +3890,28 @@ class ChainedAgent:
                     var,
                     cycle,
                 )
-            parents, func, score, second, fd = self._full_audit_var(var, cycle)
-            sig_changed = self._install_var(var, parents, func, score, second, cycle, fd)
+            source_edges, func, score, second, fd = self._full_audit_var(var, cycle)
+            sig_changed = self._install_var(var, source_edges, func, score, second, cycle, fd)
             if self._diagnostic_audit_observer is not None:
                 self._diagnostic_audit_observer.after_audit(
                     self,
                     _diag_token,
                     var,
                     cycle,
-                    parents,
+                    source_edges,
                     func,
                     sig_changed,
                 )
             audited.append(var)
             if var in _sentinel_failed_vars:
                 self.local_reaudit_count += 1
-                _new_parents = tuple(parents)
-                _p_changed = _new_parents != _pre_parents
+                _new_source_edges = tuple(source_edges)
+                _p_changed = _new_source_edges != _pre_source_edges
                 _f_changed = func != _pre_func
                 if _p_changed and _f_changed:
                     _rshape = "full_change"
                 elif _p_changed:
-                    _rshape = "parent_change"
+                    _rshape = "source_edge_change"
                 elif _f_changed:
                     _rshape = "func_change"
                 else:
@@ -4007,7 +4007,7 @@ class ChainedAgent:
                             _prev = _n.certificates.get("skip")
                             self.ledger.issue_cert(
                                 var, "skip", "noise_floor", "guarded_reuse",
-                                context_parents=tuple(_n.parents),
+                                context_source_edges=tuple(_n.source_edges),
                                 context_visible=self.world.visible_count,
                                 context_cycle=cycle,
                                 targets=_prev.targets if _prev else (),
@@ -4115,7 +4115,7 @@ class ChainedAgent:
                         kind="regime_handle",
                         target_var=None,
                         components=members,
-                        learned_parents=(),
+                        learned_source_edges=(),
                         learned_func="regime_cofailure",
                         signature=f"R{_regime_id}:{members}",
                         first_seen_cycle=cycle,

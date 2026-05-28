@@ -24,9 +24,9 @@ from typing import Any, NamedTuple
 
 
 HIDDEN_TRUTH_LIKE_FIELDS: frozenset[str] = frozenset({
-    "truth_parents",
+    "truth_source_edges",
     "truth_func",
-    "truth_delayed_parents",
+    "truth_delayed_source_edges",
     "truth_latents",
     "debug_blind_challenge_manifest",
 })
@@ -92,7 +92,7 @@ class ScaffoldProposal:
     vars: list[int]
     contexts: list[str]
     common_signatures: list[str]
-    common_parents: list[list[int]]
+    common_source_edges: list[list[int]]
     role_patterns: list[str]
     recurring_signals: list[str]
     recurrence_count: int
@@ -116,7 +116,7 @@ class ScaffoldProposal:
             "vars": self.vars,
             "contexts": self.contexts,
             "common_signatures": self.common_signatures,
-            "common_parents": self.common_parents,
+            "common_source_edges": self.common_source_edges,
             "role_patterns": self.role_patterns,
             "recurring_signals": self.recurring_signals,
             "recurrence_count": self.recurrence_count,
@@ -192,8 +192,8 @@ class SleepProduct:
 
 # ── Helper functions ───────────────────────────────────────────────────────────
 
-def _parse_sig_parents(sig: str) -> frozenset[int]:
-    """Extract parent vars from a signature like 'x0:MAX(1,8)' → frozenset({1, 8})."""
+def _parse_sig_source_edges(sig: str) -> frozenset[int]:
+    """Extract source_edge vars from a signature like 'x0:MAX(1,8)' → frozenset({1, 8})."""
     try:
         paren_open = sig.index('(')
         paren_close = sig.index(')')
@@ -219,7 +219,7 @@ def _intlike(value: Any) -> bool:
 
 
 def _bg_anchor_key(rec: dict[str, Any]) -> tuple | None:
-    """Return (kind, vars_frozenset, parent_frozenset) or None for giant/no-var records.
+    """Return (kind, vars_frozenset, source_edge_frozenset) or None for giant/no-var records.
 
     Returns None for giant clusters (handled separately) and records with no vars
     (no var anchor means no valid additional anchor beyond kind alone).
@@ -230,14 +230,14 @@ def _bg_anchor_key(rec: dict[str, Any]) -> tuple | None:
     vars_list = sorted(int(v) for v in (rec.get('vars') or []))
     if not vars_list:
         return None
-    parent_sets = rec.get('parent_sets') or []
+    source_edge_sets = rec.get('source_edge_sets') or []
     fit_sigs = rec.get('fit_signatures') or []
-    canonical_parent: frozenset[int] = frozenset()
-    if parent_sets:
-        canonical_parent = frozenset(int(p) for p in (parent_sets[0] or []))
+    canonical_source_edge: frozenset[int] = frozenset()
+    if source_edge_sets:
+        canonical_source_edge = frozenset(int(p) for p in (source_edge_sets[0] or []))
     elif fit_sigs:
-        canonical_parent = _parse_sig_parents(str(fit_sigs[0]))
-    return (kind, frozenset(vars_list), canonical_parent)
+        canonical_source_edge = _parse_sig_source_edges(str(fit_sigs[0]))
+    return (kind, frozenset(vars_list), canonical_source_edge)
 
 
 def _authority_anchor_key(rec: dict[str, Any]) -> tuple | None:
@@ -253,8 +253,8 @@ def _cr_anchor_key(rec: dict[str, Any]) -> tuple | None:
     if var is None:
         return None
     kind = str(rec.get('kind', 'unknown'))
-    learned_parents = frozenset(int(p) for p in (rec.get('learned_parents') or []))
-    return ('context_role_recurrence', int(var), kind, learned_parents)
+    learned_source_edges = frozenset(int(p) for p in (rec.get('learned_source_edges') or []))
+    return ('context_role_recurrence', int(var), kind, learned_source_edges)
 
 
 def _compute_confidence(recurrence_count: int, runs_seen: int, seeds_seen: int) -> float:
@@ -267,14 +267,14 @@ def _compute_confidence(recurrence_count: int, runs_seen: int, seeds_seen: int) 
 def _compute_suggested_use(
     kind: str,
     runs_seen: int,
-    has_parent_anchor: bool,
+    has_source_edge_anchor: bool,
     has_role_patterns: bool,
 ) -> str:
     if kind == 'giant_cluster_subfamily':
         return 'no_runtime_use'
     if has_role_patterns and runs_seen >= 2:
         return 'ranking_hint'
-    if has_parent_anchor and runs_seen >= 2:
+    if has_source_edge_anchor and runs_seen >= 2:
         return 'clustering_prior'
     return 'feature_only'
 
@@ -554,32 +554,32 @@ class MemorySleepConsolidator:
         )
         for obs in memory_records:
             rec = obs.rec
-            # context_role records with parent info → build selective parent_candidates hints.
-            # These encode certified parents as the preferred set, giving differential signal
+            # context_role records with source_edge info → build selective source_edge_candidates hints.
+            # These encode certified source_edges as the preferred set, giving differential signal
             # that the ranker's random initial ordering cannot mask.
             if str(rec.get("record_type", "")) == "context_role":
                 vars_list = [int(v) for v in (rec.get("vars") or []) if _intlike(v)]
                 n_vars = int(rec.get("n_vars", 0) or 0)
                 if vars_list and n_vars > 0:
                     target_var = vars_list[0]
-                    parent_vars: list[int] = []
+                    source_edge_vars: list[int] = []
                     for ref in (rec.get("touched_structure_refs") or []):
                         ref_s = str(ref)
-                        if ref_s.startswith("parents:") and ref_s[8:].strip():
+                        if ref_s.startswith("source_edges:") and ref_s[8:].strip():
                             try:
-                                parent_vars = [int(p) for p in ref_s[8:].split(",") if p.strip()]
+                                source_edge_vars = [int(p) for p in ref_s[8:].split(",") if p.strip()]
                             except ValueError:
                                 pass
                             break
-                    if parent_vars:
-                        parent_context = f"parent_candidates|x{target_var}|vis={n_vars}"
+                    if source_edge_vars:
+                        source_edge_context = f"source_edge_candidates|x{target_var}|vis={n_vars}"
                         members = [str(n) for n in (rec.get("member_nethras") or [])]
                         if rec.get("nethra_id"):
                             members.append(str(rec["nethra_id"]))
                         refs = [str(r) for r in (rec.get("touched_structure_refs") or [])]
-                        for parent_var in parent_vars:
-                            p_atom = f"x{parent_var}"
-                            bucket = by_context_atom[(parent_context, p_atom)]
+                        for source_edge_var in source_edge_vars:
+                            p_atom = f"x{source_edge_var}"
+                            bucket = by_context_atom[(source_edge_context, p_atom)]
                             bucket["atoms"].add(p_atom)
                             bucket["refs"].update(refs)
                             bucket["members"].update(members)
@@ -665,11 +665,11 @@ class MemorySleepConsolidator:
                 salience_delta = 0.4 + 0.1 * successes
                 invalidators = []
             elif bucket["is_structure_hint"] and not failures:
-                # Structural: certified parent configuration from context_role records.
+                # Structural: certified source_edge configuration from context_role records.
                 # Provides differential signal that experience-event-only bootstrapping cannot:
-                # preferred = only the true parents, not all candidates.
+                # preferred = only the true source_edges, not all candidates.
                 use_right = "ranking_hint"
-                reason = "structural: certified parent configuration from context_role"
+                reason = "structural: certified source_edge configuration from context_role"
                 salience_delta = 0.2
                 invalidators = []
             else:
@@ -712,7 +712,7 @@ class MemorySleepConsolidator:
 
         Grouping rules:
           - A proposal requires at least one anchor beyond kind alone: shared var,
-            shared context family, shared parent/signature, or cross-run recurrence
+            shared context family, shared source_edge/signature, or cross-run recurrence
             of the same nethra_id.
           - Generic unresolved/tied-frontier status alone is not sufficient.
           - Giant clusters are split by var and marked no_runtime_use.
@@ -748,7 +748,7 @@ class MemorySleepConsolidator:
             used_nids.add(nid)
 
         # Phase 2: Structural anchor grouping for ungrouped background records
-        # Groups by (kind, vars, canonical_parent_set). Giant clusters excluded here.
+        # Groups by (kind, vars, canonical_source_edge_set). Giant clusters excluded here.
         ungrouped = [obs for obs in bg if str(obs.rec.get('nethra_id', '')) not in used_nids]
         giants = [
             obs for obs in ungrouped
@@ -796,7 +796,7 @@ class MemorySleepConsolidator:
             p = self._authority_proposal(key, obs_list, max_sources_per_proposal, _next_id)
             proposals.append(p)
 
-        # Phase 5: Context-role index recurrence by (var, kind, learned_parents)
+        # Phase 5: Context-role index recurrence by (var, kind, learned_source_edges)
         cr_groups: dict[tuple, list[_CRObs]] = defaultdict(list)
         for obs in cr:
             key = _cr_anchor_key(obs.rec)
@@ -881,14 +881,14 @@ class MemorySleepConsolidator:
         all_sigs: list[str] = list(dict.fromkeys(
             s for o in capped for s in (o.rec.get('fit_signatures') or [])
         ))[:10]
-        seen_parent_fs: set[frozenset] = set()
-        all_parents: list[list[int]] = []
+        seen_source_edge_fs: set[frozenset] = set()
+        all_source_edges: list[list[int]] = []
         for o in capped:
-            for ps in (o.rec.get('parent_sets') or []):
+            for ps in (o.rec.get('source_edge_sets') or []):
                 fp = frozenset(int(p) for p in ps)
-                if fp not in seen_parent_fs:
-                    seen_parent_fs.add(fp)
-                    all_parents.append(sorted(int(p) for p in ps))
+                if fp not in seen_source_edge_fs:
+                    seen_source_edge_fs.add(fp)
+                    all_source_edges.append(sorted(int(p) for p in ps))
         all_roles: list[str] = list(dict.fromkeys(
             r for o in capped for r in (o.rec.get('source_roles') or [])
         ))[:10]
@@ -907,9 +907,9 @@ class MemorySleepConsolidator:
             pk = _BG_KIND_TO_PROPOSAL_KIND.get(dominant_bg, 'background_nethra_group')
 
         confidence = _compute_confidence(len(capped), len(runs), len(seeds))
-        has_parent = bool(all_parents)
+        has_source_edge = bool(all_source_edges)
         informative_roles = [r for r in all_roles if r not in ('unresolved', 'best_available')]
-        use = _compute_suggested_use(pk, len(runs), has_parent, bool(informative_roles))
+        use = _compute_suggested_use(pk, len(runs), has_source_edge, bool(informative_roles))
         action = _compute_action_relevance(use, confidence)
 
         warnings: list[str] = []
@@ -929,7 +929,7 @@ class MemorySleepConsolidator:
             vars=all_vars,
             contexts=all_ctx,
             common_signatures=all_sigs,
-            common_parents=all_parents[:10],
+            common_source_edges=all_source_edges[:10],
             role_patterns=all_roles,
             recurring_signals=all_signals,
             recurrence_count=len(capped),
@@ -952,8 +952,8 @@ class MemorySleepConsolidator:
         max_src: int,
         next_id: Any,
     ) -> ScaffoldProposal:
-        # key = (kind_str, vars_frozenset, parent_frozenset)
-        bg_kind_str, vars_fs, parent_fs = key
+        # key = (kind_str, vars_frozenset, source_edge_frozenset)
+        bg_kind_str, vars_fs, source_edge_fs = key
         capped = obs_list[:max_src]
         runs = sorted(set(o.run_idx for o in capped))
         seeds = sorted(set(o.seed for o in capped))
@@ -969,14 +969,14 @@ class MemorySleepConsolidator:
         all_sigs: list[str] = list(dict.fromkeys(
             s for o in capped for s in (o.rec.get('fit_signatures') or [])
         ))[:10]
-        seen_parent_fs: set[frozenset] = set()
-        all_parents: list[list[int]] = []
+        seen_source_edge_fs: set[frozenset] = set()
+        all_source_edges: list[list[int]] = []
         for o in capped:
-            for ps in (o.rec.get('parent_sets') or []):
+            for ps in (o.rec.get('source_edge_sets') or []):
                 fp = frozenset(int(p) for p in ps)
-                if fp not in seen_parent_fs:
-                    seen_parent_fs.add(fp)
-                    all_parents.append(sorted(int(p) for p in ps))
+                if fp not in seen_source_edge_fs:
+                    seen_source_edge_fs.add(fp)
+                    all_source_edges.append(sorted(int(p) for p in ps))
         all_roles: list[str] = list(dict.fromkeys(
             r for o in capped for r in (o.rec.get('source_roles') or [])
         ))[:10]
@@ -988,14 +988,14 @@ class MemorySleepConsolidator:
 
         pk = _BG_KIND_TO_PROPOSAL_KIND.get(str(bg_kind_str), 'background_nethra_group')
         confidence = _compute_confidence(len(capped), len(runs), len(seeds))
-        has_parent = bool(parent_fs)
+        has_source_edge = bool(source_edge_fs)
         informative_roles = [r for r in all_roles if r not in ('unresolved', 'best_available', 'dormant')]
-        use = _compute_suggested_use(pk, len(runs), has_parent, bool(informative_roles))
+        use = _compute_suggested_use(pk, len(runs), has_source_edge, bool(informative_roles))
         action = _compute_action_relevance(use, confidence)
 
         evidence = (
             f"{bg_kind_str} records for vars={sorted(vars_fs)}, "
-            f"parents={sorted(parent_fs)}: {len(capped)} source record(s) "
+            f"source_edges={sorted(source_edge_fs)}: {len(capped)} source record(s) "
             f"across {len(runs)} run(s)"
         )
 
@@ -1007,7 +1007,7 @@ class MemorySleepConsolidator:
             vars=all_vars,
             contexts=all_ctx,
             common_signatures=all_sigs,
-            common_parents=all_parents[:10],
+            common_source_edges=all_source_edges[:10],
             role_patterns=all_roles,
             recurring_signals=all_signals,
             recurrence_count=len(capped),
@@ -1061,7 +1061,7 @@ class MemorySleepConsolidator:
             vars=[var],
             contexts=all_ctx,
             common_signatures=all_sigs,
-            common_parents=[],
+            common_source_edges=[],
             role_patterns=all_roles,
             recurring_signals=all_signals,
             recurrence_count=len(capped),
@@ -1123,7 +1123,7 @@ class MemorySleepConsolidator:
             vars=vars_in_group,
             contexts=[],
             common_signatures=[],
-            common_parents=[],
+            common_source_edges=[],
             role_patterns=role_patterns,
             recurring_signals=all_signals,
             recurrence_count=len(capped),
@@ -1150,8 +1150,8 @@ class MemorySleepConsolidator:
         max_src: int,
         next_id: Any,
     ) -> ScaffoldProposal:
-        # key = ('context_role_recurrence', var, cr_kind, parent_frozenset)
-        _, var, cr_kind, parent_fs = key
+        # key = ('context_role_recurrence', var, cr_kind, source_edge_frozenset)
+        _, var, cr_kind, source_edge_fs = key
         capped = obs_list[:max_src]
         runs = sorted(set(o.run_idx for o in capped))
         seeds = sorted(set(o.seed for o in capped))
@@ -1167,8 +1167,8 @@ class MemorySleepConsolidator:
         last_cycle = max(int(o.rec.get('last_seen_cycle', 0) or 0) for o in capped)
 
         confidence = _compute_confidence(len(capped), len(runs), len(seeds))
-        has_parent = bool(parent_fs)
-        use = _compute_suggested_use('context_role_recurrence', len(runs), has_parent, False)
+        has_source_edge = bool(source_edge_fs)
+        use = _compute_suggested_use('context_role_recurrence', len(runs), has_source_edge, False)
         action = _compute_action_relevance(use, confidence)
 
         return ScaffoldProposal(
@@ -1179,7 +1179,7 @@ class MemorySleepConsolidator:
             vars=[int(var)],
             contexts=[],
             common_signatures=all_sigs,
-            common_parents=[sorted(parent_fs)] if parent_fs else [],
+            common_source_edges=[sorted(source_edge_fs)] if source_edge_fs else [],
             role_patterns=[str(cr_kind)],
             recurring_signals=[],
             recurrence_count=len(capped),
@@ -1193,7 +1193,7 @@ class MemorySleepConsolidator:
             suggested_runtime_use=use,
             evidence_summary=(
                 f"context_role_recurrence for var={var}, kind={cr_kind}, "
-                f"parents={sorted(parent_fs)}: {len(capped)} source record(s) "
+                f"source_edges={sorted(source_edge_fs)}: {len(capped)} source record(s) "
                 f"across {len(runs)} run(s)"
             ),
             warnings=[],

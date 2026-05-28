@@ -39,7 +39,7 @@ def _make_run(
     schedule: str = "false_trass",
     n_vars: int = 50,
     cycles: int = 5000,
-    parent_ranker: str = "sensitivity",
+    source_edge_ranker: str = "sensitivity",
     probe_proposer: str = "none",
     regime_sentinel_fails: int = 0,
     regime_no_sentinel: int = 0,
@@ -47,7 +47,7 @@ def _make_run(
     total_unique_failures: int = 0,
     full_audits: int = 20,
     revoked_by_dist: dict = None,
-    parent_proposal_rank_mean: float = 0.0,
+    source_edge_proposal_rank_mean: float = 0.0,
     provider_probe_no_effect_count: int = 0,
     provider_probe_improved_margin_count: int = 0,
     active_composites: int = 0,
@@ -61,7 +61,7 @@ def _make_run(
         regime_sentinel_fails=regime_sentinel_fails,
         regime_no_sentinel=regime_no_sentinel,
         passive_stress_count=passive_stress_count,
-        parent_proposal_rank_mean=parent_proposal_rank_mean,
+        source_edge_proposal_rank_mean=source_edge_proposal_rank_mean,
         provider_probe_no_effect_count=provider_probe_no_effect_count,
         provider_probe_improved_margin_count=provider_probe_improved_margin_count,
         active_composites=active_composites,
@@ -71,7 +71,7 @@ def _make_run(
         schedule=schedule,
         n_vars=n_vars,
         cycles=cycles,
-        parent_ranker=parent_ranker,
+        source_edge_ranker=source_edge_ranker,
         probe_proposer=probe_proposer,
     )
     return SimpleNamespace(
@@ -86,7 +86,7 @@ def _make_run(
 
 def _group_key(r) -> Tuple[str, int, int, str]:
     return (r.config.schedule, r.config.n_vars, r.config.cycles,
-            f"{r.config.parent_ranker}/{r.config.probe_proposer}")
+            f"{r.config.source_edge_ranker}/{r.config.probe_proposer}")
 
 
 def _build_run_groups(runs) -> Dict[Tuple, List]:
@@ -160,7 +160,7 @@ def test_predict_ignores_schedule_label():
     f_low = DiagnosticFeatures(
         revocations=0, full_audits=20, unique_fails=0,
         regime_sentinel_fails=0, regime_no_sentinel=0,
-        parent_rank_mean=0.0, probe_no_effect=0, probe_improved=0,
+        source_edge_rank_mean=0.0, probe_no_effect=0, probe_improved=0,
         passive_stress_count=0, active_composites=0, composite_components=0,
         cycles=5000, n_vars=50,
     )
@@ -402,10 +402,10 @@ def test_features_from_run_results_sums_integer_fields():
 
 
 def test_features_from_run_results_averages_rank_mean():
-    r1 = _make_run(parent_proposal_rank_mean=2.0)
-    r2 = _make_run(parent_proposal_rank_mean=4.0)
+    r1 = _make_run(source_edge_proposal_rank_mean=2.0)
+    r2 = _make_run(source_edge_proposal_rank_mean=4.0)
     f = features_from_run_results([r1, r2])
-    assert f.parent_rank_mean == pytest.approx(3.0)
+    assert f.source_edge_rank_mean == pytest.approx(3.0)
 
 
 def test_features_from_run_results_rate_correct_after_sum():

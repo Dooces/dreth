@@ -6,7 +6,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().source_edges[1]
 sys.path.insert(0, str(ROOT))
 
 from dreth.scaffold_memory import (
@@ -28,7 +28,7 @@ def _proposal_dict(
     vars: list[int] | None = None,
     contexts: list[str] | None = None,
     common_signatures: list[str] | None = None,
-    common_parents: list[list[int]] | None = None,
+    common_source_edges: list[list[int]] | None = None,
     role_patterns: list[str] | None = None,
     recurring_signals: list[str] | None = None,
     confidence_as_familiarity: float = 0.3,
@@ -44,7 +44,7 @@ def _proposal_dict(
         "vars": vars or [0],
         "contexts": contexts or [],
         "common_signatures": common_signatures or [],
-        "common_parents": common_parents or [],
+        "common_source_edges": common_source_edges or [],
         "role_patterns": role_patterns or [],
         "recurring_signals": recurring_signals or [],
         "confidence_as_familiarity": confidence_as_familiarity,
@@ -99,7 +99,7 @@ def test_load_proposals_skips_invalid_json():
 
 def test_load_proposals_skips_hidden_truth_rows():
     hidden = _proposal_dict("p_hidden")
-    hidden["truth_parents"] = {"0": [1, 2]}
+    hidden["truth_source_edges"] = {"0": [1, 2]}
     normal = _proposal_dict("p_normal", vars=[1])
     idx = _index_with(hidden, normal)
     assert idx.loaded_proposals_count == 1
@@ -119,7 +119,7 @@ def test_broad_generic_debt_marked_for_no_anchor_authority_debt():
         "p_broad", kind="authority_debt_family", vars=list(range(10)),
         contexts=[],
         common_signatures=[],
-        common_parents=[],
+        common_source_edges=[],
         role_patterns=["contested_best_available", "active_visible_conflict"],
     )
     idx = _index_with(p)
@@ -141,10 +141,10 @@ def test_authority_debt_with_context_not_broad():
     assert idx._proposals[0].broad_generic_debt is False
 
 
-def test_authority_debt_with_parents_not_broad():
+def test_authority_debt_with_source_edges_not_broad():
     p = _proposal_dict(
         "p_auth_local", kind="authority_debt_family", vars=[0],
-        common_parents=[[1, 2]],
+        common_source_edges=[[1, 2]],
     )
     idx = _index_with(p)
     assert idx._proposals[0].broad_generic_debt is False
@@ -216,7 +216,7 @@ def test_summarize_matches_by_kind():
 def test_summarize_matches_broad_generic_debt_count():
     broad = _proposal_dict(
         "p_broad", kind="authority_debt_family", vars=list(range(8)),
-        contexts=[], common_signatures=[], common_parents=[],
+        contexts=[], common_signatures=[], common_source_edges=[],
     )
     non_broad = _proposal_dict("p_ok", kind="trass_family", vars=[0])
     idx = _index_with(broad, non_broad)
@@ -250,7 +250,7 @@ def test_no_hidden_truth_manifest_read():
         _proposal_dict("p_normal", kind="trass_family", vars=[1]),
     ]
     proposals_with_truth[0]["debug_blind_challenge_manifest"] = {"secret": True}
-    proposals_with_truth[0]["truth_parents"] = {"0": [1, 2]}
+    proposals_with_truth[0]["truth_source_edges"] = {"0": [1, 2]}
 
     path = _make_jsonl(proposals_with_truth)
     idx = ScaffoldMemoryIndex()
@@ -278,7 +278,7 @@ def test_from_dict_loads_all_fields():
         "prop_test", kind="unresolved_family",
         vars=[3, 7], contexts=["ctx:x3"],
         common_signatures=["x3:MAX(1,2)"],
-        common_parents=[[1, 2]],
+        common_source_edges=[[1, 2]],
         role_patterns=["unresolved"],
         recurring_signals=["drift"],
         confidence_as_familiarity=0.45,
@@ -291,7 +291,7 @@ def test_from_dict_loads_all_fields():
     assert p.vars == [3, 7]
     assert "ctx:x3" in p.contexts
     assert p.common_signatures == ["x3:MAX(1,2)"]
-    assert p.common_parents == [[1, 2]]
+    assert p.common_source_edges == [[1, 2]]
     assert p.role_patterns == ["unresolved"]
     assert p.confidence_as_familiarity == 0.45
     assert p.authority_allowed is False
@@ -308,13 +308,13 @@ def test_from_dict_broad_generic_debt_detected():
     d = _proposal_dict(
         "p_broad", kind="authority_debt_family",
         vars=[0, 1, 2, 3, 4, 5, 6],
-        contexts=[], common_signatures=[], common_parents=[],
+        contexts=[], common_signatures=[], common_source_edges=[],
     )
     p = ScaffoldMemoryProposal.from_dict(d)
     assert p.broad_generic_debt is True
 
 
 def test_hidden_truth_fields_constant():
-    assert "truth_parents" in HIDDEN_TRUTH_LIKE_FIELDS
+    assert "truth_source_edges" in HIDDEN_TRUTH_LIKE_FIELDS
     assert "truth_func" in HIDDEN_TRUTH_LIKE_FIELDS
     assert "debug_blind_challenge_manifest" in HIDDEN_TRUTH_LIKE_FIELDS

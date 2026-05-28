@@ -6,7 +6,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().source_edges[2]
 sys.path.insert(0, str(ROOT))
 
 from dreth.learner.memory_sleep import (
@@ -19,7 +19,7 @@ from dreth.learner.memory_sleep import (
     _CRObs,
     _TempObs,
     _bg_anchor_key,
-    _parse_sig_parents,
+    _parse_sig_source_edges,
 )
 
 
@@ -32,7 +32,7 @@ def _bg_rec(
     context_keys: list[str] | None = None,
     source_roles: list[str] | None = None,
     fit_signatures: list[str] | None = None,
-    parent_sets: list[list[int]] | None = None,
+    source_edge_sets: list[list[int]] | None = None,
     recurring_signals: list[str] | None = None,
     cheap_recognition_score: float = 0.1,
     first_seen_cycle: int = 0,
@@ -46,7 +46,7 @@ def _bg_rec(
         "context_keys": context_keys or [],
         "source_roles": source_roles or ["unresolved"],
         "fit_signatures": fit_signatures or [],
-        "parent_sets": parent_sets or [],
+        "source_edge_sets": source_edge_sets or [],
         "operation_roles": [],
         "recurring_signals": recurring_signals or [],
         "first_seen_cycle": first_seen_cycle,
@@ -93,16 +93,16 @@ def _cr_rec(
     nethra_id: str = "var_fit:x0:MAX(1,2)",
     kind: str = "var_fit",
     target_var: int = 0,
-    learned_parents: list[int] | None = None,
+    learned_source_edges: list[int] | None = None,
     signature: str = "x0:MAX(1,2)",
 ) -> dict[str, Any]:
-    parents = learned_parents or [1, 2]
+    source_edges = learned_source_edges or [1, 2]
     return {
         "nethra_id": nethra_id,
         "kind": kind,
         "target_var": target_var,
-        "components": [target_var] + parents,
-        "learned_parents": parents,
+        "components": [target_var] + source_edges,
+        "learned_source_edges": source_edges,
         "learned_func": "MAX",
         "signature": signature,
         "first_seen_cycle": 0,
@@ -270,9 +270,9 @@ def test_sleep_consumes_experience_events_and_emits_proposal_only_product():
             "nethra_id": "h1",
             "seed": 1,
             "touched_atoms": ["x1"],
-            "touched_structure_refs": ["x0:MAX(1)", "parents:1"],
+            "touched_structure_refs": ["x0:MAX(1)", "source_edges:1"],
             "member_nethras": ["h1"],
-            "context_scope": "parent_candidates|x0|vis=2",
+            "context_scope": "source_edge_candidates|x0|vis=2",
             "use_right": "ranking_hint",
             "authority_allowed": False,
         },
@@ -281,10 +281,10 @@ def test_sleep_consumes_experience_events_and_emits_proposal_only_product():
             "run_id": "run-b",
             "seed": 1,
             "cycle": 5,
-            "context_key": "parent_candidates|x0|vis=2",
+            "context_key": "source_edge_candidates|x0|vis=2",
             "active_atoms": ["x0", "x1"],
             "active_nethras": ["h1"],
-            "hook": "parent_candidates",
+            "hook": "source_edge_candidates",
             "use_right": "ranking_hint",
             "candidates_before": [0, 1],
             "candidates_after": [1, 0],
@@ -298,13 +298,13 @@ def test_sleep_consumes_experience_events_and_emits_proposal_only_product():
     exp = c.extract_experience_events(rows)
     products = c.build_sleep_products(mem, exp)
     assert len(products) >= 1
-    product = next(p.to_dict() for p in products if "parents:1" in p.to_dict()["touched_structure_refs"])
+    product = next(p.to_dict() for p in products if "source_edges:1" in p.to_dict()["touched_structure_refs"])
     assert product["entry_kind"] == "sleep_product"
     assert product["authority_allowed"] is False
     assert product["proposed_use_right"] != "hard_filter"
     assert "h1" in product["member_nethras"]
     assert "x1" in product["touched_atoms"]
-    assert "parents:1" in product["touched_structure_refs"]
+    assert "source_edges:1" in product["touched_structure_refs"]
 
 
 def test_sleep_negative_gate_requires_visible_failure_association():
@@ -314,10 +314,10 @@ def test_sleep_negative_gate_requires_visible_failure_association():
         "run_id": "run-b",
         "seed": 1,
         "cycle": 5,
-        "context_key": "parent_candidates|x0|vis=2",
+        "context_key": "source_edge_candidates|x0|vis=2",
         "active_atoms": ["x0", "x1"],
         "active_nethras": ["h1"],
-        "hook": "parent_candidates",
+        "hook": "source_edge_candidates",
         "use_right": "ranking_hint",
         "failure_reason": "quality_regression",
         "hidden_truth_used": False,
@@ -338,8 +338,8 @@ def test_visible_background_records_produce_proposals():
     """Background records from multiple runs produce scaffold proposals."""
     c = _consolidator()
     rec = _bg_rec("frontier:x0:DIFF(5,8)", kind="unresolved_pattern", vars=[0],
-                  parent_sets=[[1, 8]], fit_signatures=["x0:MAX(1,8)"],
-                  context_keys=["tied_frontier|x0|vis=100|parents=1,8"])
+                  source_edge_sets=[[1, 8]], fit_signatures=["x0:MAX(1,8)"],
+                  context_keys=["tied_frontier|x0|vis=100|source_edges=1,8"])
     rows = [
         _row(seed=1, bg_records=[rec]),
         _row(seed=2, bg_records=[rec]),
@@ -357,7 +357,7 @@ def test_repeated_trass_records_group_together():
     """Same nethra_id with kind=trass_pattern seen in multiple runs → trass_family proposal."""
     c = _consolidator()
     rec = _bg_rec("n_trass", kind="trass_pattern", vars=[3],
-                  fit_signatures=["x3:LOW(1,2)"], parent_sets=[[1, 2]])
+                  fit_signatures=["x3:LOW(1,2)"], source_edge_sets=[[1, 2]])
     rows = [
         _row(seed=10, bg_records=[rec]),
         _row(seed=20, bg_records=[rec]),
@@ -370,20 +370,20 @@ def test_repeated_trass_records_group_together():
 
 
 def test_unresolved_groups_by_shared_var_not_kind_alone():
-    """Records sharing var+parent group together; records sharing only kind do not."""
+    """Records sharing var+source_edge group together; records sharing only kind do not."""
     c = _consolidator()
-    # Two records for var=0, parent=(1,8) — should group
+    # Two records for var=0, source_edge=(1,8) — should group
     rec_a = _bg_rec("frontier:x0:DIFF(5,8)", kind="unresolved_pattern", vars=[0],
-                    parent_sets=[[1, 8]])
+                    source_edge_sets=[[1, 8]])
     rec_b = _bg_rec("frontier:x0:DIFF(3,5)", kind="unresolved_pattern", vars=[0],
-                    parent_sets=[[1, 8]])
-    # One record for var=99, parent=(1,2) — different var, should be separate
+                    source_edge_sets=[[1, 8]])
+    # One record for var=99, source_edge=(1,2) — different var, should be separate
     rec_c = _bg_rec("frontier:x99:DIFF(1,2)", kind="unresolved_pattern", vars=[99],
-                    parent_sets=[[1, 2]])
+                    source_edge_sets=[[1, 2]])
     rows = [_row(seed=1, bg_records=[rec_a, rec_b, rec_c])]
     bg = c.extract_background_records(rows)
     proposals = c.build_proposals(bg, [], [], [], [], min_sources=2)
-    # The rec_a/rec_b group should produce a proposal for var=0, parents=(1,8)
+    # The rec_a/rec_b group should produce a proposal for var=0, source_edges=(1,8)
     var0_proposals = [p for p in proposals if 0 in p.vars and 99 not in p.vars]
     assert len(var0_proposals) >= 1
     # rec_c is alone with min_sources=2, so no proposal for var=99
@@ -396,7 +396,7 @@ def test_unresolved_alone_not_grouped_without_anchor():
     c = _consolidator()
     # Each record has a unique var — nothing shared beyond "unresolved"
     recs = [
-        _bg_rec(f"n_{v}", kind="unresolved_pattern", vars=[v], parent_sets=[[v + 10]])
+        _bg_rec(f"n_{v}", kind="unresolved_pattern", vars=[v], source_edge_sets=[[v + 10]])
         for v in range(5)
     ]
     rows = [_row(seed=1, bg_records=recs)]
@@ -427,11 +427,11 @@ def test_quarantined_authority_groups_with_local_anchors():
 
 
 def test_unrelated_records_remain_separate():
-    """Records with different vars and parents do not merge into one proposal."""
+    """Records with different vars and source_edges do not merge into one proposal."""
     c = _consolidator()
     recs = [
         _bg_rec(f"frontier:x{v}:DIFF(0,{v+1})", kind="unresolved_pattern",
-                vars=[v], parent_sets=[[v + 1]])
+                vars=[v], source_edge_sets=[[v + 1]])
         for v in range(4)
     ]
     rows = [_row(seed=1, bg_records=recs)]
@@ -490,7 +490,7 @@ def test_authority_allowed_count_is_always_zero():
     """All proposals must have authority_allowed=False."""
     c = _consolidator()
     recs = [
-        _bg_rec(f"n_{i}", kind="trass_pattern", vars=[i % 5], parent_sets=[[i + 1]])
+        _bg_rec(f"n_{i}", kind="trass_pattern", vars=[i % 5], source_edge_sets=[[i + 1]])
         for i in range(10)
     ]
     auth_recs = [_auth_rec(var=v) for v in range(5)]
@@ -516,25 +516,25 @@ def test_hidden_truth_fields_are_ignored():
     """Records with hidden-truth-like fields must not affect proposals."""
     c = _consolidator()
     # Add a hidden truth field to a row
-    rec = _bg_rec("n1", kind="trass_pattern", vars=[0], parent_sets=[[1]])
+    rec = _bg_rec("n1", kind="trass_pattern", vars=[0], source_edge_sets=[[1]])
     # Hidden field in the row (not in the bg record)
     row_with_hidden = _row(seed=1, bg_records=[rec],
-                           extra_fields={"truth_parents": {"0": [1, 2]}})
+                           extra_fields={"truth_source_edges": {"0": [1, 2]}})
     rows = [row_with_hidden, _row(seed=2, bg_records=[rec])]
     bg = c.extract_background_records(rows)
     proposals = c.build_proposals(bg, [], [], [], [], min_sources=2)
-    # Proposals should be generated but not reference truth_parents content
+    # Proposals should be generated but not reference truth_source_edges content
     summary = c.summarize(rows, bg, [], [], [], [], proposals)
-    assert "truth_parents" in summary.hidden_truth_fields_seen
+    assert "truth_source_edges" in summary.hidden_truth_fields_seen
     # The proposals themselves should not contain hidden truth data
     for p in proposals:
-        assert "truth" not in str(p.to_dict()).lower() or "truth_parents" not in str(p.to_dict())
+        assert "truth" not in str(p.to_dict()).lower() or "truth_source_edges" not in str(p.to_dict())
 
 
 def test_relation_type_not_used_in_proposals():
     """relation_type field in records is not used in proposals (posthoc off by default)."""
     c = _consolidator()
-    rec = _bg_rec("n1", kind="trass_pattern", vars=[0], parent_sets=[[1]])
+    rec = _bg_rec("n1", kind="trass_pattern", vars=[0], source_edge_sets=[[1]])
     # Embed a relation_type in the payload (simulating it being there)
     rec_with_rel = dict(rec)
     rec_with_rel["relation_type"] = "causal"
@@ -572,7 +572,7 @@ def test_proposals_contain_provenance_source_ids():
     """source_record_ids must be populated with actual identifiers."""
     c = _consolidator()
     rec = _bg_rec("frontier:x0:DIFF(5,8)", kind="unresolved_pattern", vars=[0],
-                  parent_sets=[[1, 8]])
+                  source_edge_sets=[[1, 8]])
     rows = [
         _row(seed=1, bg_records=[rec]),
         _row(seed=2, bg_records=[rec]),
@@ -624,7 +624,7 @@ def test_no_imports_from_agent():
 def test_cross_run_recurrence_seeds_and_runs_tracked():
     """Cross-run proposals record correct runs_seen and seeds_seen."""
     c = _consolidator()
-    rec = _bg_rec("n1", kind="trass_pattern", vars=[0], parent_sets=[[1]])
+    rec = _bg_rec("n1", kind="trass_pattern", vars=[0], source_edge_sets=[[1]])
     rows = [
         _row(seed=7, bg_records=[rec]),
         _row(seed=42, bg_records=[rec]),
@@ -642,7 +642,7 @@ def test_cross_run_recurrence_seeds_and_runs_tracked():
 def test_min_sources_parameter_filters_small_groups():
     """With min_sources=3, groups of 2 are not emitted."""
     c = _consolidator()
-    rec = _bg_rec("n1", kind="trass_pattern", vars=[0], parent_sets=[[1]])
+    rec = _bg_rec("n1", kind="trass_pattern", vars=[0], source_edge_sets=[[1]])
     rows = [
         _row(seed=1, bg_records=[rec]),
         _row(seed=2, bg_records=[rec]),  # only 2 observations
@@ -657,7 +657,7 @@ def test_max_proposals_bounded():
     """max_proposals caps the number of proposals emitted."""
     c = _consolidator()
     # 20 unique nethra_ids, each seen in 2 runs
-    recs = [_bg_rec(f"n_{i}", vars=[i], parent_sets=[[i + 1]]) for i in range(20)]
+    recs = [_bg_rec(f"n_{i}", vars=[i], source_edge_sets=[[i + 1]]) for i in range(20)]
     rows = [
         _row(seed=1, bg_records=recs),
         _row(seed=2, bg_records=recs),
@@ -687,11 +687,11 @@ def test_authority_debt_family_groups_same_state():
 
 
 def test_context_role_recurrence_groups_same_var_kind():
-    """Context-role records with same var+kind+parents group into context_role_recurrence."""
+    """Context-role records with same var+kind+source_edges group into context_role_recurrence."""
     c = _consolidator()
     cr_recs = [
         _cr_rec(f"var_fit:x0:MAX(1,2):run{i}", kind="var_fit", target_var=0,
-                learned_parents=[1, 2])
+                learned_source_edges=[1, 2])
         for i in range(3)
     ]
     rows = [
@@ -715,7 +715,7 @@ def test_scaffold_proposal_to_dict_serializable():
         vars=[0, 1],
         contexts=["ctx1"],
         common_signatures=["x0:MAX(1,2)"],
-        common_parents=[[1, 2]],
+        common_source_edges=[[1, 2]],
         role_patterns=["unresolved"],
         recurring_signals=[],
         recurrence_count=2,
@@ -742,7 +742,7 @@ def test_scaffold_proposal_to_dict_serializable():
 def test_summary_compression_ratio_greater_than_one_when_grouped():
     """compression_ratio > 1 when records compress into fewer proposals."""
     c = _consolidator()
-    rec = _bg_rec("n1", kind="trass_pattern", vars=[0], parent_sets=[[1]])
+    rec = _bg_rec("n1", kind="trass_pattern", vars=[0], source_edge_sets=[[1]])
     rows = [
         _row(seed=1, bg_records=[rec]),
         _row(seed=2, bg_records=[rec]),
@@ -779,9 +779,9 @@ def test_giant_proposal_not_marked_useful():
 def test_summarize_reports_proposal_by_kind():
     """MemorySleepSummary.proposals_by_kind has correct counts."""
     c = _consolidator()
-    trass_rec = _bg_rec("n_trass", kind="trass_pattern", vars=[0], parent_sets=[[1]])
-    unres_rec1 = _bg_rec("n_unres1", kind="unresolved_pattern", vars=[1], parent_sets=[[2]])
-    unres_rec2 = _bg_rec("n_unres2", kind="unresolved_pattern", vars=[1], parent_sets=[[2]])
+    trass_rec = _bg_rec("n_trass", kind="trass_pattern", vars=[0], source_edge_sets=[[1]])
+    unres_rec1 = _bg_rec("n_unres1", kind="unresolved_pattern", vars=[1], source_edge_sets=[[2]])
+    unres_rec2 = _bg_rec("n_unres2", kind="unresolved_pattern", vars=[1], source_edge_sets=[[2]])
     rows = [
         _row(seed=1, bg_records=[trass_rec, unres_rec1, unres_rec2]),
         _row(seed=2, bg_records=[trass_rec, unres_rec1]),
@@ -793,12 +793,12 @@ def test_summarize_reports_proposal_by_kind():
     assert len(summary.proposals) == len(proposals)
 
 
-def test_parse_sig_parents_extracts_correctly():
-    assert _parse_sig_parents("x0:MAX(1,8)") == frozenset({1, 8})
-    assert _parse_sig_parents("x3:LOW(4,5,6)") == frozenset({4, 5, 6})
-    assert _parse_sig_parents("x0:HIGH()") == frozenset()
-    assert _parse_sig_parents("invalid") == frozenset()
-    assert _parse_sig_parents("") == frozenset()
+def test_parse_sig_source_edges_extracts_correctly():
+    assert _parse_sig_source_edges("x0:MAX(1,8)") == frozenset({1, 8})
+    assert _parse_sig_source_edges("x3:LOW(4,5,6)") == frozenset({4, 5, 6})
+    assert _parse_sig_source_edges("x0:HIGH()") == frozenset()
+    assert _parse_sig_source_edges("invalid") == frozenset()
+    assert _parse_sig_source_edges("") == frozenset()
 
 
 def test_bg_anchor_key_excludes_giant():
@@ -813,16 +813,16 @@ def test_bg_anchor_key_excludes_no_var():
     assert _bg_anchor_key(no_var_rec) is None
 
 
-def test_bg_anchor_key_extracts_parent_from_signature():
-    rec = _bg_rec("n1", vars=[0], parent_sets=[], fit_signatures=["x0:MAX(1,8)"])
+def test_bg_anchor_key_extracts_source_edge_from_signature():
+    rec = _bg_rec("n1", vars=[0], source_edge_sets=[], fit_signatures=["x0:MAX(1,8)"])
     key = _bg_anchor_key(rec)
     assert key is not None
-    kind, vars_fs, parent_fs = key
-    assert parent_fs == frozenset({1, 8})
+    kind, vars_fs, source_edge_fs = key
+    assert source_edge_fs == frozenset({1, 8})
 
 
 def test_hidden_truth_like_fields_constant_is_correct():
-    assert "truth_parents" in HIDDEN_TRUTH_LIKE_FIELDS
+    assert "truth_source_edges" in HIDDEN_TRUTH_LIKE_FIELDS
     assert "truth_func" in HIDDEN_TRUTH_LIKE_FIELDS
     assert "debug_blind_challenge_manifest" in HIDDEN_TRUTH_LIKE_FIELDS
 
@@ -830,10 +830,10 @@ def test_hidden_truth_like_fields_constant_is_correct():
 def test_proposals_do_not_use_hidden_truth_fields():
     """Even if rows contain hidden truth fields in nested records, proposals ignore them."""
     c = _consolidator()
-    rec = _bg_rec("n1", kind="trass_pattern", vars=[0], parent_sets=[[1]])
+    rec = _bg_rec("n1", kind="trass_pattern", vars=[0], source_edge_sets=[[1]])
     # Inject truth fields into the background record itself
     rec_with_truth = dict(rec)
-    rec_with_truth["truth_parents"] = {"0": [1, 2]}
+    rec_with_truth["truth_source_edges"] = {"0": [1, 2]}
     rec_with_truth["truth_func"] = "MAX"
     rows = [
         _row(seed=1, bg_records=[rec_with_truth]),
@@ -845,7 +845,7 @@ def test_proposals_do_not_use_hidden_truth_fields():
     assert len(proposals) >= 1
     # Summary should detect and report the hidden truth fields
     summary = c.summarize(rows, bg, [], [], [], [], proposals)
-    assert "truth_parents" in summary.hidden_truth_fields_seen
+    assert "truth_source_edges" in summary.hidden_truth_fields_seen
     assert "truth_func" in summary.hidden_truth_fields_seen
     # authority_allowed must still be 0
     assert summary.authority_allowed_count == 0

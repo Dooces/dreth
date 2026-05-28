@@ -4,8 +4,8 @@ from __future__ import annotations
 # Runs the full audit for one variable. Everything here is morphology output.
 #
 # fit_var:
-#   1. Enumerates (parents, func) hypotheses — either restricted to
-#      tareth-certified available_parents, or full space if too few.
+#   1. Enumerates (source_edges, func) hypotheses — either restricted to
+#      tareth-certified available_source_edges, or full space if too few.
 #   2. Runs interventional probes, scores each hypothesis by how often its
 #      prediction matches the world's actual output within tolerance.
 #   3. Returns the best hypothesis plus diagnostics.
@@ -45,11 +45,11 @@ from __future__ import annotations
 #   requires a joint re-test. Local certification does not propagate upward.
 #
 # MORPHOLOGY ≠ CAUSE:
-#   Morphology (same parents, same operator, close scores) is structural —
+#   Morphology (same source_edges, same operator, close scores) is structural —
 #   readable from candidate shape with no interventions required.
 #   Cause (genuine equivalence, library gap, under-probing) requires
 #   separating probes and regime-survival evidence across distinct regimes.
-#   Pattern-matching on scores or parent structure is morphology, never cause.
+#   Pattern-matching on scores or source_edge structure is morphology, never cause.
 #
 # AMBIGUITY IS FIRST-CLASS: Insufficient evidence → TiedFrontier survives.
 #   Collapse requires regime-survival proof. Score proximity does not justify
@@ -70,25 +70,25 @@ from .world import CausalWorld
 from .ledger import values_match
 
 def predict_var(
-    parents: Tuple[int, ...], func: str,
+    source_edges: Tuple[int, ...], func: str,
     state: State, intervention_var: int, intervention_val: float,
     n_vars: int,
 ) -> float:
-    """Agent's prediction for `var` under (parents, func) when intervention
+    """Agent's prediction for `var` under (source_edges, func) when intervention
     forces `intervention_var` = `intervention_val`. Builds the forced state
-    tuple, extracts parent values, and applies the agent-side function.
+    tuple, extracts source_edge values, and applies the agent-side function.
     Returns NaN if `func` is not in the agent's library (defensive — the
     agent should never enumerate such hypotheses)."""
     if func not in FUNC_LIBRARY:
         return float("nan")
     forced = tuple(intervention_val if i == intervention_var else state[i]
                    for i in range(n_vars))
-    par_vals = [forced[p] for p in parents]
+    par_vals = [forced[p] for p in source_edges]
     return FUNC_LIBRARY[func](par_vals)
 
 
 def score_var_hypothesis(
-    var: int, parents: Tuple[int, ...], func: str,
+    var: int, source_edges: Tuple[int, ...], func: str,
     world: CausalWorld, interventions: Sequence[Tuple[int, float]],
     tolerance: float,
 ) -> int:
@@ -101,27 +101,27 @@ def score_var_hypothesis(
     for iv_var, iv_val in interventions:
         world.state = saved
         actual = world.predict_under_intervention(iv_var, iv_val)[var]
-        predicted = predict_var(parents, func, saved, iv_var, iv_val, world.visible_count)
+        predicted = predict_var(source_edges, func, saved, iv_var, iv_val, world.visible_count)
         if values_match(predicted, actual, tolerance):
             score += 1
     world.state = saved
     return score
 
 
-def enumerate_var_hypotheses(var: int, n_vars: int, max_parents: int = 2
+def enumerate_var_hypotheses(var: int, n_vars: int, max_source_edges: int = 2
                              ) -> List[Tuple[Tuple[int, ...], str]]:
-    """Generate the full hypothesis space for `var`: (parents_tuple, func_name)
+    """Generate the full hypothesis space for `var`: (source_edges_tuple, func_name)
     pairs. Includes:
       - 2 constant hypotheses: ((), LOW), ((), HIGH)
-      - n_vars - 1 single-parent FIRST hypotheses (each non-self var as parent)
-      - if max_parents >= 2: 5 functions × C(n_vars-1, 2) two-parent combinations
-    Used when restricted enumeration falls back (too few settled parents)
+      - n_vars - 1 single-source_edge FIRST hypotheses (each non-self var as source_edge)
+      - if max_source_edges >= 2: 5 functions × C(n_vars-1, 2) two-source_edge combinations
+    Used when restricted enumeration falls back (too few settled source_edges)
     and by sentinel selection."""
     out = [((), "LOW"), ((), "HIGH"), ((), "TINY")]
     for p in range(n_vars):
         if p == var: continue
         out.append(((p,), "FIRST"))
-    if max_parents >= 2:
+    if max_source_edges >= 2:
         for p1 in range(n_vars):
             if p1 == var: continue
             for p2 in range(p1+1, n_vars):
@@ -133,23 +133,23 @@ def enumerate_var_hypotheses(var: int, n_vars: int, max_parents: int = 2
 
 def enumerate_var_hypotheses_restricted(
     var: int,
-    available_parents: Set[int],
-    max_parents: int = 2,
+    available_source_edges: Set[int],
+    max_source_edges: int = 2,
 ) -> List[Tuple[Tuple[int, ...], str]]:
     """Restricted hypothesis enumeration — same shape as the full enumerator
-    but candidate parents drawn only from `available_parents`. Constants
-    (LOW/HIGH) are always included since they need no parents. This is the
-    main hypothesis-space reduction: only consider parents the framework
+    but candidate source_edges drawn only from `available_source_edges`. Constants
+    (LOW/HIGH) are always included since they need no source_edges. This is the
+    main hypothesis-space reduction: only consider source_edges the framework
     has already provisionally committed to.
-    Caller falls back to full enumeration if available_parents has < 2
-    candidates (insufficient to form 2-parent hypotheses)."""
+    Caller falls back to full enumeration if available_source_edges has < 2
+    candidates (insufficient to form 2-source_edge hypotheses)."""
     out: List[Tuple[Tuple[int, ...], str]] = [((), "LOW"), ((), "HIGH"), ((), "TINY")]
-    candidate_parents = sorted(p for p in available_parents if p != var)
-    for p in candidate_parents:
+    candidate_source_edges = sorted(p for p in available_source_edges if p != var)
+    for p in candidate_source_edges:
         out.append(((p,), "FIRST"))
-    if max_parents >= 2:
-        for i, p1 in enumerate(candidate_parents):
-            for p2 in candidate_parents[i+1:]:
+    if max_source_edges >= 2:
+        for i, p1 in enumerate(candidate_source_edges):
+            for p2 in candidate_source_edges[i+1:]:
                 for fn in ["MEAN", "MAX", "MIN", "PROD", "DIFF"]:
                     out.append(((p1, p2), fn))
     return out
@@ -157,35 +157,35 @@ def enumerate_var_hypotheses_restricted(
 
 # ── NUMPY-BATCHED FUNCTION EVALUATION ─────────────────────────────────────────
 
-def _func_apply_batch(func: str, parent_vals: np.ndarray) -> np.ndarray:
+def _func_apply_batch(func: str, source_edge_vals: np.ndarray) -> np.ndarray:
     """Vectorized version of FUNC_LIBRARY for hot-path scoring. Computes
-    `func` applied across N parent-value rows in one numpy call.
-    Input shape: (N, k) where k is parent count. Output: (N,).
+    `func` applied across N source_edge-value rows in one numpy call.
+    Input shape: (N, k) where k is source_edge count. Output: (N,).
     Strictly matches FUNC_LIBRARY — no SIN or hidden functions.
     Used by score_hypotheses_batched to score all hypotheses against
     all interventions in two outer loops with numpy in the middle."""
     if func == "LOW":
-        return np.full(parent_vals.shape[0], 0.2)
+        return np.full(source_edge_vals.shape[0], 0.2)
     if func == "HIGH":
-        return np.full(parent_vals.shape[0], 0.8)
+        return np.full(source_edge_vals.shape[0], 0.8)
     if func == "TINY":
-        return np.full(parent_vals.shape[0], 0.1)
-    if parent_vals.shape[1] == 0:
-        return np.zeros(parent_vals.shape[0])
+        return np.full(source_edge_vals.shape[0], 0.1)
+    if source_edge_vals.shape[1] == 0:
+        return np.zeros(source_edge_vals.shape[0])
     if func == "FIRST":
-        return parent_vals[:, 0]
+        return source_edge_vals[:, 0]
     if func == "MEAN":
-        return parent_vals.mean(axis=1)
+        return source_edge_vals.mean(axis=1)
     if func == "MAX":
-        return parent_vals.max(axis=1)
+        return source_edge_vals.max(axis=1)
     if func == "MIN":
-        return parent_vals.min(axis=1)
+        return source_edge_vals.min(axis=1)
     if func == "PROD":
-        return parent_vals.prod(axis=1)
+        return source_edge_vals.prod(axis=1)
     if func == "DIFF":
-        if parent_vals.shape[1] < 2:
-            return parent_vals[:, 0]
-        return np.abs(parent_vals[:, 0] - parent_vals[:, 1])
+        if source_edge_vals.shape[1] < 2:
+            return source_edge_vals[:, 0]
+        return np.abs(source_edge_vals[:, 0] - source_edge_vals[:, 1])
     raise ValueError(f"unknown agent func: {func}")
 
 
@@ -195,7 +195,7 @@ def score_hypotheses_batched(
     tolerance: float,
     return_preds: bool = False,
 ):
-    """Vectorized hypothesis scoring. For each (parents, func) hypothesis,
+    """Vectorized hypothesis scoring. For each (source_edges, func) hypothesis,
     counts how many of `interventions` produce predictions within tolerance
     of the world's actual output. Returns one int per hypothesis.
 
@@ -206,7 +206,7 @@ def score_hypotheses_batched(
 
     Implementation:
       1. Run each intervention probe once, record actual output and forced state
-      2. For each hypothesis, extract parent columns from forced states,
+      2. For each hypothesis, extract source_edge columns from forced states,
          apply func via _func_apply_batch, count |pred - actual| ≤ tol
     World state is restored after probes so the test is non-destructive.
     """
@@ -228,11 +228,11 @@ def score_hypotheses_batched(
     scores = np.empty(len(hypotheses), dtype=int)
     if return_preds:
         all_preds = np.empty((len(hypotheses), n_iv))
-    for h_idx, (parents, func) in enumerate(hypotheses):
-        if not parents:
+    for h_idx, (source_edges, func) in enumerate(hypotheses):
+        if not source_edges:
             par_vals = np.zeros((n_iv, 0))
         else:
-            par_vals = forced_states[:, list(parents)]
+            par_vals = forced_states[:, list(source_edges)]
         preds = _func_apply_batch(func, par_vals)
         scores[h_idx] = int(np.sum(np.abs(preds - actuals) <= tolerance))
         if return_preds:
@@ -254,16 +254,16 @@ def fit_var(
     var: int, world: CausalWorld, rng: random.Random,
     intervention_budget: int, tolerance: float,
     targeted: bool = True,
-    available_parents: Optional[Set[int]] = None,
+    available_source_edges: Optional[Set[int]] = None,
     diag: Optional[Dict[str, object]] = None,
     near_tie_margin: int = 0,
     forced_probes: Optional[Tuple[Tuple[int, float], ...]] = None,
 ) -> Tuple[Tuple[int, ...], str, int, int]:
-    """Find the best (parents, func) for one variable. Returns the tuple
-    (parents, func, best_score, second_best_score).
+    """Find the best (source_edges, func) for one variable. Returns the tuple
+    (source_edges, func, best_score, second_best_score).
 
     Steps:
-      1. Enumerate hypothesis space (restricted if available_parents is
+      1. Enumerate hypothesis space (restricted if available_source_edges is
          provided and large enough, else full).
       2. Build intervention pool. If targeted=True, generate 4×budget candidates,
          score each by hypothesis-discrimination (number of distinct
@@ -274,19 +274,19 @@ def fit_var(
       4. Return rank-1 hypothesis and its margin to rank-2.
 
     The `diag` dict is filled with diagnostic data (true rank, available
-    parents, restricted_used flag, scores, etc.) for offline analysis.
+    source_edges, restricted_used flag, scores, etc.) for offline analysis.
     Diagnostics never affect fit selection.
     """
     n_vars = world.visible_count
-    # Use unrestricted enumeration only when available_parents was not provided
+    # Use unrestricted enumeration only when available_source_edges was not provided
     # (legacy/no-constraint callers). An explicitly empty set means "no committed
-    # parents yet" → restrict to constants; do NOT fall back to the full n_vars²
+    # source_edges yet" → restrict to constants; do NOT fall back to the full n_vars²
     # hypothesis space which causes blowup when the agent is bootstrapping.
-    restricted_used = available_parents is not None
+    restricted_used = available_source_edges is not None
     if not restricted_used:
         hypotheses = enumerate_var_hypotheses(var, n_vars)
     else:
-        hypotheses = enumerate_var_hypotheses_restricted(var, available_parents)
+        hypotheses = enumerate_var_hypotheses_restricted(var, available_source_edges)
 
     # P1-B: forced_probes from TiedFrontier.separating_probes are guaranteed
     # inclusions — budget slots they consume are unavailable to the pool.
@@ -307,11 +307,11 @@ def fit_var(
         # For each hypothesis, predict at every pool state — shape (H, P)
         H = len(hypotheses)
         all_preds = np.empty((H, n_pool))
-        for h_idx, (parents, func) in enumerate(hypotheses):
-            if not parents:
+        for h_idx, (source_edges, func) in enumerate(hypotheses):
+            if not source_edges:
                 par_vals = np.zeros((n_pool, 0))
             else:
-                par_vals = forced_pool[:, list(parents)]
+                par_vals = forced_pool[:, list(source_edges)]
             all_preds[h_idx] = _func_apply_batch(func, par_vals)
         # Discrimination per pool entry: count distinct predictions within tolerance
         # (simple approach: number of unique values rounded to tolerance)
@@ -343,7 +343,7 @@ def fit_var(
     order = np.argsort(-scores)
     best_idx = int(order[0])
     second_idx = int(order[1]) if len(order) > 1 else best_idx
-    best_parents, best_func = hypotheses[best_idx]
+    best_source_edges, best_func = hypotheses[best_idx]
 
     # Tie set: all hypotheses scoring equal to the best
     best_score_val = int(scores[best_idx])
@@ -351,7 +351,7 @@ def fit_var(
     tie_set = frozenset(hypotheses[i] for i in tie_indices)
 
     # Near-tie constellation: all hypotheses within near_tie_margin of best.
-    # Stored as ((parents, func, score), ...) sorted by score desc so the
+    # Stored as ((source_edges, func, score), ...) sorted by score desc so the
     # agent can maintain TiedFrontier state across audits.
     near_tie_threshold = best_score_val - max(0, near_tie_margin)
     near_tie_candidates_out: Tuple = tuple(
@@ -362,8 +362,8 @@ def fit_var(
             key=lambda x: -x[2],
         )
     )
-    if available_parents is not None:
-        near_tie_context_key_out = hash(frozenset(available_parents))
+    if available_source_edges is not None:
+        near_tie_context_key_out = hash(frozenset(available_source_edges))
     else:
         near_tie_context_key_out = hash(frozenset(range(n_vars)))
 
@@ -386,7 +386,7 @@ def fit_var(
             "best_score": best_score,
             "second_score": second_score,
             "margin": margin,
-            "best_parents": tuple(best_parents),
+            "best_source_edges": tuple(best_source_edges),
             "best_func": best_func,
             "failure_class": failure_class,
             "probes": tuple(interventions),
@@ -397,6 +397,6 @@ def fit_var(
             "near_tie_context_key": near_tie_context_key_out,
         })
 
-    return (best_parents, best_func,
+    return (best_source_edges, best_func,
             int(scores[best_idx]),
             int(scores[second_idx]) if second_idx != best_idx else 0)

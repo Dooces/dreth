@@ -16,21 +16,21 @@ from typing import Any
 
 
 HIDDEN_TRUTH_LIKE_FIELDS: frozenset[str] = frozenset({
-    "truth_parents",
+    "truth_source_edges",
     "truth_func",
-    "truth_delayed_parents",
+    "truth_delayed_source_edges",
     "truth_latents",
     "debug_blind_challenge_manifest",
 })
 
 # An authority_debt_family proposal is broad_generic_debt when it has no
-# local structural anchors (no contexts, signatures, or parent sets).
+# local structural anchors (no contexts, signatures, or source_edge sets).
 # Such proposals group vars only by shared auth_state+reason, which is too
 # coarse to be useful as a runtime ranking or clustering anchor.
 _BROAD_DEBT_LOCAL_ANCHOR_REQUIRED: tuple[str, ...] = (
     "contexts",
     "common_signatures",
-    "common_parents",
+    "common_source_edges",
 )
 
 
@@ -51,7 +51,7 @@ class ScaffoldMemoryProposal:
     vars: list[int]
     contexts: list[str]
     common_signatures: list[str]
-    common_parents: list[list[int]]
+    common_source_edges: list[list[int]]
     role_patterns: list[str]
     recurring_signals: list[str]
     confidence_as_familiarity: float
@@ -81,12 +81,12 @@ class ScaffoldMemoryProposal:
                 contexts=[str(d.get("proposed_context_scope", ""))] if d.get("proposed_context_scope") else [],
                 common_signatures=[
                     str(r) for r in (d.get("touched_structure_refs") or [])
-                    if not str(r).startswith("parents:")
+                    if not str(r).startswith("source_edges:")
                 ],
-                common_parents=[
+                common_source_edges=[
                     [int(p) for p in str(r).split(":", 1)[1].split(",") if p.strip().isdigit()]
                     for r in (d.get("touched_structure_refs") or [])
-                    if str(r).startswith("parents:")
+                    if str(r).startswith("source_edges:")
                 ],
                 role_patterns=[],
                 recurring_signals=[str(d.get("reason", ""))] if d.get("reason") else [],
@@ -99,9 +99,9 @@ class ScaffoldMemoryProposal:
         vars_list = [int(v) for v in (d.get("vars") or [])]
         contexts = [str(c) for c in (d.get("contexts") or [])]
         signatures = [str(s) for s in (d.get("common_signatures") or [])]
-        parents = [
+        source_edges = [
             [int(p) for p in row]
-            for row in (d.get("common_parents") or [])
+            for row in (d.get("common_source_edges") or [])
             if row
         ]
         kind = str(d.get("kind", "unknown"))
@@ -110,7 +110,7 @@ class ScaffoldMemoryProposal:
             kind == "authority_debt_family"
             and not contexts
             and not signatures
-            and not parents
+            and not source_edges
         )
 
         return cls(
@@ -121,7 +121,7 @@ class ScaffoldMemoryProposal:
             vars=vars_list,
             contexts=contexts,
             common_signatures=signatures,
-            common_parents=parents,
+            common_source_edges=source_edges,
             role_patterns=[str(r) for r in (d.get("role_patterns") or [])],
             recurring_signals=[str(s) for s in (d.get("recurring_signals") or [])],
             confidence_as_familiarity=float(d.get("confidence_as_familiarity", 0.0)),

@@ -44,9 +44,9 @@ class CertEvent:
 
     repair_shape values (only meaningful when event_type == "repaired"):
       "stable"        — re-audit returned the same fit; no structural change
-      "parent_change" — re-audit returned different parent set
-      "func_change"   — re-audit returned different function, same parents
-      "full_change"   — both parents and function changed
+      "source_edge_change" — re-audit returned different source_edge set
+      "func_change"   — re-audit returned different function, same source_edges
+      "full_change"   — both source_edges and function changed
 
     cert_age: n.full_audits at time of event. Proxy for cert maturity.
     High cert_age = established cert; its failure is a stronger regime signal

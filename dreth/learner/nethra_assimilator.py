@@ -473,9 +473,9 @@ class NethraAssimilator:
                               internal_disp=InternalDisposition.CONTRADICTION_TO_ACCOUNT)
 
         # Split candidate: incompatible context.
-        # Triggers when the hook prefix differs (e.g. parent_candidates vs probe_hint),
+        # Triggers when the hook prefix differs (e.g. source_edge_candidates vs probe_hint),
         # OR when the same hook is used for a different specific target variable
-        # (e.g. parent_candidates|x7 vs parent_candidates|x2).
+        # (e.g. source_edge_candidates|x7 vs source_edge_candidates|x2).
         # Without the second clause, atom-only Jaccard would silently collapse
         # target-specific contexts that share atoms but serve different variables.
         _ctx_split = (

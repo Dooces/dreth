@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().source_edges[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 
@@ -97,9 +97,9 @@ def test_governance_ignores_truth_fields() -> None:
     item = _stable_item()
     item_with_truth = {
         **item,
-        "truth_parents": [1, 2, 3],
+        "truth_source_edges": [1, 2, 3],
         "truth_func": "HIDDEN_FUNC",
-        "truth_delayed_parents": [4],
+        "truth_delayed_source_edges": [4],
         "truth_latents": [5],
     }
     proposal_a = classify_governance_proposal(item)
@@ -109,7 +109,7 @@ def test_governance_ignores_truth_fields() -> None:
 
 
 def test_extract_signals_ignores_truth_fields() -> None:
-    item = _stable_item(truth_parents=[1, 2], truth_func="HIDDEN", truth_delayed_parents=[3])
+    item = _stable_item(truth_source_edges=[1, 2], truth_func="HIDDEN", truth_delayed_source_edges=[3])
     item_clean = {k: v for k, v in item.items() if "truth" not in k}
     sig_a = extract_uncertainty_signals(item)
     sig_b = extract_uncertainty_signals(item_clean)
@@ -122,9 +122,9 @@ def test_governance_module_does_not_reference_hidden_fields() -> None:
 
     source = inspect.getsource(mod)
     banned = [
-        '"truth_parents"',
+        '"truth_source_edges"',
         '"truth_func"',
-        '"truth_delayed_parents"',
+        '"truth_delayed_source_edges"',
         '"truth_latents"',
     ]
     # _external_mismatch_under_authority is permitted to reference them for
@@ -341,9 +341,9 @@ def test_evidence_supported_surrogate_remains_continue_best_available() -> None:
     even when hidden truth would show a mismatch (truth fields are ignored)."""
     item = _stable_item(
         # Hidden truth fields that the classifier must not read.
-        truth_parents=[1, 2],
+        truth_source_edges=[1, 2],
         truth_func="HIDDEN",
-        truth_delayed_parents=[3],
+        truth_delayed_source_edges=[3],
         truth_latents=[4],
     )
     proposal = classify_governance_proposal(item)
@@ -497,8 +497,8 @@ def test_signal_active_strings_include_all_active() -> None:
         route_certs=0,
         skip_role="tareth",
         recent_fit_history=[
-            {"best_parents": [0], "margin": 0},
-            {"best_parents": [1], "margin": 0},
+            {"best_source_edges": [0], "margin": 0},
+            {"best_source_edges": [1], "margin": 0},
         ],
     )
     signal = extract_uncertainty_signals(item)
@@ -520,7 +520,7 @@ def test_signal_active_strings_include_all_active() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_repeated_fit_churn_detected_when_parents_change() -> None:
+def test_repeated_fit_churn_detected_when_source_edges_change() -> None:
     item = _item(
         open_novelty=False,
         open_novelty_observations=0,
@@ -533,19 +533,19 @@ def test_repeated_fit_churn_detected_when_parents_change() -> None:
         alternatives_existed=False,
         frontier_active=False,
         recent_fit_history=[
-            {"best_parents": [0], "margin": 0},
-            {"best_parents": [1], "margin": 0},
+            {"best_source_edges": [0], "margin": 0},
+            {"best_source_edges": [1], "margin": 0},
         ],
     )
     signal = extract_uncertainty_signals(item)
     assert signal.repeated_fit_churn is True
 
 
-def test_repeated_fit_churn_not_detected_when_parents_stable() -> None:
+def test_repeated_fit_churn_not_detected_when_source_edges_stable() -> None:
     item = _item(
         recent_fit_history=[
-            {"best_parents": [2], "margin": 5},
-            {"best_parents": [2], "margin": 3},
+            {"best_source_edges": [2], "margin": 5},
+            {"best_source_edges": [2], "margin": 3},
         ],
     )
     signal = extract_uncertainty_signals(item)
@@ -554,7 +554,7 @@ def test_repeated_fit_churn_not_detected_when_parents_stable() -> None:
 
 def test_repeated_fit_churn_not_detected_with_single_entry() -> None:
     item = _item(
-        recent_fit_history=[{"best_parents": [0], "margin": 5}],
+        recent_fit_history=[{"best_source_edges": [0], "margin": 5}],
     )
     signal = extract_uncertainty_signals(item)
     assert signal.repeated_fit_churn is False
@@ -607,15 +607,15 @@ def test_build_governance_summary_by_relation_type() -> None:
 
 
 def test_build_governance_summary_caution_before_mismatch_uses_truth_post_hoc() -> None:
-    """caution_before_mismatch uses truth_parents only for case selection."""
+    """caution_before_mismatch uses truth_source_edges only for case selection."""
     # Item with a visible signal (sentinel failure) AND a hidden mismatch.
     item = _item(
         var=0,
         relation_type="delayed",
         authoritative=True,
-        truth_parents=[1],
-        truth_delayed_parents=[],
-        learned_parents=[2],
+        truth_source_edges=[1],
+        truth_delayed_source_edges=[],
+        learned_source_edges=[2],
         consecutive_sentinel_failures=1,
         recent_revocations=0,
         open_novelty=False,
@@ -632,20 +632,20 @@ def test_build_governance_summary_caution_before_mismatch_uses_truth_post_hoc() 
     assert len(summary.caution_before_mismatch) == 1
     case = summary.caution_before_mismatch[0]
     assert case["action"] == "increase_monitoring"
-    # Governance classifier must not have used truth_parents — verified by
+    # Governance classifier must not have used truth_source_edges — verified by
     # test_governance_ignores_truth_fields above; here we just confirm the
     # case made it into the right bucket.
 
 
 def test_build_governance_summary_supported_surrogate_uses_truth_post_hoc() -> None:
-    """supported_surrogate_cases uses truth_parents only for case selection."""
+    """supported_surrogate_cases uses truth_source_edges only for case selection."""
     item = _stable_item(
         var=0,
         relation_type="symbolic",
         authoritative=True,
-        truth_parents=[1],         # mismatch: learned=[] vs truth=[1]
-        truth_delayed_parents=[],
-        learned_parents=[],
+        truth_source_edges=[1],         # mismatch: learned=[] vs truth=[1]
+        truth_delayed_source_edges=[],
+        learned_source_edges=[],
     )
     summary = build_governance_summary([_row(item)])
     assert len(summary.supported_surrogate_cases) == 1

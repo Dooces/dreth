@@ -59,7 +59,7 @@ def make_tareth_world():
     Manually set state so analysis is exact."""
     rng = random.Random(0)
     world = CausalWorld(3, rng, noise_sigma=0.0)
-    world.parents = [[], [0], []]
+    world.source_edges = [[], [0], []]
     world.funcs   = ["LOW", "FIRST", "HIGH"]
     world.state   = (0.5, 0.5, 0.8)
     world.visible_count = 3
@@ -75,7 +75,7 @@ def make_prod_world():
     State forced to (0,0,0,0) to create false-trass condition."""
     rng = random.Random(0)
     world = CausalWorld(4, rng, noise_sigma=0.0)
-    world.parents = [[], [], [0, 1], [2]]
+    world.source_edges = [[], [], [0, 1], [2]]
     world.funcs   = ["LOW", "LOW", "PROD", "FIRST"]
     world.state   = (0.0, 0.0, 0.0, 0.0)
     world.visible_count = 4
@@ -89,7 +89,7 @@ def make_prod_world():
 # ── PROOF M1: tareth is exact ─────────────────────────────────────────────────
 
 def test_tareth_cert_changes_are_analytically_exact():
-    """Certifying x0 (parent of x1=FIRST(x0)) in a zero-noise world
+    """Certifying x0 (source_edge of x1=FIRST(x0)) in a zero-noise world
     must produce exactly 4 changes out of 5 trials.
 
     Derivation is in the module docstring.

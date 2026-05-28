@@ -5,7 +5,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().source_edges[1]
 sys.path.insert(0, str(ROOT))
 
 from dreth.nethra_memory_store import ExperienceEvent, NethraMemoryRecord, NethraMemoryStore
@@ -17,7 +17,7 @@ def _handle(
     atoms: list[str],
     *,
     use_right: str = "ranking_hint",
-    context: str = "parent_candidates|x0|vis=3",
+    context: str = "source_edge_candidates|x0|vis=3",
     success: int = 1,
     failure: int = 0,
     salience: float = 0.0,
@@ -36,7 +36,7 @@ def _handle(
         contexts=[context],
         nethra_id=record_id,
         touched_atoms=atoms,
-        touched_structure_refs=["x0:MAX(1,2)", "parents:1,2"],
+        touched_structure_refs=["x0:MAX(1,2)", "source_edges:1,2"],
         member_nethras=[record_id],
         context_scope=context,
         role_history=[{"role": "best_available", "cycle": 1}],
@@ -60,9 +60,9 @@ def test_record_mode_loads_and_records_matches_without_reordering():
     original = (1, 2)
     ranked = index.rank_candidates(
         var=0,
-        context_key="parent_candidates|x0|vis=3",
+        context_key="source_edge_candidates|x0|vis=3",
         candidates=original,
-        hook="parent_candidates",
+        hook="source_edge_candidates",
         cycle=10,
     )
     assert ranked == original
@@ -76,9 +76,9 @@ def test_assist_mode_reorders_using_ranking_hint():
     index.add_records([_handle("h2", ["x2"], salience=2.0)])
     ranked = index.rank_candidates(
         var=0,
-        context_key="parent_candidates|x0|vis=3",
+        context_key="source_edge_candidates|x0|vis=3",
         candidates=(1, 2),
-        hook="parent_candidates",
+        hook="source_edge_candidates",
         cycle=10,
     )
     # x2 is ranking_hint → candidate 2 moves to front
@@ -102,9 +102,9 @@ def test_sleep_hard_filter_is_rejected_on_load():
             "proposal_id": "sleep_bad",
             "member_nethras": ["h1"],
             "touched_atoms": ["x1"],
-            "touched_structure_refs": ["parents:1"],
+            "touched_structure_refs": ["source_edges:1"],
             "proposed_use_right": "hard_filter",
-            "proposed_context_scope": "parent_candidates|x0|vis=3",
+            "proposed_context_scope": "source_edge_candidates|x0|vis=3",
             "salience_delta": 1.0,
             "evidence_summary": "test",
             "invalidators": [],
@@ -125,10 +125,10 @@ def test_store_appends_and_reloads_experience_events():
             run_id="run-b",
             seed=2,
             cycle=3,
-            context_key="parent_candidates|x0|vis=3",
+            context_key="source_edge_candidates|x0|vis=3",
             active_atoms=["x0", "x2"],
             active_nethras=["h2"],
-            hook="parent_candidates",
+            hook="source_edge_candidates",
             use_right="ranking_hint",
             candidates_before=[1, 2],
             candidates_after=[2, 1],

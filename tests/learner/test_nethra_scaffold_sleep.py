@@ -6,7 +6,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().source_edges[2]
 sys.path.insert(0, str(ROOT))
 
 from dreth.learner.nethra_scaffold_sleep import (  # noqa: E402
@@ -26,7 +26,7 @@ def _bg_rec(
     contexts: list[str] | None = None,
     roles: list[str] | None = None,
     signatures: list[str] | None = None,
-    parents: list[list[int]] | None = None,
+    source_edges: list[list[int]] | None = None,
 ) -> dict[str, Any]:
     return {
         "nethra_id": nethra_id,
@@ -35,7 +35,7 @@ def _bg_rec(
         "context_keys": contexts or ["audit|x0|vis=100"],
         "source_roles": roles or ["best_available"],
         "fit_signatures": signatures or ["x0:MAX(1,2)"],
-        "parent_sets": parents if parents is not None else [[1, 2]],
+        "source_edge_sets": source_edges if source_edges is not None else [[1, 2]],
         "first_seen_cycle": 1,
         "last_seen_cycle": 3,
         "payload": {},
@@ -46,18 +46,18 @@ def _cr_node(
     nethra_id: str = "var_fit:x0:MAX(1,2)",
     *,
     var: int = 0,
-    parents: list[int] | None = None,
+    source_edges: list[int] | None = None,
     func: str = "MAX",
 ) -> dict[str, Any]:
-    parent_vals = parents or [1, 2]
+    source_edge_vals = source_edges or [1, 2]
     return {
         "nethra_id": nethra_id,
         "kind": "var_fit",
         "target_var": var,
-        "components": [var] + parent_vals,
-        "learned_parents": parent_vals,
+        "components": [var] + source_edge_vals,
+        "learned_source_edges": source_edge_vals,
         "learned_func": func,
-        "signature": f"x{var}:{func}({','.join(str(p) for p in parent_vals)})",
+        "signature": f"x{var}:{func}({','.join(str(p) for p in source_edge_vals)})",
         "first_seen_cycle": 1,
         "last_seen_cycle": 5,
     }
@@ -147,7 +147,7 @@ def test_trass_records_become_scaffold_role_entries_not_deletion():
             contexts=["skip|x1|vis=100"],
             roles=["trass"],
             signatures=["x1:LOW()"],
-            parents=[],
+            source_edges=[],
         )])
     ])
     assert summary.trass_records_seen > 0
@@ -159,8 +159,8 @@ def test_same_structure_can_have_tareth_and_trass_roles_in_different_contexts():
     nid = "var_fit:x2:FIRST(1)"
     _, nethras, maps, _, _, _ = _run_sleep([
         _row(bg=[
-            _bg_rec(nid, vars=[2], contexts=["audit|x2|vis=100"], roles=["tareth"], signatures=["x2:FIRST(1)"], parents=[[1]]),
-            _bg_rec(nid, vars=[2], contexts=["skip|x2|vis=100"], roles=["trass"], signatures=["x2:FIRST(1)"], parents=[[1]]),
+            _bg_rec(nid, vars=[2], contexts=["audit|x2|vis=100"], roles=["tareth"], signatures=["x2:FIRST(1)"], source_edges=[[1]]),
+            _bg_rec(nid, vars=[2], contexts=["skip|x2|vis=100"], roles=["trass"], signatures=["x2:FIRST(1)"], source_edges=[[1]]),
         ])
     ])
     scaffold = next(n for n in nethras if "x2:FIRST(1)" in n.signatures)
@@ -180,7 +180,7 @@ def test_background_records_contribute_to_scaffold_nethras():
             contexts=["uncertainty_cluster|vis=100"],
             roles=["background"],
             signatures=["x3:HIGH()"],
-            parents=[],
+            source_edges=[],
         )])
     ])
     assert summary.background_records_seen > 0
@@ -190,9 +190,9 @@ def test_background_records_contribute_to_scaffold_nethras():
 def test_unresolved_records_group_only_with_local_structural_anchors():
     _, nethras, _, _, _, _ = _run_sleep([
         _row(bg=[
-            _bg_rec("frontier:x0:MAX(1,2)", kind="unresolved_pattern", vars=[0], roles=["unresolved"], signatures=["x0:MAX(1,2)"], parents=[[1, 2]]),
-            _bg_rec("frontier:x0:PROD(1,2)", kind="unresolved_pattern", vars=[0], roles=["unresolved"], signatures=["x0:PROD(1,2)"], parents=[[1, 2]]),
-            _bg_rec("frontier:x9:LOW()", kind="unresolved_pattern", vars=[9], roles=["unresolved"], signatures=["x9:LOW()"], parents=[]),
+            _bg_rec("frontier:x0:MAX(1,2)", kind="unresolved_pattern", vars=[0], roles=["unresolved"], signatures=["x0:MAX(1,2)"], source_edges=[[1, 2]]),
+            _bg_rec("frontier:x0:PROD(1,2)", kind="unresolved_pattern", vars=[0], roles=["unresolved"], signatures=["x0:PROD(1,2)"], source_edges=[[1, 2]]),
+            _bg_rec("frontier:x9:LOW()", kind="unresolved_pattern", vars=[9], roles=["unresolved"], signatures=["x9:LOW()"], source_edges=[]),
         ])
     ])
     broad_unresolved = [
@@ -219,8 +219,8 @@ def test_broad_active_visible_conflict_does_not_define_useful_abstraction():
 def test_nethra_of_nethra_composition_created_from_shared_lower_structures():
     _, nethras, _, comps, _, _ = _run_sleep([
         _row(bg=[
-            _bg_rec("var_fit:x4:MAX(1,2)", vars=[4], signatures=["x4:MAX(1,2)"], parents=[[1, 2]]),
-            _bg_rec("var_fit:x5:MIN(1,2)", vars=[5], signatures=["x5:MIN(1,2)"], parents=[[1, 2]]),
+            _bg_rec("var_fit:x4:MAX(1,2)", vars=[4], signatures=["x4:MAX(1,2)"], source_edges=[[1, 2]]),
+            _bg_rec("var_fit:x5:MIN(1,2)", vars=[5], signatures=["x5:MIN(1,2)"], source_edges=[[1, 2]]),
         ])
     ])
     assert len(nethras) >= 2
@@ -244,15 +244,15 @@ def test_hidden_truth_debug_fields_are_ignored():
     hidden = _bg_rec(
         "var_fit:x0:MAX(1,2)",
         signatures=["x0:MAX(1,2)"],
-        parents=[[1, 2]],
+        source_edges=[[1, 2]],
     )
-    hidden["truth_parents"] = [99]
+    hidden["truth_source_edges"] = [99]
     hidden["payload"] = {"debug_blind_challenge_manifest": {"secret": True}, "truth_func": "LOW"}
     _, nethras, _, _, _, summary = _run_sleep([
         _row(bg=[hidden], extra={"truth_func": "LOW"})
     ])
     assert "truth_func" in summary.hidden_truth_fields_seen
-    assert "truth_parents" in summary.hidden_truth_fields_seen
+    assert "truth_source_edges" in summary.hidden_truth_fields_seen
     assert "debug_blind_challenge_manifest" in summary.hidden_truth_fields_seen
     assert "truth" not in json.dumps([n.to_dict() for n in nethras])
     assert "debug_blind_challenge_manifest" not in json.dumps([n.to_dict() for n in nethras])
@@ -277,7 +277,7 @@ def test_jsonl_writer_emits_all_record_types():
         source_types=["background_nethra"],
         vars=[0],
         signatures=["x0:HIGH()"],
-        parent_sets=[],
+        source_edge_sets=[],
         contexts=["audit|x0"],
         observed_roles=["best_available"],
         role_counts={"best_available": 1},
@@ -331,7 +331,7 @@ def test_previous_sleep_proposal_rows_are_visible_inputs():
         "vars": [0],
         "contexts": ["audit|x0|vis=100"],
         "common_signatures": ["x0:HIGH()"],
-        "common_parents": [],
+        "common_source_edges": [],
         "role_patterns": ["best_available"],
         "authority_allowed": True,
     }

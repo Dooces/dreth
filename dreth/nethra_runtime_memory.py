@@ -367,8 +367,8 @@ class PersistentNethraIndex:
                 touched_structure_refs=[
                     *(str(sig) for sig in (row.get("common_signatures") or [])),
                     *(
-                        "parents:" + ",".join(str(int(p)) for p in parents)
-                        for parents in (row.get("common_parents") or [])
+                        "source_edges:" + ",".join(str(int(p)) for p in source_edges)
+                        for source_edges in (row.get("common_source_edges") or [])
                     ),
                 ],
                 member_nethras=[str(n) for n in (row.get("source_record_ids") or [])],

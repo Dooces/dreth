@@ -4,7 +4,7 @@ from __future__ import annotations
 # The hidden causal world — the oracle the agent tests against.
 #
 # CausalWorld holds:
-#   - a random DAG (parent sets per variable)
+#   - a random DAG (source_edge sets per variable)
 #   - one operator per variable from HIDDEN_FUNC_LIBRARY
 #   - current continuous state
 #   - mutation history (never visible to the agent directly)
@@ -58,7 +58,7 @@ class CausalWorld:
     """The hidden ground-truth dynamical system the agent is trying to learn.
 
     Holds:
-      - A random DAG (each var has 0-2 parents from lower indices)
+      - A random DAG (each var has 0-2 source_edges from lower indices)
       - One function name per variable from HIDDEN_FUNC_LIBRARY
       - Current state (one float per variable)
       - History of all mutations applied (hidden_log)
@@ -78,10 +78,10 @@ class CausalWorld:
         self.n_vars = n_vars
         self.rng = rng
         self.noise_sigma = noise_sigma
-        self.parents: List[List[int]] = self._random_dag()
+        self.source_edges: List[List[int]] = self._random_dag()
         self.funcs: List[str] = []
         for i in range(n_vars):
-            if self.parents[i]:
+            if self.source_edges[i]:
                 self.funcs.append(rng.choice([k for k in FUNC_LIBRARY if k not in {"LOW", "HIGH"}]))
             else:
                 self.funcs.append(rng.choice(["LOW", "HIGH"]))
@@ -141,27 +141,27 @@ class CausalWorld:
         return m
 
     def _random_dag(self) -> List[List[int]]:
-        """Build a random DAG by giving each variable 0-2 parents drawn from
-        lower-indexed variables. Var 0 always has 0 parents (root). Subsequent
-        vars draw 0-min(2,i) parents from {0..i-1}. Ensures acyclic by
+        """Build a random DAG by giving each variable 0-2 source_edges drawn from
+        lower-indexed variables. Var 0 always has 0 source_edges (root). Subsequent
+        vars draw 0-min(2,i) source_edges from {0..i-1}. Ensures acyclic by
         construction."""
-        parents = []
+        source_edges = []
         for i in range(self.n_vars):
             n_par = 0 if i == 0 else self.rng.randint(0, min(2, i))
             par = sorted(self.rng.sample(range(i), n_par))
-            parents.append(par)
-        return parents
+            source_edges.append(par)
+        return source_edges
 
     def _step_world(self) -> None:
         """Advance state by one time step. Each variable's new value is
-        func(parent values from current state) + Gaussian noise, clipped to
+        func(source_edge values from current state) + Gaussian noise, clipped to
         [0,1]. Mutates self.state."""
         if self._blind_challenge_enabled:
             self._step_blind_challenge_world()
             return
         new = []
         for i in range(self.n_vars):
-            par_vals = [self.state[p] for p in self.parents[i]]
+            par_vals = [self.state[p] for p in self.source_edges[i]]
             v = HIDDEN_FUNC_LIBRARY[self.funcs[i]](par_vals)
             v += self.rng.gauss(0, self.noise_sigma)
             v = max(0.0, min(1.0, v))
@@ -179,7 +179,7 @@ class CausalWorld:
         forced = tuple(val if i == var else self.state[i] for i in range(self.n_vars))
         new = []
         for i in range(self.n_vars):
-            par_vals = [forced[p] for p in self.parents[i]]
+            par_vals = [forced[p] for p in self.source_edges[i]]
             v = HIDDEN_FUNC_LIBRARY[self.funcs[i]](par_vals)
             v += self.rng.gauss(0, self.noise_sigma)
             v = max(0.0, min(1.0, v))
@@ -195,7 +195,7 @@ class CausalWorld:
         forced_state = tuple(forced.get(i, self.state[i]) for i in range(self.n_vars))
         new = []
         for i in range(self.n_vars):
-            par_vals = [forced_state[p] for p in self.parents[i]]
+            par_vals = [forced_state[p] for p in self.source_edges[i]]
             v = HIDDEN_FUNC_LIBRARY[self.funcs[i]](par_vals)
             v += self.rng.gauss(0, self.noise_sigma)
             v = max(0.0, min(1.0, v))
@@ -207,7 +207,7 @@ class CausalWorld:
         to `iv_val`. Skips the full state recomputation that
         predict_under_intervention does.
 
-        Computes only O(|parents of target_var|) function/parent work instead
+        Computes only O(|source_edges of target_var|) function/source_edge work instead
         of predict_under_intervention's O(n_vars) full-state recomputation.
         It still consumes the same number of noise draws as the full path so
         repeated calls preserve the world's RNG stream.
@@ -219,11 +219,11 @@ class CausalWorld:
         if self._blind_challenge_enabled:
             return self._predict_blind_challenge({iv_var: iv_val})[target_var]
         if iv_var == target_var:
-            par_vals = [self.state[p] for p in self.parents[target_var]]
+            par_vals = [self.state[p] for p in self.source_edges[target_var]]
         else:
             par_vals = [
                 iv_val if p == iv_var else self.state[p]
-                for p in self.parents[target_var]
+                for p in self.source_edges[target_var]
             ]
         for _ in range(target_var):
             self.rng.gauss(0, self.noise_sigma)
@@ -246,12 +246,12 @@ class CausalWorld:
         self.hidden_log.append(m); return m
 
     def perturb_edge(self, cycle: int) -> HiddenMutation:
-        """Pick a non-root variable, modify its parent set: either drop a
-        current parent, swap one for a new candidate, or add a new parent.
-        Adjusts the function if needed (e.g., LOW/HIGH only for no-parent
+        """Pick a non-root variable, modify its source_edge set: either drop a
+        current source_edge, swap one for a new candidate, or add a new source_edge.
+        Adjusts the function if needed (e.g., LOW/HIGH only for no-source_edge
         case). Returns an EDGE mutation with rule_changed=True."""
         i = self.rng.randint(1, self.n_vars - 1)
-        old_par = list(self.parents[i])
+        old_par = list(self.source_edges[i])
         candidates = list(range(i))
         if not candidates: return self.perturb_value(cycle)
         target = self.rng.choice(candidates)
@@ -263,21 +263,21 @@ class CausalWorld:
                 new_par = sorted([p for p in old_par if p != drop] + [target])
             else:
                 new_par = sorted(old_par + [target])
-        self.parents[i] = new_par
+        self.source_edges[i] = new_par
         if not new_par:
             self.funcs[i] = self.rng.choice(["LOW", "HIGH"])
         elif self.funcs[i] in {"LOW", "HIGH"}:
             self.funcs[i] = self.rng.choice(["MEAN", "MAX", "MIN", "DIFF"])
-        m = HiddenMutation(cycle, "EDGE", f"EDGE x{i} parents: {old_par}→{new_par}", True, i)
+        m = HiddenMutation(cycle, "EDGE", f"EDGE x{i} source_edges: {old_par}→{new_par}", True, i)
         self.hidden_log.append(m); return m
 
     def perturb_func(self, cycle: int) -> HiddenMutation:
         """Pick a random variable, swap its function for a different one of
-        appropriate type (LOW/HIGH for no-parent, others for has-parent).
+        appropriate type (LOW/HIGH for no-source_edge, others for has-source_edge).
         Returns a FUNC mutation with rule_changed=True."""
         i = self.rng.randint(0, self.n_vars - 1)
         old = self.funcs[i]
-        if self.parents[i]:
+        if self.source_edges[i]:
             choices = [k for k in FUNC_LIBRARY if k != old and k not in {"LOW", "HIGH"}]
         else:
             choices = [k for k in ["LOW", "HIGH"] if k != old]
@@ -288,11 +288,11 @@ class CausalWorld:
 
     def introduce_sin(self, cycle: int) -> HiddenMutation:
         """Replace some variable's function with SIN (out-of-library). Picks
-        the first variable that has parents and isn't already SIN. Returns a
+        the first variable that has source_edges and isn't already SIN. Returns a
         NOVELTY mutation. Falls back to perturb_value if no eligible vars.
         Used to test vocabulary-novelty detection."""
         for i in range(self.n_vars):
-            if self.funcs[i] != "SIN" and len(self.parents[i]) >= 1:
+            if self.funcs[i] != "SIN" and len(self.source_edges[i]) >= 1:
                 old = self.funcs[i]
                 self.funcs[i] = "SIN"
                 m = HiddenMutation(cycle, "NOVELTY",
@@ -305,7 +305,7 @@ class CausalWorld:
         """Swap the function of a specific variable. Like perturb_func but
         targets a named var rather than picking at random."""
         old = self.funcs[var]
-        if self.parents[var]:
+        if self.source_edges[var]:
             choices = [k for k in FUNC_LIBRARY if k != old and k not in {"LOW", "HIGH"}]
         else:
             choices = [k for k in ["LOW", "HIGH"] if k != old]
@@ -330,8 +330,8 @@ class CausalWorld:
         at any tareth var downstream of T.
 
         Every shock_interval cycles (after settle), both xA and xB jump to HIGH
-        for one cycle. T spikes, triggering T's re-audit with parent_screen discovering
-        xA and xB as parents. They are woken from inert state, audited, and certified
+        for one cycle. T spikes, triggering T's re-audit with source_edge_screen discovering
+        xA and xB as source_edges. They are woken from inert state, audited, and certified
         trass. The proactive joint scan then detects the PROD(TINY,TINY) interaction
         and installs a CompositeNethra.
 
@@ -354,15 +354,15 @@ class CausalWorld:
         self._ft_shock_interval: int = shock_interval
         # Wire the false-trass subgraph
         self.funcs[self._ft_xA] = "TINY"
-        self.parents[self._ft_xA] = []
+        self.source_edges[self._ft_xA] = []
         self.funcs[self._ft_xB] = "TINY"
-        self.parents[self._ft_xB] = []
+        self.source_edges[self._ft_xB] = []
         self.funcs[self._ft_T] = "PROD"
-        self.parents[self._ft_T] = [self._ft_xA, self._ft_xB]
+        self.source_edges[self._ft_T] = [self._ft_xA, self._ft_xB]
         self.funcs[self._ft_C] = "FIRST"
-        self.parents[self._ft_C] = [self._ft_T]
+        self.source_edges[self._ft_C] = [self._ft_T]
         self.funcs[self._ft_D] = "MEAN"
-        self.parents[self._ft_D] = [self._ft_C]
+        self.source_edges[self._ft_D] = [self._ft_C]
         self._ft_shock_active: bool = False
         for _ in range(5):
             self._step_world()
@@ -397,18 +397,18 @@ class CausalWorld:
         self._rs_length: int = regime_length
         # Force both carriers to root constants with distinct steady-state values
         self.funcs[self._rs_carrier_a] = "LOW"
-        self.parents[self._rs_carrier_a] = []
+        self.source_edges[self._rs_carrier_a] = []
         self.funcs[self._rs_carrier_b] = "HIGH"
-        self.parents[self._rs_carrier_b] = []
+        self.source_edges[self._rs_carrier_b] = []
         # Wire all targets to carrier_a; collector depends on first two targets
         for t in self._rs_targets:
-            self.parents[t] = [self._rs_carrier_a]
+            self.source_edges[t] = [self._rs_carrier_a]
             self.funcs[t] = "MEAN"
         if self._rs_collector is not None:
-            self.parents[self._rs_collector] = [self._rs_targets[0], self._rs_targets[1]]
+            self.source_edges[self._rs_collector] = [self._rs_targets[0], self._rs_targets[1]]
             self.funcs[self._rs_collector] = "MEAN"
-        self._rs_parents_a: Dict[int, List[int]] = {t: [self._rs_carrier_a] for t in self._rs_targets}
-        self._rs_parents_b: Dict[int, List[int]] = {t: [self._rs_carrier_b] for t in self._rs_targets}
+        self._rs_source_edges_a: Dict[int, List[int]] = {t: [self._rs_carrier_a] for t in self._rs_targets}
+        self._rs_source_edges_b: Dict[int, List[int]] = {t: [self._rs_carrier_b] for t in self._rs_targets}
         for _ in range(5):
             self._step_world()
         self._rs_initialized: bool = True
@@ -461,32 +461,32 @@ class CausalWorld:
             lower = list(range(i))
             if not lower or self.rng.random() < 0.12:
                 rel_type = self.rng.choice(["symbolic", "latent_additive", "weak_noisy"])
-                parent_count = 0
+                source_edge_count = 0
             else:
                 rel_type = self.rng.choice(relation_types)
                 if rel_type == "dense_mixed" and len(lower) >= 3:
-                    parent_count = self.rng.randint(3, min(6, len(lower)))
+                    source_edge_count = self.rng.randint(3, min(6, len(lower)))
                 elif rel_type in {"delayed", "proxy_confounded"}:
-                    parent_count = self.rng.randint(1, min(4, len(lower)))
+                    source_edge_count = self.rng.randint(1, min(4, len(lower)))
                 else:
-                    parent_count = self.rng.randint(1, min(3, len(lower)))
-            parents = sorted(self.rng.sample(lower, parent_count)) if parent_count else []
+                    source_edge_count = self.rng.randint(1, min(3, len(lower)))
+            source_edges = sorted(self.rng.sample(lower, source_edge_count)) if source_edge_count else []
             latent_count = self.rng.randint(0, min(2, n_latents))
             if rel_type in {"latent_additive", "proxy_confounded"}:
                 latent_count = max(1, latent_count)
             latents = sorted(self.rng.sample(range(n_latents), latent_count)) if latent_count else []
-            weights = [round(self.rng.uniform(-1.2, 1.2), 6) for _ in parents]
+            weights = [round(self.rng.uniform(-1.2, 1.2), 6) for _ in source_edges]
             latent_weights = [round(self.rng.uniform(-0.8, 0.8), 6) for _ in latents]
             bias = round(self.rng.uniform(-0.35, 0.35), 6)
             gain = round(self.rng.uniform(0.65, 2.4), 6)
-            func = self.rng.choice(symbolic_funcs if parents else ["LOW", "HIGH", "TINY"])
+            func = self.rng.choice(symbolic_funcs if source_edges else ["LOW", "HIGH", "TINY"])
             delayed_edges = []
-            if parents and (rel_type == "delayed" or self.rng.random() < 0.22):
-                for pidx in self.rng.sample(parents, self.rng.randint(1, min(2, len(parents)))):
+            if source_edges and (rel_type == "delayed" or self.rng.random() < 0.22):
+                for pidx in self.rng.sample(source_edges, self.rng.randint(1, min(2, len(source_edges)))):
                     lag = self.rng.randint(1, 9)
                     max_lag = max(max_lag, lag)
                     delayed_edges.append({
-                        "parent": pidx,
+                        "source_edge": pidx,
                         "lag": lag,
                         "weight": round(self.rng.uniform(-1.0, 1.0), 6),
                     })
@@ -506,7 +506,7 @@ class CausalWorld:
             self._blind_specs.append({
                 "var": i,
                 "relation_type": rel_type,
-                "parents": parents,
+                "source_edges": source_edges,
                 "weights": weights,
                 "func": func,
                 "latents": latents,
@@ -516,7 +516,7 @@ class CausalWorld:
                 "delayed_edges": delayed_edges,
                 "phase": phase,
                 "noise_scale": noise_scale,
-                "agent_func_compatible": rel_type == "symbolic" and len(parents) <= 2,
+                "agent_func_compatible": rel_type == "symbolic" and len(source_edges) <= 2,
             })
 
         side_effect_count = self.rng.randint(max(1, n // 12), max(2, n // 5))
@@ -533,7 +533,7 @@ class CausalWorld:
                 "mode": self.rng.choice(["additive", "damped"]),
             })
 
-        self.parents = [list(spec["parents"]) for spec in self._blind_specs]
+        self.source_edges = [list(spec["source_edges"]) for spec in self._blind_specs]
         self.funcs = [
             spec["func"] if spec["relation_type"] == "symbolic" else spec["relation_type"].upper()
             for spec in self._blind_specs
@@ -570,10 +570,10 @@ class CausalWorld:
             values.append(max(0.0, min(1.0, raw)))
         return values
 
-    def _delayed_value(self, parent: int, lag: int, fallback: State) -> float:
+    def _delayed_value(self, source_edge: int, lag: int, fallback: State) -> float:
         if lag <= 0 or len(self._blind_history) < lag:
-            return fallback[parent]
-        return self._blind_history[-lag][parent]
+            return fallback[source_edge]
+        return self._blind_history[-lag][source_edge]
 
     def _eval_blind_spec(
         self,
@@ -582,8 +582,8 @@ class CausalWorld:
         latents: List[float],
         include_noise: bool,
     ) -> float:
-        parents = spec["parents"]
-        vals = [forced_state[p] for p in parents]
+        source_edges = spec["source_edges"]
+        vals = [forced_state[p] for p in source_edges]
         rel_type = spec["relation_type"]
         bias = float(spec["bias"])
         gain = float(spec["gain"])
@@ -612,13 +612,13 @@ class CausalWorld:
             drive = bias + latent_term
             for edge in spec["delayed_edges"]:
                 drive += float(edge["weight"]) * (
-                    self._delayed_value(edge["parent"], edge["lag"], forced_state) - 0.5
+                    self._delayed_value(edge["source_edge"], edge["lag"], forced_state) - 0.5
                 )
             drive += sum(float(w) * (v - 0.5) for w, v in zip(spec["weights"], vals))
             raw = 0.5 + 0.5 * math.tanh(gain * drive)
         elif rel_type == "proxy_confounded":
-            parent_term = sum(float(w) * v for w, v in zip(spec["weights"], vals))
-            raw = 0.35 + 0.35 * parent_term + 0.55 * latent_term + bias
+            source_edge_term = sum(float(w) * v for w, v in zip(spec["weights"], vals))
+            raw = 0.35 + 0.35 * source_edge_term + 0.55 * latent_term + bias
         elif rel_type == "dense_mixed":
             weighted = sum(float(w) * (v - 0.5) for w, v in zip(spec["weights"], vals))
             interaction = 0.0
@@ -632,7 +632,7 @@ class CausalWorld:
         for edge in spec["delayed_edges"]:
             if rel_type != "delayed":
                 raw += 0.08 * float(edge["weight"]) * (
-                    self._delayed_value(edge["parent"], edge["lag"], forced_state) - 0.5
+                    self._delayed_value(edge["source_edge"], edge["lag"], forced_state) - 0.5
                 )
         if include_noise:
             raw += self.rng.gauss(0.0, float(spec["noise_scale"]))
@@ -793,10 +793,10 @@ class CausalWorld:
             elapsed = cycle - self._rs_settle
             if elapsed % self._rs_length == 0:
                 self._rs_phase = 1 - self._rs_phase
-                new_parents = self._rs_parents_b if self._rs_phase == 1 else self._rs_parents_a
+                new_source_edges = self._rs_source_edges_b if self._rs_phase == 1 else self._rs_source_edges_a
                 carrier = self._rs_carrier_b if self._rs_phase == 1 else self._rs_carrier_a
-                for t, par in new_parents.items():
-                    self.parents[t] = par
+                for t, par in new_source_edges.items():
+                    self.source_edges[t] = par
                 phase_name = "B" if self._rs_phase == 1 else "A"
                 m = HiddenMutation(
                     cycle=cycle, kind="REGIME_SWITCH",

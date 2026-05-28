@@ -34,7 +34,7 @@ from rich.table import Table
 from rich.text import Text
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().source_edges[1]
 BATCH_RUN = ROOT / "scripts" / "batch_run.py"
 
 RUN_RE = re.compile(r"^\[\s*(?P<done>\d+)/(?P<total>\d+)\]\s*(?P<body>.*)$")

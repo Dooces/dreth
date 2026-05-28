@@ -256,14 +256,14 @@ def test_projection_index_gates_primary_projection_by_surface_role():
 
 
 def test_trass_surface_does_not_alter_primary_candidate_projection():
-    """Trass surface node is excluded from parent_candidates projection."""
+    """Trass surface node is excluded from source_edge_candidates projection."""
     pi = ProjectionIndex()
     node = make_node("n_trass2", atoms=["x2"], use_rights=["ranking_hint"])
     pi.index_node(node)
     pi._entries["n_trass2"].role_state = "trass"
 
-    result_parent = pi.query("x2", "", "parent_candidates")
-    assert not any(e.nethra_id == "n_trass2" for e in result_parent)
+    result_source_edge = pi.query("x2", "", "source_edge_candidates")
+    assert not any(e.nethra_id == "n_trass2" for e in result_source_edge)
 
     result_probe = pi.query("x2", "", "probe_hint")
     assert not any(e.nethra_id == "n_trass2" for e in result_probe)

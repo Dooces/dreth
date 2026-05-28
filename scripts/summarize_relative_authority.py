@@ -85,10 +85,10 @@ def load_jsonl(path: str) -> list[dict[str, Any]]:
 
 
 def policy_label(row: dict[str, Any]) -> str:
-    parent_ranker = row.get("parent_ranker")
+    source_edge_ranker = row.get("source_edge_ranker")
     probe_proposer = row.get("probe_proposer")
-    if parent_ranker is not None and probe_proposer is not None:
-        return f"{parent_ranker}/{probe_proposer}"
+    if source_edge_ranker is not None and probe_proposer is not None:
+        return f"{source_edge_ranker}/{probe_proposer}"
     return str(row.get("policy") or "unknown/unknown")
 
 
@@ -140,7 +140,7 @@ def compute_top_example_counts(rows: Iterable[dict[str, Any]]) -> Counter[str]:
 def _print_group_size(summaries: list[GroupSummary], out: TextIO) -> None:
     print("A. Mean graph size by schedule/policy:", file=out)
     print(
-        f"  {'schedule':<18} {'parent_ranker/probe_proposer':<34} "
+        f"  {'schedule':<18} {'source_edge_ranker/probe_proposer':<34} "
         f"{'runs':>4} {'avg_nodes':>10} {'avg_relations':>13} "
         f"{'avg_authority_records':>22}",
         file=out,
@@ -160,7 +160,7 @@ def _print_group_size(summaries: list[GroupSummary], out: TextIO) -> None:
 def _print_relation_distribution(summaries: list[GroupSummary], out: TextIO) -> None:
     print("\nB. Relation type distribution by schedule/policy:", file=out)
     print(
-        f"  {'schedule':<18} {'parent_ranker/probe_proposer':<34} "
+        f"  {'schedule':<18} {'source_edge_ranker/probe_proposer':<34} "
         + " ".join(f"{name:>18}" for name in RELATION_TYPES),
         file=out,
     )
@@ -192,7 +192,7 @@ def _print_density(
 ) -> None:
     print(f"\n{title}", file=out)
     print(
-        f"  {'schedule':<18} {'parent_ranker/probe_proposer':<34} "
+        f"  {'schedule':<18} {'source_edge_ranker/probe_proposer':<34} "
         f"{column_name:>18}",
         file=out,
     )

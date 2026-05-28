@@ -30,7 +30,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().source_edges[1]
 sys.path.insert(0, str(ROOT))
 
 from dreth.memory_sleep import MemorySleepConsolidator, MemorySleepSummary, ScaffoldProposal
@@ -121,7 +121,7 @@ def _fmt_summary(summary: MemorySleepSummary, posthoc: bool = False) -> str:
         lines.append(f"       vars={p.vars[:10]}")
         lines.append(f"       contexts={p.contexts[:3]}")
         lines.append(f"       signatures={p.common_signatures[:3]}")
-        lines.append(f"       parents={p.common_parents[:3]}")
+        lines.append(f"       source_edges={p.common_source_edges[:3]}")
         lines.append(f"       role_patterns={p.role_patterns[:4]}")
         lines.append(f"       source_kinds={p.source_kinds[:3]}")
         lines.append(f"       source_ids (sample)={p.source_record_ids[:3]}")
@@ -233,7 +233,7 @@ def main() -> None:
 
     # Write proposals JSONL
     out_path = Path(args.out)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.source_edge.mkdir(source_edges=True, exist_ok=True)
     with open(out_path, 'w') as fh:
         for prop in proposals:
             fh.write(json.dumps(prop.to_dict()) + "\n")
@@ -246,7 +246,7 @@ def main() -> None:
 
     # Write summary TXT
     summary_path = Path(args.summary)
-    summary_path.parent.mkdir(parents=True, exist_ok=True)
+    summary_path.source_edge.mkdir(source_edges=True, exist_ok=True)
     summary_text = _fmt_summary(summary, posthoc=args.posthoc_relation_type_report)
     with open(summary_path, 'w') as fh:
         fh.write(summary_text + "\n")

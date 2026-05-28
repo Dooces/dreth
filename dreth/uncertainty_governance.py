@@ -9,8 +9,8 @@ evidence. No hidden truth is used by the classifier.
 INVARIANTS (enforced by design, not runtime):
   - Diagnostic only. No effect on agent behavior, cert issuance, skip logic,
     fit, sentinels, route certs, authority records, or defaults.
-  - Classification uses agent-visible evidence fields only. truth_parents,
-    truth_func, truth_delayed_parents, truth_latents, and all other hidden-world
+  - Classification uses agent-visible evidence fields only. truth_source_edges,
+    truth_func, truth_delayed_source_edges, truth_latents, and all other hidden-world
     fields are never read by this module.
   - Never imported by agent.py, ChainedAgent, or any runtime path.
   - Proposals are NOT correct actions. They are shadow governance proposals only.
@@ -59,10 +59,10 @@ def _compute_repeated_fit_churn(item: dict[str, Any]) -> bool:
     history = item.get("recent_fit_history") or []
     if len(history) < 2:
         return False
-    # Churn: best_parents changed between the last two fit entries.
-    last_parents = tuple(sorted(history[-1].get("best_parents") or []))
-    prev_parents = tuple(sorted(history[-2].get("best_parents") or []))
-    return last_parents != prev_parents
+    # Churn: best_source_edges changed between the last two fit entries.
+    last_source_edges = tuple(sorted(history[-1].get("best_source_edges") or []))
+    prev_source_edges = tuple(sorted(history[-2].get("best_source_edges") or []))
+    return last_source_edges != prev_source_edges
 
 
 def _consequence_tier(item: dict[str, Any]) -> str:
@@ -162,7 +162,7 @@ class UncertaintyGovernanceSummary:
     action_counts: Counter[str] = field(default_factory=Counter)
     by_relation_type: dict[str, Counter[str]] = field(default_factory=dict)
     # Cases where governance proposed caution and there was an external mismatch.
-    # truth_parents / truth_func are used here ONLY for post-hoc case selection;
+    # truth_source_edges / truth_func are used here ONLY for post-hoc case selection;
     # the governance classifier itself never reads them.
     caution_before_mismatch: list[dict[str, Any]] = field(default_factory=list)
     # Cases where governance proposed continue_best_available despite external mismatch.
@@ -172,8 +172,8 @@ class UncertaintyGovernanceSummary:
 def extract_uncertainty_signals(item: dict[str, Any]) -> UncertaintySignal:
     """Extract observable uncertainty signals from a per_var evidence item.
 
-    Reads only agent-visible fields. Never reads truth_parents, truth_func,
-    truth_delayed_parents, truth_latents, or any other hidden-world field.
+    Reads only agent-visible fields. Never reads truth_source_edges, truth_func,
+    truth_delayed_source_edges, truth_latents, or any other hidden-world field.
     """
     open_novelty = (
         bool(item.get("open_novelty"))
@@ -229,7 +229,7 @@ def classify_governance_proposal(item: dict[str, Any]) -> UncertaintyGovernanceP
     """Classify one per_var item into a shadow governance proposal.
 
     Priority order ensures the most urgent signal drives the proposal.
-    Never reads truth_parents, truth_func, or any hidden-world field.
+    Never reads truth_source_edges, truth_func, or any hidden-world field.
     """
     var = _as_int(item.get("var", 0))
     signal = extract_uncertainty_signals(item)
@@ -369,14 +369,14 @@ def classify_governance_proposal(item: dict[str, Any]) -> UncertaintyGovernanceP
 def _external_mismatch_under_authority(item: dict[str, Any]) -> bool:
     """Post-hoc selection: was this var authoritative and externally mismatched?
 
-    truth_parents / truth_func are used ONLY here for case selection. The
+    truth_source_edges / truth_func are used ONLY here for case selection. The
     governance classifier (classify_governance_proposal) never calls this.
     """
     if not bool(item.get("authoritative")):
         return False
-    learned = {_as_int(v) for v in item.get("learned_parents") or []}
-    truth = {_as_int(v) for v in item.get("truth_parents") or []}
-    truth.update(_as_int(v) for v in item.get("truth_delayed_parents") or [])
+    learned = {_as_int(v) for v in item.get("learned_source_edges") or []}
+    truth = {_as_int(v) for v in item.get("truth_source_edges") or []}
+    truth.update(_as_int(v) for v in item.get("truth_delayed_source_edges") or [])
     if truth:
         return learned != truth
     if learned:
@@ -392,7 +392,7 @@ def build_governance_summary(
     """Build an UncertaintyGovernanceSummary from blind_challenge JSONL rows.
 
     Iterates over all per_var items across all rows. Governance proposals are
-    classified using only agent-visible fields. truth_parents / truth_func are
+    classified using only agent-visible fields. truth_source_edges / truth_func are
     used post-hoc only to select caution_before_mismatch and
     supported_surrogate_cases for the report.
     """

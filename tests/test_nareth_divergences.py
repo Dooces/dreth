@@ -41,9 +41,9 @@ Tests:
         flagged untested. Currently no invalidation fires.
 
   Q7  — SKIP_PROXY_NOT_CONSERVATIVE
-        A var that is skip-trass must not be excluded from available_parents
+        A var that is skip-trass must not be excluded from available_source_edges
         solely on that basis. Route relevance is a different operation.
-        Currently available_parents requires tareth-for-skip.
+        Currently available_source_edges requires tareth-for-skip.
 """
 
 import dataclasses
@@ -357,33 +357,33 @@ def test_live_frontier_cert_scope_matches_tested_targets():
     )
 
 
-# ── Q7: skip-trass var must not be excluded from available_parents ────────────
+# ── Q7: skip-trass var must not be excluded from available_source_edges ────────────
 
-def test_skip_trass_var_not_excluded_from_available_parents():
+def test_skip_trass_var_not_excluded_from_available_source_edges():
     """
-    NARETH DIVERGENCE Q7 — available_parents must not exclude a var solely because
+    NARETH DIVERGENCE Q7 — available_source_edges must not exclude a var solely because
     its skip cert is trass. Route relevance is a different operation.
 
     Invariant: tareth-for-skip (perturbing this var propagates to monitored targets)
     is NOT the same as tareth-for-route (which hypothesis we use for this var changes
     the audit decision). A var can be skip-trass (below tolerance; doesn't propagate
-    under current regime) yet still be the true causal parent of another var. Excluding
-    it from available_parents means that parent is never in the hypothesis space — the
+    under current regime) yet still be the true causal source_edge of another var. Excluding
+    it from available_source_edges means that source_edge is never in the hypothesis space — the
     audit can never find the correct fit for the dependent variable.
 
-    The proxy is not conservative: it can miss route-relevant parents that happen to be
+    The proxy is not conservative: it can miss route-relevant source_edges that happen to be
     skip-trass under the current monitored target regime.
 
-    Current failure: _full_audit_var builds available_parents as:
+    Current failure: _full_audit_var builds available_source_edges as:
         role_for("skip") == "tareth"
-    Any var with a trass skip cert is excluded regardless of whether it is a true parent.
+    Any var with a trass skip cert is excluded regardless of whether it is a true source_edge.
 
     Seed/setup: seed=0, n_vars=10, 200 cycles reliably finds x3 (tareth) with
-    parent x2 (tareth). We demote x2's cert to trass to simulate the bug.
+    source_edge x2 (tareth). We demote x2's cert to trass to simulate the bug.
 
     Fix: gate on role_for("route") == "tareth" at instance level. Absent instance-level
     route certs, at minimum do not exclude skip-trass vars that are structurally present
-    as parents of the var under audit.
+    as source_edges of the var under audit.
     """
     rng = random.Random(0)
     world = CausalWorld(10, rng, noise_sigma=0.05)
@@ -393,37 +393,37 @@ def test_skip_trass_var_not_excluded_from_available_parents():
                          priority_audit_budget=10)
     run_cycles(agent, world, 200)
 
-    # Find a tareth child with a tareth parent
+    # Find a tareth child with a tareth source_edge
     chosen_child = None
-    chosen_parent = None
+    chosen_source_edge = None
     for v, n in agent.ledger.vars.items():
-        if v >= world.visible_count or not n.parents:
+        if v >= world.visible_count or not n.source_edges:
             continue
         if n.role_for("skip") != "tareth":
             continue
-        for p in n.parents:
+        for p in n.source_edges:
             if p >= world.visible_count:
                 continue
             pn = agent.ledger.vars[p]
             if pn.role_for("skip") == "tareth" and pn.status in ("certified", "proposed"):
                 chosen_child = v
-                chosen_parent = p
+                chosen_source_edge = p
                 break
         if chosen_child is not None:
             break
 
     if chosen_child is None:
-        pytest.skip("Could not find a tareth child with a tareth parent after 200 cycles")
+        pytest.skip("Could not find a tareth child with a tareth source_edge after 200 cycles")
 
-    # Demote the parent's skip cert to trass (simulating a regime where it fell below
-    # tolerance, but it remains the structural parent)
-    pn = agent.ledger.vars[chosen_parent]
+    # Demote the source_edge's skip cert to trass (simulating a regime where it fell below
+    # tolerance, but it remains the structural source_edge)
+    pn = agent.ledger.vars[chosen_source_edge]
     pn.certificates["skip"] = dataclasses.replace(
         pn.certificates["skip"], role="trass", authority="none"
     )
     assert pn.role_for("skip") == "trass"
 
-    # Reconstruct available_parents the same way _full_audit_var does after Q7 fix
+    # Reconstruct available_source_edges the same way _full_audit_var does after Q7 fix
     available = {
         other_var for other_var, other_n in agent.ledger.vars.items()
         if other_var != chosen_child
@@ -434,15 +434,15 @@ def test_skip_trass_var_not_excluded_from_available_parents():
         )
     }
 
-    # SHOULD: chosen_parent is a true causal parent of chosen_child and must be
-    # in available_parents regardless of its skip cert. Route relevance != skip relevance.
-    assert chosen_parent in available, (
-        f"x{chosen_parent} is a true parent of x{chosen_child} but was excluded from "
-        f"available_parents because role_for('skip')=='trass'. "
+    # SHOULD: chosen_source_edge is a true causal source_edge of chosen_child and must be
+    # in available_source_edges regardless of its skip cert. Route relevance != skip relevance.
+    assert chosen_source_edge in available, (
+        f"x{chosen_source_edge} is a true source_edge of x{chosen_child} but was excluded from "
+        f"available_source_edges because role_for('skip')=='trass'. "
         f"The skip proxy is not conservative — tareth-for-skip ≠ tareth-for-route. "
-        f"Fix: gate available_parents on role_for('route')=='tareth' at instance level; "
+        f"Fix: gate available_source_edges on role_for('route')=='tareth' at instance level; "
         f"until instance route certs exist, do not exclude skip-trass vars that are "
-        f"structural parents of the var under audit."
+        f"structural source_edges of the var under audit."
     )
 
 
@@ -455,7 +455,7 @@ if __name__ == "__main__":
         ("Q3:  compression cert", test_promoted_compression_issues_nareth_cert),
         ("Q5:  tareth witness stored", test_tareth_cert_stores_certifying_witness),
         ("Q6:  live-frontier cert scope / invalidation", test_live_frontier_cert_scope_matches_tested_targets),
-        ("Q7:  skip proxy not conservative", test_skip_trass_var_not_excluded_from_available_parents),
+        ("Q7:  skip proxy not conservative", test_skip_trass_var_not_excluded_from_available_source_edges),
     ]
     for label, fn in tests:
         try:

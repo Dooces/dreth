@@ -22,7 +22,7 @@ def make_agent(n_vars=4):
     for nethra in agent.ledger.vars.values():
         nethra.certificates["skip"] = NethraCertificate(
             operation="skip", role="tareth", authority="none",
-            context_parents=(), context_visible=n_vars, context_cycle=0,
+            context_source_edges=(), context_visible=n_vars, context_cycle=0,
             targets=(), substitutions_tested=("test_setup",), changes=1, trials=1,
             earned_by="manual_bootstrap",
         )
@@ -30,16 +30,16 @@ def make_agent(n_vars=4):
     return agent
 
 
-def make_diag(var, parents, func, tie_set):
+def make_diag(var, source_edges, func, tie_set):
     return FitDiagnostic(
         cycle=10,
         var=var,
         status_before="certified",
         role_before="tareth",
-        available_parents=(),
+        available_source_edges=(),
         restricted=False,
         hypothesis_count=len(tie_set),
-        true_parents=parents,
+        true_source_edges=source_edges,
         true_func=func,
         true_present=True,
         true_rank=1,
@@ -47,21 +47,21 @@ def make_diag(var, parents, func, tie_set):
         best_score=10,
         second_score=10,
         margin=0,
-        best_parents=parents,
+        best_source_edges=source_edges,
         best_func=func,
         failure_class="fit_with_ties" if len(tie_set) > 1 else "fit_clean",
         tie_set=frozenset(tie_set),
     )
 
 
-def seed_fit(agent, var, parents=(0, 1), func="MEAN"):
+def seed_fit(agent, var, source_edges=(0, 1), func="MEAN"):
     n = agent.ledger.vars[var]
-    n.parents = tuple(parents)
+    n.source_edges = tuple(source_edges)
     n.func = func
     n.status = "certified"
     n.certificates["skip"] = NethraCertificate(
         operation="skip", role="tareth", authority="none",
-        context_parents=tuple(parents), context_visible=4, context_cycle=0,
+        context_source_edges=tuple(source_edges), context_visible=4, context_cycle=0,
         targets=(), substitutions_tested=("test_setup",), changes=1, trials=1,
         earned_by="manual_bootstrap",
     )
@@ -70,7 +70,7 @@ def seed_fit(agent, var, parents=(0, 1), func="MEAN"):
     n.expected_outcomes = [0.5, 0.5]
     n.compressions = [
         Compression(
-            gate=((parents[0], 0.25, 0.1),) if parents else (),
+            gate=((source_edges[0], 0.25, 0.1),) if source_edges else (),
             simplified_value=0.5,
             certified_equivalence=3,
             discovery_cycle=3,
@@ -118,7 +118,7 @@ class FitTransitionBoundaryTests(unittest.TestCase):
         self.assertTrue(sig_changed)
         self.assert_prior_state_cleared(agent.ledger.vars[2])
 
-    def test_t2_tied_same_parent_churn_preserves_varnethra_state(self):
+    def test_t2_tied_same_source_edge_churn_preserves_varnethra_state(self):
         agent = make_agent()
         seed_fit(agent, 2, (0, 1), "MEAN")
         tie_set = {((0, 1), "MEAN"), ((0, 1), "MAX")}
@@ -128,36 +128,36 @@ class FitTransitionBoundaryTests(unittest.TestCase):
 
         self.assertFalse(
             sig_changed,
-            "operator-only tied churn with identical parents is not semantic drift",
+            "operator-only tied churn with identical source_edges is not semantic drift",
         )
         self.assert_prior_state_preserved(agent.ledger.vars[2])
 
-    def test_t3_tied_parent_or_arity_churn_still_gets_full_reset(self):
-        for new_parents, new_func in [((1, 3), "MAX"), ((0,), "FIRST")]:
-            with self.subTest(new_parents=new_parents, new_func=new_func):
+    def test_t3_tied_source_edge_or_arity_churn_still_gets_full_reset(self):
+        for new_source_edges, new_func in [((1, 3), "MAX"), ((0,), "FIRST")]:
+            with self.subTest(new_source_edges=new_source_edges, new_func=new_func):
                 agent = make_agent()
                 seed_fit(agent, 2, (0, 1), "MEAN")
-                tie_set = {((0, 1), "MEAN"), (tuple(new_parents), new_func)}
-                agent._last_fit_diag = make_diag(2, tuple(new_parents), new_func, tie_set)
+                tie_set = {((0, 1), "MEAN"), (tuple(new_source_edges), new_func)}
+                agent._last_fit_diag = make_diag(2, tuple(new_source_edges), new_func, tie_set)
 
-                sig_changed = agent._install_var(2, tuple(new_parents), new_func, 10, 10, 10)
+                sig_changed = agent._install_var(2, tuple(new_source_edges), new_func, 10, 10, 10)
 
                 self.assertTrue(sig_changed)
                 self.assert_prior_state_cleared(agent.ledger.vars[2])
 
-    def test_t6_tied_same_parent_churn_does_not_create_false_sentinel_invalidation(self):
+    def test_t6_tied_same_source_edge_churn_does_not_create_false_sentinel_invalidation(self):
         agent = make_agent(3)
-        agent.world.parents = [[], [], [0, 1]]
+        agent.world.source_edges = [[], [], [0, 1]]
         agent.world.funcs = ["LOW", "LOW", "MAX"]
         agent.world.state = (0.5, 0.5, 0.5)
-        for parent in (0, 1):
-            agent.ledger.vars[parent].certificates["skip"] = NethraCertificate(
+        for source_edge in (0, 1):
+            agent.ledger.vars[source_edge].certificates["skip"] = NethraCertificate(
                 operation="skip", role="trass", authority="skip",
-                context_parents=(), context_visible=3, context_cycle=0,
+                context_source_edges=(), context_visible=3, context_cycle=0,
                 targets=(), substitutions_tested=("test_setup",), changes=0, trials=1,
                 earned_by="manual_bootstrap",
             )
-            agent.ledger.vars[parent].status = "trass"
+            agent.ledger.vars[source_edge].status = "trass"
         n = seed_fit(agent, 2, (0, 1), "MEAN")
         n.sentinels = [(2, 0.3)]
         n.expected_outcomes = [0.5]
@@ -175,7 +175,7 @@ class FitTransitionBoundaryTests(unittest.TestCase):
     def test_t7_default_update_var_still_resets_when_no_preserve_flag_is_used(self):
         ledger = ChainedLedger(4)
         n = ledger.vars[2]
-        n.parents = (0, 1)
+        n.source_edges = (0, 1)
         n.func = "MEAN"
         n.sentinels = [(0, 0.25)]
         n.expected_outcomes = [0.5]
@@ -188,7 +188,7 @@ class FitTransitionBoundaryTests(unittest.TestCase):
         self.assertTrue(changed)
         self.assert_prior_state_cleared(ledger.vars[2])
 
-    def test_t8_topo_cache_invalidates_only_when_parent_structure_changes(self):
+    def test_t8_topo_cache_invalidates_only_when_source_edge_structure_changes(self):
         agent = make_agent()
         seed_fit(agent, 2, (0, 1), "MEAN")
         agent._topo_cache = [0, 1, 2, 3]
@@ -201,7 +201,7 @@ class FitTransitionBoundaryTests(unittest.TestCase):
         self.assertEqual(
             agent._topo_cache,
             [0, 1, 2, 3],
-            "same-parent tied operator churn must not invalidate DAG topo cache",
+            "same-source_edge tied operator churn must not invalidate DAG topo cache",
         )
 
         agent._last_fit_diag = make_diag(

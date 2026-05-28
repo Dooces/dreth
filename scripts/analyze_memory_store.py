@@ -144,7 +144,7 @@ def cycle_int(value: Any) -> int | None:
 
 
 def connect(db_path: Path) -> sqlite3.Connection:
-    db_path.parent.mkdir(parents=True, exist_ok=True)
+    db_path.source_edge.mkdir(source_edges=True, exist_ok=True)
     con = sqlite3.connect(str(db_path))
     con.execute("PRAGMA journal_mode=WAL")
     con.execute("PRAGMA synchronous=NORMAL")
@@ -415,7 +415,7 @@ def analyze(
 
 def write_report(db_path: Path, report_path: Path, *, top: int) -> None:
     con = sqlite3.connect(str(db_path))
-    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.source_edge.mkdir(source_edges=True, exist_ok=True)
 
     with report_path.open("w", encoding="utf-8") as out:
         def emit(s: str = "") -> None:
@@ -572,7 +572,7 @@ def main() -> None:
         raise SystemExit(f"not found: {input_path}")
 
     out_dir = args.out_dir
-    out_dir.mkdir(parents=True, exist_ok=True)
+    out_dir.mkdir(source_edges=True, exist_ok=True)
 
     db_path = args.db or out_dir / (input_path.stem + "_analysis.sqlite")
     report_path = args.report or out_dir / (input_path.stem + "_redundancy_report.txt")

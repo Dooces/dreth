@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().source_edges[1]
 sys.path.insert(0, str(ROOT))
 
 import dreth.authority_strength as authority_mod
@@ -48,7 +48,7 @@ def _fit_diag(
     margin: int = 5,
     near_ties: int = 0,
     cycle: int = 1,
-    best_parents: tuple[int, ...] = (),
+    best_source_edges: tuple[int, ...] = (),
     best_func: str = "LOW",
 ) -> FitDiagnostic:
     near = tuple(((i,), "FIRST", 10 - i) for i in range(near_ties))
@@ -57,13 +57,13 @@ def _fit_diag(
         var=var,
         status_before="proposed",
         role_before="untested",
-        available_parents=(),
+        available_source_edges=(),
         restricted=True,
         hypothesis_count=2,
         best_score=10,
         second_score=10 - margin,
         margin=margin,
-        best_parents=best_parents,
+        best_source_edges=best_source_edges,
         best_func=best_func,
         failure_class="fit_clean",
         probes=((0, 0.05),),
@@ -112,9 +112,9 @@ def test_hidden_truth_is_not_read_by_runtime_authority_strength() -> None:
     source += inspect.getsource(ChainedAgent._run_authority_strength)
     banned = [
         "debug_blind_challenge_manifest",
-        "truth_parents",
+        "truth_source_edges",
         "truth_func",
-        "truth_delayed_parents",
+        "truth_delayed_source_edges",
         "truth_latents",
     ]
     for field in banned:
@@ -292,14 +292,14 @@ def test_persistent_contested_requires_evidence_and_preserves_alternatives() -> 
     agent._run_authority_strength(1)
     n.full_audits = 2
     agent.fit_diagnostics.append(
-        _fit_diag(0, margin=1, near_ties=2, cycle=2, best_parents=(1,), best_func="FIRST")
+        _fit_diag(0, margin=1, near_ties=2, cycle=2, best_source_edges=(1,), best_func="FIRST")
     )
     agent._run_authority_strength(2)
 
-    before_fit = (n.parents, n.func)
+    before_fit = (n.source_edges, n.func)
     agent._collapse_tied_frontier(0, ((), "LOW"), 2)
 
-    assert (n.parents, n.func) == before_fit
+    assert (n.source_edges, n.func) == before_fit
     assert n.dormant_alternatives
     metrics = agent.authority_strength_metrics()
     assert metrics["authority_debt_created"] > 0
@@ -342,7 +342,7 @@ def test_open_novelty_and_churn_quarantines_derivation() -> None:
             margin=1,
             near_ties=2,
             cycle=2,
-            best_parents=(1,),
+            best_source_edges=(1,),
             best_func="FIRST",
         )
     )
@@ -389,7 +389,7 @@ def test_quarantine_persistent_blocks_only_after_persistence_threshold() -> None
 
     n.full_audits = 2
     agent.fit_diagnostics.append(
-        _fit_diag(0, margin=1, near_ties=2, cycle=2, best_parents=(1,), best_func="FIRST")
+        _fit_diag(0, margin=1, near_ties=2, cycle=2, best_source_edges=(1,), best_func="FIRST")
     )
     agent._run_authority_strength(2)
 
@@ -416,7 +416,7 @@ def test_off_derivation_policy_never_blocks_derivation() -> None:
     agent._run_authority_strength(1)
     n.full_audits = 2
     agent.fit_diagnostics.append(
-        _fit_diag(0, margin=1, near_ties=2, cycle=2, best_parents=(1,), best_func="FIRST")
+        _fit_diag(0, margin=1, near_ties=2, cycle=2, best_source_edges=(1,), best_func="FIRST")
     )
     agent._run_authority_strength(2)
 
@@ -524,12 +524,12 @@ def test_legacy_controller_reproduces_pressure_for_comparison() -> None:
 def test_state_controller_does_not_issue_revoke_suppress_skip_or_replace_fit() -> None:
     agent = _agent("assist")
     n = agent.ledger.vars[0]
-    n.parents = (1,)
+    n.source_edges = (1,)
     n.func = "FIRST"
     n.strong_observations = 3
     n.sentinels = [(1, 0.05)]
     n.consecutive_sentinel_failures = 1
-    before_fit = (n.parents, n.func)
+    before_fit = (n.source_edges, n.func)
     before_role = n.role_for("skip")
     before_certs = {
         v: (set(agent.ledger.vars[v].certificates), set(agent.ledger.vars[v].route_certs))
@@ -544,7 +544,7 @@ def test_state_controller_does_not_issue_revoke_suppress_skip_or_replace_fit() -
         v: (set(agent.ledger.vars[v].certificates), set(agent.ledger.vars[v].route_certs))
         for v in range(agent.world.visible_count)
     }
-    assert (n.parents, n.func) == before_fit
+    assert (n.source_edges, n.func) == before_fit
     assert n.role_for("skip") == before_role
     assert after_certs == before_certs
 
@@ -552,10 +552,10 @@ def test_state_controller_does_not_issue_revoke_suppress_skip_or_replace_fit() -
 def test_strength_is_context_specific_not_global() -> None:
     agent = _agent("record")
     n = agent.ledger.vars[0]
-    n.parents = ()
+    n.source_edges = ()
     first = next(r for r in compute_authority_strength_records(agent, 1) if r.var == 0)
 
-    n.parents = (1,)
+    n.source_edges = (1,)
     second = next(r for r in compute_authority_strength_records(agent, 2) if r.var == 0)
 
     assert first.nethra_id != second.nethra_id

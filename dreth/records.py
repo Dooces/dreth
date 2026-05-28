@@ -53,7 +53,7 @@ class CycleRecord:
 class FitDiagnostic:
     """One row per full audit. Records what hypothesis space the agent
     considered, what it picked, and how the picked hypothesis ranked
-    against the ground-truth (parents, func) — used for offline analysis
+    against the ground-truth (source_edges, func) — used for offline analysis
     of fit quality. Diagnostics are write-only from the agent's perspective;
     they never feed back into fit selection.
 
@@ -61,11 +61,11 @@ class FitDiagnostic:
       cycle, var:             when and what
       status_before:          VarNethra.status entering the audit
       role_before:            operation_role entering the audit
-      available_parents:      restricted parent set used (empty if full)
+      available_source_edges:      restricted source_edge set used (empty if full)
       restricted:             True if restricted enumeration was used
       hypothesis_count:       size of enumerated hypothesis space
       best_score, second_score, margin: top two scores and gap
-      best_parents, best_func: what the agent actually picked
+      best_source_edges, best_func: what the agent actually picked
       failure_class:          fit_clean / fit_with_ties / pick_indistinguishable /
                               pick_divergent / restriction_covered /
                               restriction_missing / hypothesis_absent
@@ -85,23 +85,23 @@ class FitDiagnostic:
         probes:                 list of (iv_var, iv_val) used in audit
         actuals:                world's actual outputs at each probe
         pick_preds:             agent's chosen hypothesis predictions at each probe
-        tie_set:                frozenset of (parents, func) hypotheses that
+        tie_set:                frozenset of (source_edges, func) hypotheses that
                                 tied for rank 1 (>=1 entry; size 1 = no tie)
     """
     cycle: int
     var: int
     status_before: str
     role_before: str
-    available_parents: Tuple[int, ...]
+    available_source_edges: Tuple[int, ...]
     restricted: bool
     hypothesis_count: int
     best_score: int
     second_score: int
     margin: int
-    best_parents: Tuple[int, ...]
+    best_source_edges: Tuple[int, ...]
     best_func: str
     failure_class: str
-    true_parents: Tuple[int, ...] = field(default_factory=tuple)
+    true_source_edges: Tuple[int, ...] = field(default_factory=tuple)
     true_func: str = ""
     true_present: bool = False
     true_rank: int = -1
@@ -113,10 +113,10 @@ class FitDiagnostic:
     pick_preds: Tuple[float, ...] = field(default_factory=tuple)
     tie_set: FrozenSet[Tuple[Tuple[int, ...], str]] = field(default_factory=frozenset)
     # Near-tie constellation: all hypotheses within near_tie_margin probes of
-    # the best score. Each entry is (parents, func, score). Sorted score-desc.
+    # the best score. Each entry is (source_edges, func, score). Sorted score-desc.
     # Size > 1 means multiple operationally-equivalent candidates survived.
     near_tie_candidates: Tuple = field(default_factory=tuple)
-    # Hash of frozenset(available_parents) at audit time. Stored so the agent
+    # Hash of frozenset(available_source_edges) at audit time. Stored so the agent
     # can detect when the restriction context has changed and the old frontier
     # is stale.
     near_tie_context_key: int = 0

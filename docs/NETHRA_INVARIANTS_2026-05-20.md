@@ -32,11 +32,11 @@ This file records the current invariant checklist for Dreth/nethra. It is delibe
 
 ## Lazy decomposition and granularity
 
-20. Do not prebuild full decomposition. If the parent works, leave it closed.
-21. Lazy decomposition: if a parent fails and has no useful children, failure earns factorization.
+20. Do not prebuild full decomposition. If the source_edge works, leave it closed.
+21. Lazy decomposition: if a source_edge fails and has no useful children, failure earns factorization.
 22. Granularity is discovered by failure localization. It is not preselected globally.
 23. Patch the smallest boundary that explains the consequential failure.
-24. A parent failure does not automatically invalidate siblings or require global cascade.
+24. A source_edge failure does not automatically invalidate siblings or require global cascade.
 25. A nethra can fail locally without damaging unrelated understanding.
 26. A weird factorization is not wrong unless it fails operationally.
 27. There is no independent judge of a wrong factorization. Wrongness collapses into detection, attribution, or utility failure.

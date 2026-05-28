@@ -77,7 +77,7 @@ class DiagnosticFeatures:
     unique_fails: int
     regime_sentinel_fails: int
     regime_no_sentinel: int
-    parent_rank_mean: float
+    source_edge_rank_mean: float
     probe_no_effect: int
     probe_improved: int
     passive_stress_count: int
@@ -337,7 +337,7 @@ def features_from_run_result(run_result: Any) -> DiagnosticFeatures:
         unique_fails=arch.total_unique_failures,
         regime_sentinel_fails=arch.regime_sentinel_fails,
         regime_no_sentinel=arch.regime_no_sentinel,
-        parent_rank_mean=arch.parent_proposal_rank_mean,
+        source_edge_rank_mean=arch.source_edge_proposal_rank_mean,
         probe_no_effect=arch.provider_probe_no_effect_count,
         probe_improved=arch.provider_probe_improved_margin_count,
         passive_stress_count=arch.passive_stress_count,
@@ -352,7 +352,7 @@ def features_from_run_results(runs: List[Any]) -> DiagnosticFeatures:
     """Aggregate DiagnosticFeatures across multiple RunResult objects (same policy/config).
 
     Integer fields are summed; cycle count accumulates so rates remain correct.
-    parent_rank_mean is averaged because it is already a mean per run.
+    source_edge_rank_mean is averaged because it is already a mean per run.
     """
     n = len(runs)
     return DiagnosticFeatures(
@@ -361,7 +361,7 @@ def features_from_run_results(runs: List[Any]) -> DiagnosticFeatures:
         unique_fails=sum(r.arch.total_unique_failures for r in runs),
         regime_sentinel_fails=sum(r.arch.regime_sentinel_fails for r in runs),
         regime_no_sentinel=sum(r.arch.regime_no_sentinel for r in runs),
-        parent_rank_mean=sum(r.arch.parent_proposal_rank_mean for r in runs) / n,
+        source_edge_rank_mean=sum(r.arch.source_edge_proposal_rank_mean for r in runs) / n,
         probe_no_effect=sum(r.arch.provider_probe_no_effect_count for r in runs),
         probe_improved=sum(r.arch.provider_probe_improved_margin_count for r in runs),
         passive_stress_count=sum(r.arch.passive_stress_count for r in runs),

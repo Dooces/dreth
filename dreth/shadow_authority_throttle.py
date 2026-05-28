@@ -9,8 +9,8 @@ how much useful authority would have been lost.
 INVARIANTS (enforced by design, not runtime):
   - Diagnostic only. No effect on skip behavior, cert issuance, revocation, fit,
     sentinel behavior, route certs, provider choice, or defaults.
-  - Classification uses agent-visible evidence fields only. truth_parents,
-    truth_func, truth_delayed_parents, and all other hidden-world fields are
+  - Classification uses agent-visible evidence fields only. truth_source_edges,
+    truth_func, truth_delayed_source_edges, and all other hidden-world fields are
     never read by this module.
   - Never imported by agent.py, ChainedAgent, or any runtime path.
 """
@@ -151,7 +151,7 @@ def classify_visible_authority_evidence(item: dict[str, Any]) -> str:
     """Classify authority support from agent-visible evidence fields only.
 
     Uses the same classification scheme as the blind_challenge authority
-    evidence summarizer. Never reads truth_parents, truth_func, or any
+    evidence summarizer. Never reads truth_source_edges, truth_func, or any
     other hidden-world fields.
     """
     if _has_contradiction(item):
@@ -173,7 +173,7 @@ def extract_evidence_triggers(item: dict[str, Any]) -> EvidenceTriggers:
     """Extract all observable contradiction and low-evidence signal flags from an item.
 
     Each flag reflects exactly one observable evidence condition. Never reads
-    truth_parents, truth_func, or any hidden-world field.
+    truth_source_edges, truth_func, or any hidden-world field.
     """
     return EvidenceTriggers(
         recent_revocations_trigger=_as_int(item.get("recent_revocations")) >= 2,

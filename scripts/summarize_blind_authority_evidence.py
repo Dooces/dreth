@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Iterable, TextIO
 
 # Allow importing dreth package when run directly from scripts/
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().source_edges[1]))
 
 
 CLASSIFICATIONS = (
@@ -76,9 +76,9 @@ def _behavior(row: dict[str, Any]) -> dict[str, Any]:
 def external_mismatch_under_authority(item: dict[str, Any]) -> bool:
     if not bool(item.get("authoritative")):
         return False
-    learned = set(_as_int(v) for v in item.get("learned_parents", []) or [])
-    truth = set(_as_int(v) for v in item.get("truth_parents", []) or [])
-    truth.update(_as_int(v) for v in item.get("truth_delayed_parents", []) or [])
+    learned = set(_as_int(v) for v in item.get("learned_source_edges", []) or [])
+    truth = set(_as_int(v) for v in item.get("truth_source_edges", []) or [])
+    truth.update(_as_int(v) for v in item.get("truth_delayed_source_edges", []) or [])
     if truth:
         return learned != truth
     if learned:

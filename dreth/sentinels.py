@@ -38,10 +38,10 @@ from .functions import FUNC_LIBRARY
 _MAX_DISC_SAMPLE = 200
 
 def select_var_sentinels(
-    var: int, parents: Tuple[int, ...], func: str,
+    var: int, source_edges: Tuple[int, ...], func: str,
     world: CausalWorld, rng: random.Random,
     count: int, pool: int, tolerance: float,
-    available_parents: Optional[Set[int]] = None,
+    available_source_edges: Optional[Set[int]] = None,
 ) -> Tuple[List[Tuple[int, float]], List[float]]:
     """Pick `count` intervention probes that will be used as sentinels for
     cheap-path validation. Returns (probes, expected_outcomes).
@@ -60,11 +60,11 @@ def select_var_sentinels(
     kept as a legacy field.
     """
     candidates = [(rng.randint(0, world.visible_count - 1), rng.random()) for _ in range(pool)]
-    if available_parents is None:
+    if available_source_edges is None:
         neighbors = enumerate_var_hypotheses(var, world.visible_count)
     else:
         neighbors = enumerate_var_hypotheses_restricted(
-            var, available_parents,
+            var, available_source_edges,
         )
     # Pre-resolve function lookups and filter self-hypothesis once; reuse per probe.
     # For large hypothesis spaces (n_vars≥20), this inner loop dominates runtime.
@@ -74,7 +74,7 @@ def select_var_sentinels(
     neighbor_fns: List[Tuple[object, Tuple[int, ...]]] = [
         (FUNC_LIBRARY[nf], np_)
         for np_, nf in neighbors
-        if (np_, nf) != (parents, func) and nf in FUNC_LIBRARY
+        if (np_, nf) != (source_edges, func) and nf in FUNC_LIBRARY
     ]
     # Sample a deterministic stride-based subset when hypothesis space is large.
     # stride ≥ 2 only kicks in above _MAX_DISC_SAMPLE; below it we use all entries.
@@ -90,7 +90,7 @@ def select_var_sentinels(
         # Build forced state once per probe; reuse for every neighbor hypothesis.
         forced = tuple(iv[1] if i == iv[0] else world.state[i]
                        for i in range(world.visible_count))
-        my_pred = chosen_fn([forced[p] for p in parents]) if chosen_fn is not None else float("nan")
+        my_pred = chosen_fn([forced[p] for p in source_edges]) if chosen_fn is not None else float("nan")
         disagree = 0
         for n_fn, n_par in neighbor_fns:
             np = n_fn([forced[p] for p in n_par])
@@ -154,7 +154,7 @@ def check_var_sentinels_with_envelope(
     _NOISE_FLOOR_K = 3.0
     effective_tol = _NOISE_FLOOR_K * _base_eps if n.role_for("skip") == "noise_floor" else _base_eps
     for iv, _stale_exp in zip(n.sentinels, n.expected_outcomes):
-        expected = predict_var(n.parents, n.func, world.state, iv[0], iv[1], world.visible_count)
+        expected = predict_var(n.source_edges, n.func, world.state, iv[0], iv[1], world.visible_count)
         # Only compute the target var's output. The previous full-state path
         # discarded n_vars-1 outputs per sentinel probe.
         actual = world.predict_var_under_intervention(var, iv[0], iv[1])

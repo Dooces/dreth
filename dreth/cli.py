@@ -154,8 +154,8 @@ def _format_final_fits(world: CausalWorld, agent: ChainedAgent, limit: int = 12)
     lines = []
     for i in range(min(world.visible_count, limit)):
         n = agent.ledger.vars[i]
-        truth = f"{world.funcs[i]}({','.join(map(str, world.parents[i]))})"
-        learned = f"{n.func}({','.join(map(str, n.parents))})"
+        truth = f"{world.funcs[i]}({','.join(map(str, world.source_edges[i]))})"
+        learned = f"{n.func}({','.join(map(str, n.source_edges))})"
         comp = f" comp={len(n.compressions)} hit={n.compression_hits_lifetime}" if n.compressions else ""
         lines.append(
             f"  x{i}: truth={truth:<12} learned={learned:<12} "
@@ -188,10 +188,10 @@ def _format_operational_view(world: CausalWorld, agent: ChainedAgent, limit: int
         if n.role_for("skip") == "trass" or n.status == "trass":
             lines.append(
                 f"  x{i}: collapsed/trass skip={n.skip_count} "
-                f"audits={n.full_audits} last_fit={n.func}({','.join(map(str, n.parents))})"
+                f"audits={n.full_audits} last_fit={n.func}({','.join(map(str, n.source_edges))})"
             )
             continue
-        learned = f"{n.func}({','.join(map(str, n.parents))})"
+        learned = f"{n.func}({','.join(map(str, n.source_edges))})"
         comp = f" comps={len(n.compressions)} hit={n.compression_hits_lifetime}" if n.compressions else ""
         lines.append(
             f"  x{i}: active {n.status}/{n.role_for('skip')} learned={learned} "
@@ -446,7 +446,7 @@ def run() -> None:
               f"budget={agent.priority_audit_budget} mode={args.mode} "
               f"role_salience={agent.role_salience} salience_targets="
               f"{'all-visible' if agent.salience_targets is None else sorted(agent.salience_targets)}")
-        print("truth: " + " ".join(f"x{i}={world.funcs[i]}({','.join(map(str,world.parents[i]))})"
+        print("truth: " + " ".join(f"x{i}={world.funcs[i]}({','.join(map(str,world.source_edges[i]))})"
                                    for i in range(world.n_vars)))
         print("─" * 56)
 

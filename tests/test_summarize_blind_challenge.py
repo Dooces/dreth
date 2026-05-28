@@ -5,7 +5,7 @@ import os
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().source_edges[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 
@@ -34,10 +34,10 @@ def test_blind_challenge_summary_uses_evidence_relative_terms(tmp_path: Path, ca
                     {
                         "var": 0,
                         "relation_type": "delayed",
-                        "truth_parents": [1],
-                        "truth_delayed_parents": [],
-                        "learned_parents": [2],
-                        "learned_parent_overlap": [],
+                        "truth_source_edges": [1],
+                        "truth_delayed_source_edges": [],
+                        "learned_source_edges": [2],
+                        "learned_source_edge_overlap": [],
                         "status": "certified",
                         "skip_role": "tareth",
                         "authoritative": True,

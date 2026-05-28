@@ -42,18 +42,18 @@ from __future__ import annotations
 #   Certs fire by default; only observed failure or an active dependency event
 #   earns revocation. Sentinel failure and downstream contradiction defeat cert
 #   authority in the relevant scope. Structural or scope changes revoke only when they are themselves
-#   dependency events (parent set changed, contradicting evidence in expanded
+#   dependency events (source_edge set changed, contradicting evidence in expanded
 #   context). The verdict belongs to the scope, not the hypothesis.
 #
 # FALSE-TRASS: Two locally-trass nethras can jointly be tareth. Composition
 #   requires a joint re-test. Local authority does not propagate upward.
 #
 # MORPHOLOGY ≠ CAUSE:
-#   Morphology (same parents, same operator, close scores) is structural —
+#   Morphology (same source_edges, same operator, close scores) is structural —
 #   readable from candidate shape with no interventions required.
 #   Cause (genuine equivalence, library gap, under-probing) requires
 #   separating probes and regime-survival evidence across distinct regimes.
-#   Pattern-matching on scores or parent structure is morphology, never cause.
+#   Pattern-matching on scores or source_edge structure is morphology, never cause.
 #
 # AMBIGUITY IS FIRST-CLASS: Insufficient evidence → TiedFrontier survives.
 #   Collapse requires regime-survival proof. Score proximity does not justify
@@ -115,7 +115,7 @@ class NethraCertificate:
     """An earned authority record scoped to a named operation. Carries the context under
     which it was tested, the scope of what was checked, and the evidence counts.
     Role and authority are defeasible — the cert fires by default; invalidation
-    requires observed failure or an active dependency event (parent set changed,
+    requires observed failure or an active dependency event (source_edge set changed,
     sentinel contradiction, composite revoked). Structural context alone (e.g.
     new variable visible) does not revoke unless it is itself a dependency event.
     This is not proof of truth; it is current authority relative to a tested
@@ -129,13 +129,13 @@ class NethraCertificate:
 
     revoked_by: what event revoked this cert's authority (set on demotion; None
       while cert is live). Allowed values: sentinel_failure, downstream_contradiction,
-      parent_change, composite_failure, fit_instability, envelope_drift,
+      source_edge_change, composite_failure, fit_instability, envelope_drift,
       structural_mutation, manual_reset.
     """
     operation: Operation
     role: Role
     authority: Authority
-    context_parents: Tuple[int, ...]   # parent tuple of this var at cert time
+    context_source_edges: Tuple[int, ...]   # source_edge tuple of this var at cert time
     context_visible: int               # visible_count at cert time
     context_cycle: int                 # cycle when certified
     targets: Tuple[int, ...]           # vars actually tested for downstream change (filtered set)
@@ -417,13 +417,13 @@ class DormantAlternative:
     has proven itself across distinct evidence contexts, not just a single regime.
 
     Fields:
-      parents, func:        the hypothesis signature
+      source_edges, func:        the hypothesis signature
       last_score:           score from the last audit where this was a candidate
       revival_count:        times this hypothesis won a later audit after archiving
       context_keys_seen:    distinct context_key values seen across revivals
       last_seen_cycle:      last cycle where this hypothesis was active/revived
     """
-    parents: Tuple[int, ...]
+    source_edges: Tuple[int, ...]
     func: str
     last_score: int
     revival_count: int = 0
@@ -464,19 +464,19 @@ class TiedFrontier:
 
     A frontier persists until either:
     - One candidate pulls decisively ahead (drops below threshold)
-    - The available-parents context changes (context_key shifts)
-    - A signature change with parents_changed=True (structural shift)
+    - The available-source_edges context changes (context_key shifts)
+    - A signature change with source_edges_changed=True (structural shift)
 
     When collapsed, the losing candidates move to `dormant_alternatives`
-    on the VarNethra. Archived there as (parents, func, last_score) triples.
+    on the VarNethra. Archived there as (source_edges, func, last_score) triples.
 
     Fields:
-      candidates:        frozenset of (parents, func) in the near-tie constellation
+      candidates:        frozenset of (source_edges, func) in the near-tie constellation
       scores:            last-seen score per candidate
       margin:            near_tie_margin used when this frontier was built
-      context_key:       hash(frozenset(available_parents)) at creation;
+      context_key:       hash(frozenset(available_source_edges)) at creation;
                          stale when context changes and frontier should reset
-      collapse_sig:      (parents, func) that collapsed the frontier, or None
+      collapse_sig:      (source_edges, func) that collapsed the frontier, or None
       separating_probes: (iv_var, iv_val) pairs that discriminate members best
       first_seen_cycle:  cycle when this frontier was first established
       last_seen_cycle:   cycle of most recent audit that confirmed/updated it
@@ -518,7 +518,7 @@ class VarNethra:
       trass:       perturbing this var has no effect on other vars within tol
 
     Fields:
-      var, parents, func:       current fit (parents tuple, function name)
+      var, source_edges, func:       current fit (source_edges tuple, function name)
       status, operation_role:   the two lifecycle dimensions above
       strong_observations:      consecutive cycles same fit was returned
       sentinels:                list of (intervention_var, intervention_val)
@@ -537,7 +537,7 @@ class VarNethra:
       temporal_trass_log:       audit trail of dismissed deviations
     """
     var: int
-    parents: Tuple[int, ...] = field(default_factory=tuple)
+    source_edges: Tuple[int, ...] = field(default_factory=tuple)
     func: str = "LOW"
     status: str = "proposed"
     strong_observations: int = 0
@@ -572,7 +572,7 @@ class VarNethra:
     watch_threshold_cycles: int = 0    # cached: int(median_interval * 0.3), min 1
     # Near-tie frontier: hypothesis constellation that is operationally
     # equivalent under the current context. Cleared on structural reset
-    # (parents_changed) and on invalidation. Losing candidates archived to
+    # (source_edges_changed) and on invalidation. Losing candidates archived to
     # dormant_alternatives when the frontier collapses.
     tied_frontier: Optional["TiedFrontier"] = None
     dormant_alternatives: List[DormantAlternative] = field(default_factory=list)
@@ -594,7 +594,7 @@ class VarNethra:
     # Populated by _certify_operation_role (skip) and form cert functions (route).
     # During migration, falls back to legacy operation_role if key absent.
     certificates: Dict[str, NethraCertificate] = field(default_factory=dict)
-    # Per-candidate route certs. Keyed by candidate parent var index.
+    # Per-candidate route certs. Keyed by candidate source_edge var index.
     # route_certs[P] holds the route cert for this var T relative to candidate P.
     # P route-trass for T: including P vs excluding P produces the same fit winner.
     # P route-tareth for T: including P changes the winner. Default: include all
@@ -613,7 +613,7 @@ class VarNethra:
     # each cycle as long as wake conditions (below) are not met. Parking is
     # earned by observed redundancy: covered by a higher sentinel, no unique
     # failures in W cycles, higher sentinel passed K times across ≥2 recurrences.
-    # Wake conditions: covering regime/composite fails, parent change event,
+    # Wake conditions: covering regime/composite fails, source_edge change event,
     # local downstream contradiction, or scheduled sparse revalidation.
     parked: bool = False
     park_cycle: int = 0        # cycle when parking was last applied
@@ -636,14 +636,14 @@ class VarNethra:
         ChainedLedger.invalidate(vars, cycle, reason) which cascades status
         through descendants — a completely separate operation.
 
-        event: "parent_change" | "sentinel_failure" | "structural_mutation" |
+        event: "source_edge_change" | "sentinel_failure" | "structural_mutation" |
                "drift" | "false_trass_contradiction"
 
         Cascade logic:
-          parent_change:
+          source_edge_change:
             - clears predict/compress/audit certs (function operating on new inputs)
             - FLAGS skip cert as untested — skip cert validity depends on downstream
-              propagation structure, not this var's own parents. No infrastructure
+              propagation structure, not this var's own source_edges. No infrastructure
               exists to verify downstream is unchanged, so flag for retest.
               Do NOT add keep_skip_cert parameter — it would never be called True.
 
@@ -664,7 +664,7 @@ class VarNethra:
             self.audit_stable_count = 0
             self.parked = False
             return
-        if event == "parent_change":
+        if event == "source_edge_change":
             self.certificates.pop("predict", None)
             self.certificates.pop("compress", None)
             self.certificates.pop("audit", None)
@@ -672,10 +672,10 @@ class VarNethra:
             self.audit_stable_count = 0
             self.parked = False
             if "skip" in self.certificates:
-                # Parent change is an active dependency event — cert was scoped
-                # to the old parent set; the old evidence no longer applies.
+                # source_edge change is an active dependency event — cert was scoped
+                # to the old source_edge set; the old evidence no longer applies.
                 self.certificates["skip"] = dataclasses.replace(
-                    self.certificates["skip"], role="untested", revoked_by="parent_change"
+                    self.certificates["skip"], role="untested", revoked_by="source_edge_change"
                 )
         if event in ("sentinel_failure", "false_trass_contradiction"):
             self.certificates.pop("audit", None)
@@ -737,7 +737,7 @@ class VarNethra:
             sent_label = f"sent={len(self.sentinels)}/STALE"
         watch_tag = " WATCH" if self.in_watch_state else ""
         horiz = f"{self.stability_horizon}" if self.stability_horizon < 9999 else "?"
-        return (f"x{self.var}={self.func}({list(self.parents)}) "
+        return (f"x{self.var}={self.func}({list(self.source_edges)}) "
                 f"[{self.status}|{self.role_for('skip')}] cost={self.cost_weight:.1f} "
                 f"strong={self.strong_observations} "
                 f"{sent_label} skip={self.skip_count} "
@@ -799,7 +799,7 @@ class LedgerEvent:
              "role_changed", "sentinel_failed", "inert_woken"
     var:     primary variable index (-1 for multi-var or non-var events)
     cycle:   when it happened
-    payload: key→value annotations — role, authority, parents, etc.
+    payload: key→value annotations — role, authority, source_edges, etc.
     """
     type: str
     var: int
@@ -841,10 +841,10 @@ class ChainedLedger:
         self._next_component_id: int = 0
 
     def variable_dependents(self, var: int) -> Set[int]:
-        """Return all variables whose CURRENT FIT lists `var` as a parent.
+        """Return all variables whose CURRENT FIT lists `var` as a source_edge.
         This is the agent's belief about dependency; may be wrong if a fit
         is wrong. Used by closure_descendants for invalidation cascade."""
-        return {i for i, n in self.vars.items() if var in n.parents}
+        return {i for i, n in self.vars.items() if var in n.source_edges}
 
     def closure_descendants(self, changed: Set[int]) -> Set[int]:
         """Transitive closure: all variables that the agent BELIEVES depend
@@ -852,7 +852,7 @@ class ChainedLedger:
         original set. Computed by repeatedly expanding via variable_dependents
         until no new vars are added. Used for cascading invalidation.
 
-        Route-trass prune: if descendant d has a route-trass cert for parent v
+        Route-trass prune: if descendant d has a route-trass cert for source_edge v
         (certified that v is interchangeable in d's fit), v's change does not
         propagate to d. Only route-tareth or uncertified edges cascade."""
         out = set(changed)
@@ -873,12 +873,12 @@ class ChainedLedger:
     def update_var(
         self,
         var: int,
-        parents: Tuple[int, ...],
+        source_edges: Tuple[int, ...],
         func: str,
         cycle: int,
         reset_state: bool = True,
     ) -> bool:
-        """Apply the result of a full audit to a variable. If (parents, func)
+        """Apply the result of a full audit to a variable. If (source_edges, func)
         differs from current fit (signature change), archive the old
         VarNethra to history and reset the variable: fit replaced, status
         back to "proposed", strong_observations=0, sentinels/compressions/
@@ -890,10 +890,10 @@ class ChainedLedger:
         for the old fit. None of these carry over.
         """
         n = self.vars[var]
-        changed = (n.parents, n.func) != (parents, func)
+        changed = (n.source_edges, n.func) != (source_edges, func)
         if changed:
             self.history[var].append(VarNethra(
-                var=n.var, parents=n.parents, func=n.func, status=n.status,
+                var=n.var, source_edges=n.source_edges, func=n.func, status=n.status,
                 strong_observations=n.strong_observations,
                 sentinels=list(n.sentinels), expected_outcomes=list(n.expected_outcomes),
                 margins=list(n.margins), skip_count=n.skip_count,
@@ -903,7 +903,7 @@ class ChainedLedger:
                 compression_misses=n.compression_misses,
                 cost_weight=n.cost_weight,
             ))
-            n.parents = parents
+            n.source_edges = source_edges
             n.func = func
             if reset_state:
                 n.status = "proposed"
@@ -930,7 +930,7 @@ class ChainedLedger:
           - if proposed/quarantined: reset strong_observations to 0 and
             demote to "uncertain" if it's a descendant (not the originally
             failed var) — descendants' progress was based on a now-invalid
-            parent assumption
+            source_edge assumption
         Returns the closure set (originally-failed vars + all descendants).
         Triggered by sentinel failures.
         """
@@ -946,12 +946,12 @@ class ChainedLedger:
                 if n.strong_observations > 0:
                     n.strong_observations = 0
                     n.collapse_log.append(
-                        f"c{cycle}: strong_observations reset (parent invalidated): {reason}"
+                        f"c{cycle}: strong_observations reset (source_edge invalidated): {reason}"
                     )
                 if v not in vars:
                     n.status = "uncertain"
                     n.collapse_log.append(
-                        f"c{cycle}: descendant demoted to uncertain — parent invalidated"
+                        f"c{cycle}: descendant demoted to uncertain — source_edge invalidated"
                     )
         return closure
 
@@ -979,7 +979,7 @@ class ChainedLedger:
     def resolve_novelty(self, var: int, kind: str, cycle: int) -> None:
         """Mark any open novelty for (var, kind) as resolved. Called when
         the variable's fit has been stable for novelty_weak_streak consecutive
-        cycles, indicating the apparent vocabulary insufficiency was
+        cycles, indicating the apsource_edge vocabulary insufficiency was
         resolved by finding a stable hypothesis."""
         for n in self.novelty:
             if n.status == "open" and n.affected_var == var and n.kind == kind:

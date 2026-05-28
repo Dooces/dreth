@@ -5,15 +5,15 @@ Proves that closure_descendants correctly implements the route-trass cascade pru
 
 Three claims, each independently falsifiable:
 
-  1. PRUNE — A descendant D with a route-trass cert for parent P is excluded
+  1. PRUNE — A descendant D with a route-trass cert for source_edge P is excluded
      from the invalidation closure when P changes. Without the cert, D would
      be included. The prune is the behavioral difference.
 
-  2. NO-PRUNE — A descendant D with a route-tareth cert for parent P is
+  2. NO-PRUNE — A descendant D with a route-tareth cert for source_edge P is
      included in the invalidation closure when P changes. Tareth edge = P
      genuinely matters to D's fit. No pruning.
 
-  3. DEFAULT-INCLUDE — A descendant D with NO route cert for parent P is
+  3. DEFAULT-INCLUDE — A descendant D with NO route cert for source_edge P is
      included in the invalidation closure (invariant 50: route/include by
      default unless explicitly excluded by a route cert).
 
@@ -28,13 +28,13 @@ import pytest
 from dreth.ledger import ChainedLedger, NethraCertificate
 
 
-def _trass_route_cert(parent: int, target: int) -> NethraCertificate:
-    """Minimal route-trass cert: parent P is irrelevant to target T's fit."""
+def _trass_route_cert(source_edge: int, target: int) -> NethraCertificate:
+    """Minimal route-trass cert: source_edge P is irrelevant to target T's fit."""
     return NethraCertificate(
         operation="route",
         role="trass",
         authority="guarded_reuse",
-        context_parents=(parent,),
+        context_source_edges=(source_edge,),
         context_visible=5,
         context_cycle=10,
         targets=(target,),
@@ -45,13 +45,13 @@ def _trass_route_cert(parent: int, target: int) -> NethraCertificate:
     )
 
 
-def _tareth_route_cert(parent: int, target: int) -> NethraCertificate:
-    """Minimal route-tareth cert: parent P is load-bearing for target T's fit."""
+def _tareth_route_cert(source_edge: int, target: int) -> NethraCertificate:
+    """Minimal route-tareth cert: source_edge P is load-bearing for target T's fit."""
     return NethraCertificate(
         operation="route",
         role="tareth",
         authority="prefer",
-        context_parents=(parent,),
+        context_source_edges=(source_edge,),
         context_visible=5,
         context_cycle=10,
         targets=(target,),
@@ -71,20 +71,20 @@ def _ledger_with_graph() -> ChainedLedger:
     Returns the ledger with fits wired.
     """
     led = ChainedLedger(3)
-    led.vars[1].parents = (0,)  # x1 depends on x0
-    led.vars[2].parents = (1,)  # x2 depends on x1
+    led.vars[1].source_edges = (0,)  # x1 depends on x0
+    led.vars[2].source_edges = (1,)  # x2 depends on x1
     return led
 
 
 # ── 1: PRUNE ──────────────────────────────────────────────────────────────────
 
 def test_01_route_trass_prunes_cascade():
-    """A descendant with a route-trass cert for the changed parent is excluded
+    """A descendant with a route-trass cert for the changed source_edge is excluded
     from the closure. This is the core cascade prune invariant."""
     led = _ledger_with_graph()
 
     # x1 has a route-trass cert for x0: "x0 is irrelevant to my fit"
-    led.vars[1].route_certs[0] = _trass_route_cert(parent=0, target=1)
+    led.vars[1].route_certs[0] = _trass_route_cert(source_edge=0, target=1)
 
     closure = led.closure_descendants({0})
 
@@ -99,19 +99,19 @@ def test_01_route_trass_prunes_cascade():
 
     # x2 depends on x1 only; since x1 is pruned, x2 should also be excluded
     assert 2 not in closure, (
-        "x2 should be pruned: x1 was pruned, so x2's parent change doesn't cascade either."
+        "x2 should be pruned: x1 was pruned, so x2's source_edge change doesn't cascade either."
     )
 
 
 # ── 2: NO-PRUNE — tareth edge propagates ─────────────────────────────────────
 
 def test_02_route_tareth_allows_cascade():
-    """A descendant with a route-tareth cert for the changed parent is included
+    """A descendant with a route-tareth cert for the changed source_edge is included
     in the closure. P matters to D's fit — invalidation must propagate."""
     led = _ledger_with_graph()
 
     # x1 has a route-tareth cert for x0: "x0 genuinely matters to my fit"
-    led.vars[1].route_certs[0] = _tareth_route_cert(parent=0, target=1)
+    led.vars[1].route_certs[0] = _tareth_route_cert(source_edge=0, target=1)
 
     closure = led.closure_descendants({0})
 
@@ -147,11 +147,11 @@ def test_04_partial_prune_mixed_graph():
     """In a graph where x0 → x1 and x0 → x2, with x1 having route-trass for x0
     but x2 having no cert, the closure should include x2 but not x1."""
     led = ChainedLedger(3)
-    led.vars[1].parents = (0,)  # x1 depends on x0
-    led.vars[2].parents = (0,)  # x2 also depends on x0 (sibling, not chain)
+    led.vars[1].source_edges = (0,)  # x1 depends on x0
+    led.vars[2].source_edges = (0,)  # x2 also depends on x0 (sibling, not chain)
 
     # x1 says x0 is irrelevant; x2 has no cert
-    led.vars[1].route_certs[0] = _trass_route_cert(parent=0, target=1)
+    led.vars[1].route_certs[0] = _trass_route_cert(source_edge=0, target=1)
 
     closure = led.closure_descendants({0})
 

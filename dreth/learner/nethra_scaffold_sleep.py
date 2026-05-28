@@ -23,9 +23,9 @@ from typing import Any, Iterable, Literal, NamedTuple
 
 
 HIDDEN_TRUTH_LIKE_FIELDS: frozenset[str] = frozenset({
-    "truth_parents",
+    "truth_source_edges",
     "truth_func",
-    "truth_delayed_parents",
+    "truth_delayed_source_edges",
     "truth_latents",
     "debug_blind_challenge_manifest",
 })
@@ -51,7 +51,7 @@ BROAD_DEBT_REASONS: frozenset[str] = frozenset({
 
 ScaffoldAbstractionKind = Literal[
     "operator_family",
-    "parent_signature_family",
+    "source_edge_signature_family",
     "context_role_family",
     "background_object_family",
     "trass_family",
@@ -76,7 +76,7 @@ class _Obs(NamedTuple):
     source_kind: str
     vars: tuple[int, ...]
     signatures: tuple[str, ...]
-    parent_sets: tuple[tuple[int, ...], ...]
+    source_edge_sets: tuple[tuple[int, ...], ...]
     contexts: tuple[str, ...]
     roles: tuple[str, ...]
     run_idx: int
@@ -94,7 +94,7 @@ class ScaffoldNethra:
     source_types: list[str]
     vars: list[int]
     signatures: list[str]
-    parent_sets: list[list[int]]
+    source_edge_sets: list[list[int]]
     contexts: list[str]
     observed_roles: list[str]
     role_counts: dict[str, int]
@@ -280,7 +280,7 @@ def _operator_from_signature(signature: str) -> str:
     return match.group(1).upper() if match else ""
 
 
-def _parents_from_signature(signature: str) -> tuple[int, ...]:
+def _source_edges_from_signature(signature: str) -> tuple[int, ...]:
     text = str(signature or "")
     if "(" not in text or ")" not in text:
         return ()
@@ -298,27 +298,27 @@ def _extract_vars(rec: dict[str, Any]) -> tuple[int, ...]:
     return _ints(values)
 
 
-def _extract_parent_sets(rec: dict[str, Any], signatures: tuple[str, ...]) -> tuple[tuple[int, ...], ...]:
+def _extract_source_edge_sets(rec: dict[str, Any], signatures: tuple[str, ...]) -> tuple[tuple[int, ...], ...]:
     seen: set[tuple[int, ...]] = set()
     out: list[tuple[int, ...]] = []
-    raw_sets = rec.get("parent_sets")
+    raw_sets = rec.get("source_edge_sets")
     if isinstance(raw_sets, list):
         for row in raw_sets:
-            parents = _ints(_as_list(row))
-            if parents and parents not in seen:
-                seen.add(parents)
-                out.append(parents)
-    for key in ("learned_parents", "parents", "best_parents"):
+            source_edges = _ints(_as_list(row))
+            if source_edges and source_edges not in seen:
+                seen.add(source_edges)
+                out.append(source_edges)
+    for key in ("learned_source_edges", "source_edges", "best_source_edges"):
         if key in rec:
-            parents = _ints(_as_list(rec.get(key)))
-            if parents and parents not in seen:
-                seen.add(parents)
-                out.append(parents)
+            source_edges = _ints(_as_list(rec.get(key)))
+            if source_edges and source_edges not in seen:
+                seen.add(source_edges)
+                out.append(source_edges)
     for sig in signatures:
-        parents = _parents_from_signature(sig)
-        if parents and parents not in seen:
-            seen.add(parents)
-            out.append(parents)
+        source_edges = _source_edges_from_signature(sig)
+        if source_edges and source_edges not in seen:
+            seen.add(source_edges)
+            out.append(source_edges)
     return tuple(out)
 
 
@@ -334,8 +334,8 @@ def _extract_signatures(rec: dict[str, Any]) -> tuple[str, ...]:
     if inferred:
         values.append(inferred)
     if rec.get("target_var") is not None and rec.get("learned_func") is not None:
-        parents = ",".join(str(p) for p in _ints(_as_list(rec.get("learned_parents"))))
-        values.append(f"x{int(rec['target_var'])}:{str(rec['learned_func']).upper()}({parents})")
+        source_edges = ",".join(str(p) for p in _ints(_as_list(rec.get("learned_source_edges"))))
+        values.append(f"x{int(rec['target_var'])}:{str(rec['learned_func']).upper()}({source_edges})")
     return tuple(dict.fromkeys(values))
 
 
@@ -422,7 +422,7 @@ def _observation(
 ) -> _Obs:
     source_kind = _source_kind(rec, source_type)
     signatures = _extract_signatures(rec)
-    parent_sets = _extract_parent_sets(rec, signatures)
+    source_edge_sets = _extract_source_edge_sets(rec, signatures)
     operator = ""
     for sig in signatures:
         operator = _operator_from_signature(sig)
@@ -435,7 +435,7 @@ def _observation(
         source_kind=source_kind,
         vars=_extract_vars(rec),
         signatures=signatures,
-        parent_sets=parent_sets,
+        source_edge_sets=source_edge_sets,
         contexts=_extract_contexts(rec),
         roles=_extract_roles(rec, source_type, source_kind),
         run_idx=run_idx,
@@ -453,16 +453,16 @@ def _is_broad_generic_debt(obs: _Obs) -> bool:
         return False
     if reason not in BROAD_DEBT_REASONS:
         return False
-    return not obs.signatures and not obs.parent_sets
+    return not obs.signatures and not obs.source_edge_sets
 
 
 def _structure_key(obs: _Obs) -> tuple[Any, ...]:
     if obs.signatures:
         return ("signature", obs.signatures[0])
-    if obs.vars and obs.parent_sets:
-        return ("var_parent_operator", obs.vars, obs.parent_sets[0], obs.operator_family)
-    if obs.parent_sets and obs.operator_family:
-        return ("parent_operator", obs.parent_sets[0], obs.operator_family)
+    if obs.vars and obs.source_edge_sets:
+        return ("var_source_edge_operator", obs.vars, obs.source_edge_sets[0], obs.operator_family)
+    if obs.source_edge_sets and obs.operator_family:
+        return ("source_edge_operator", obs.source_edge_sets[0], obs.operator_family)
     if obs.vars and obs.operator_family:
         return ("var_operator", obs.vars, obs.operator_family)
     if obs.vars and obs.contexts and not _is_broad_generic_debt(obs):
@@ -482,7 +482,7 @@ def _score_familiarity(obs_list: list[_Obs]) -> float:
 def _score_specificity(
     vars_: list[int],
     signatures: list[str],
-    parent_sets: list[list[int]],
+    source_edge_sets: list[list[int]],
     contexts: list[str],
     *,
     broad_debt: bool = False,
@@ -494,20 +494,20 @@ def _score_specificity(
         score += 0.20
     if signatures:
         score += 0.35
-    if parent_sets:
+    if source_edge_sets:
         score += 0.25
     if contexts:
         score += 0.15
-    if len(vars_) > 20 and not signatures and not parent_sets:
+    if len(vars_) > 20 and not signatures and not source_edge_sets:
         score -= 0.25
     return max(0.0, min(1.0, score))
 
 
-def _score_stability(obs_list: list[_Obs], signatures: list[str], parent_sets: list[list[int]]) -> float:
+def _score_stability(obs_list: list[_Obs], signatures: list[str], source_edge_sets: list[list[int]]) -> float:
     if not obs_list:
         return 0.0
     runs = len({o.run_idx for o in obs_list})
-    structure_bonus = 0.25 if signatures or parent_sets else 0.0
+    structure_bonus = 0.25 if signatures or source_edge_sets else 0.0
     recurrence = min(0.55, 0.10 * len(obs_list))
     run_bonus = min(0.20, 0.06 * max(0, runs - 1))
     return min(1.0, recurrence + run_bonus + structure_bonus)
@@ -662,13 +662,13 @@ class NethraScaffoldSleep:
             source_types = list(dict.fromkeys(o.source_type for o in obs_list if o.source_type))
             vars_ = sorted({v for o in obs_list for v in o.vars})
             signatures = list(dict.fromkeys(s for o in obs_list for s in o.signatures))[:20]
-            parent_seen: set[tuple[int, ...]] = set()
-            parent_sets: list[list[int]] = []
+            source_edge_seen: set[tuple[int, ...]] = set()
+            source_edge_sets: list[list[int]] = []
             for obs in obs_list:
-                for parents in obs.parent_sets:
-                    if parents not in parent_seen:
-                        parent_seen.add(parents)
-                        parent_sets.append(list(parents))
+                for source_edges in obs.source_edge_sets:
+                    if source_edges not in source_edge_seen:
+                        source_edge_seen.add(source_edges)
+                        source_edge_sets.append(list(source_edges))
             contexts = list(dict.fromkeys(c for o in obs_list for c in o.contexts))[:40]
             role_counts = Counter(role for o in obs_list for role in o.roles)
             observed_roles = [role for role in SCAFFOLD_ROLES if role_counts.get(role, 0)]
@@ -689,7 +689,7 @@ class NethraScaffoldSleep:
                 source_types=source_types,
                 vars=vars_[:100],
                 signatures=signatures,
-                parent_sets=parent_sets[:20],
+                source_edge_sets=source_edge_sets[:20],
                 contexts=contexts,
                 observed_roles=observed_roles or ["background"],
                 role_counts=dict(role_counts),
@@ -702,11 +702,11 @@ class NethraScaffoldSleep:
                 specificity_score=_score_specificity(
                     vars_,
                     signatures,
-                    parent_sets,
+                    source_edge_sets,
                     contexts,
                     broad_debt=broad_debt,
                 ),
-                stability_score=_score_stability(obs_list, signatures, parent_sets),
+                stability_score=_score_stability(obs_list, signatures, source_edge_sets),
                 authority_allowed=False,
             ))
         return nethras
@@ -761,9 +761,9 @@ class NethraScaffoldSleep:
     ) -> list[ScaffoldComposition]:
         groups: dict[tuple[Any, ...], list[ScaffoldNethra]] = defaultdict(list)
         for n in scaffold_nethras:
-            for parents in n.parent_sets:
-                if parents:
-                    groups[("parents", tuple(parents))].append(n)
+            for source_edges in n.source_edge_sets:
+                if source_edges:
+                    groups[("source_edges", tuple(source_edges))].append(n)
             for context in n.contexts:
                 family = _context_family(context)
                 if family and n.signatures:
@@ -827,9 +827,9 @@ class NethraScaffoldSleep:
                 op = _operator_from_signature(sig)
                 if op:
                     groups[("operator_family", op)].append(n)
-            for parents in n.parent_sets:
-                if parents:
-                    groups[("parent_signature_family", ",".join(str(p) for p in parents))].append(n)
+            for source_edges in n.source_edge_sets:
+                if source_edges:
+                    groups[("source_edge_signature_family", ",".join(str(p) for p in source_edges))].append(n)
             for role in n.observed_roles:
                 if role in {"trass", "tareth", "unresolved"}:
                     groups[(f"{role}_family", role)].append(n)
@@ -863,7 +863,7 @@ class NethraScaffoldSleep:
                 and all(
                     n.specificity_score == 0.0
                     and not n.signatures
-                    and not n.parent_sets
+                    and not n.source_edge_sets
                     for n in unique
                 )
             )
@@ -881,7 +881,7 @@ class NethraScaffoldSleep:
             if kind == "authority_debt_family":
                 warnings.append("authority_debt_is_role_pressure_only")
                 suggested = "no_runtime_use"
-            elif kind in {"operator_family", "parent_signature_family"} and specificity >= 0.45:
+            elif kind in {"operator_family", "source_edge_signature_family"} and specificity >= 0.45:
                 suggested = "clustering_prior"
             elif kind == "context_role_family" and familiarity >= 0.45:
                 suggested = "ranking_hint"
@@ -968,7 +968,7 @@ def write_scaffold_sleep_jsonl(
     abstractions: list[ScaffoldAbstraction],
 ) -> None:
     out = Path(path)
-    out.parent.mkdir(parents=True, exist_ok=True)
+    out.source_edge.mkdir(source_edges=True, exist_ok=True)
     with open(out, "w") as fh:
         for item in scaffold_nethras:
             fh.write(json.dumps(item.to_dict(), sort_keys=True) + "\n")

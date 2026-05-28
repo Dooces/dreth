@@ -5,7 +5,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().source_edges[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import run_comparison_suite as suite
@@ -29,7 +29,7 @@ def _args(tmp_path: Path):
             "--hybrid-control",
             "interfaces",
             "--repair-agenda",
-            "--parent-ranker",
+            "--source_edge-ranker",
             "history_rescue",
             "--probe-proposer",
             "history_rescue",
@@ -154,7 +154,7 @@ def test_summaries_are_invoked_after_runs(tmp_path: Path, monkeypatch) -> None:
         if jobs and jobs[0].label in set(suite.AUTHORITY_STRENGTH_MODES):
             phases.append("batch")
             for mode_paths in suite.suite_paths(args.out_prefix).values():
-                mode_paths["jsonl"].parent.mkdir(parents=True, exist_ok=True)
+                mode_paths["jsonl"].source_edge.mkdir(source_edges=True, exist_ok=True)
                 mode_paths["jsonl"].write_text("")
                 mode_paths["log"].write_text("")
         else:
@@ -186,7 +186,7 @@ def test_comparison_parser_extracts_key_metrics_from_fake_logs() -> None:
   passive monitor: saved_iv=30  stressed=4
   arch avg: route_certs=5.0  audit_certs=6.0  dormant=2.0
 relative_authority_frontier_temporal:
-  chosen_parent_recall=0.750
+  chosen_source_edge_recall=0.750
   recall_lift=2.500
   candidate_reduction_vs_visible=0.600
   invariants: ALL PASS (3 runs)
@@ -198,7 +198,7 @@ relative_authority_frontier_temporal:
     assert metrics["skip_pct"] == 12.5
     assert metrics["quality_cost"] == 900
     assert metrics["passive_saved_iv"] == 30
-    assert metrics["chosen_parent_recall"] == 0.75
+    assert metrics["chosen_source_edge_recall"] == 0.75
     assert metrics["candidate_reduction_vs_visible"] == 0.6
 
 
@@ -398,7 +398,7 @@ def test_final_comparison_waits_for_all_summaries(tmp_path: Path, monkeypatch) -
     def fake_run(jobs, *, max_workers, sequential=False, terminal=None, popen_factory=None):
         if jobs and jobs[0].label in set(suite.AUTHORITY_STRENGTH_MODES):
             for mode_paths in suite.suite_paths(args.out_prefix).values():
-                mode_paths["jsonl"].parent.mkdir(parents=True, exist_ok=True)
+                mode_paths["jsonl"].source_edge.mkdir(source_edges=True, exist_ok=True)
                 mode_paths["jsonl"].write_text("")
                 mode_paths["log"].write_text("")
         else:
@@ -449,7 +449,7 @@ def _bn_args(tmp_path: Path):
             "--hybrid-control",
             "interfaces",
             "--repair-agenda",
-            "--parent-ranker",
+            "--source_edge-ranker",
             "history_rescue",
             "--probe-proposer",
             "history_rescue",
@@ -556,7 +556,7 @@ def test_background_nethra_summaries_run_after_batch(tmp_path: Path, monkeypatch
         if jobs and jobs[0].label in set(suite.BACKGROUND_NETHRA_MODES):
             phases.append("batch")
             for mode_paths in suite.background_nethra_suite_paths(args.out_prefix).values():
-                mode_paths["jsonl"].parent.mkdir(parents=True, exist_ok=True)
+                mode_paths["jsonl"].source_edge.mkdir(source_edges=True, exist_ok=True)
                 mode_paths["jsonl"].write_text("")
                 mode_paths["log"].write_text("")
         else:
@@ -665,7 +665,7 @@ def _sm_args(tmp_path: Path):
             "--hybrid-control",
             "interfaces",
             "--repair-agenda",
-            "--parent-ranker",
+            "--source_edge-ranker",
             "history_rescue",
             "--probe-proposer",
             "history_rescue",
@@ -736,7 +736,7 @@ def test_scaffold_memory_comparison_detects_behavior_leaks() -> None:
 
 def test_reports_directory_is_created(tmp_path: Path, monkeypatch) -> None:
     args = _args(tmp_path)
-    reports_dir = Path(args.out_prefix).parent
+    reports_dir = Path(args.out_prefix).source_edge
 
     def fake_run(jobs, *, max_workers, sequential=False, terminal=None, popen_factory=None):
         for mode_paths in suite.suite_paths(args.out_prefix).values():

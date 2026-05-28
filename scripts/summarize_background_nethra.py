@@ -198,7 +198,7 @@ def summarize(rows: List[Dict[str, Any]]) -> str:
             vars_ = rec.get("vars") or []
             ctx = (rec.get("context_keys") or [])[:3]
             roles = list(rec.get("source_roles") or [])[:4]
-            parents = (rec.get("parent_sets") or [[]])[:1]
+            source_edges = (rec.get("source_edge_sets") or [[]])[:1]
             signals = list(rec.get("recurring_signals") or [])[:4]
             recog = float(rec.get("cheap_recognition_score", 0) or 0)
             action = float(rec.get("action_relevance_score", 0) or 0)
@@ -212,7 +212,7 @@ def summarize(rows: List[Dict[str, Any]]) -> str:
                 f"       contexts={ctx}  roles={roles}"
             )
             lines.append(
-                f"       parents={parents}  signals={signals}"
+                f"       source_edges={source_edges}  signals={signals}"
             )
 
     # ── E. Giant cluster handling ─────────────────────────────────────────────

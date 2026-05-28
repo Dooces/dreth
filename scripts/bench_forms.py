@@ -12,7 +12,7 @@ iv_Δ/c/v is retained as a secondary efficiency metric but is NOT the verdict.
 
 Predictive-failure (VarNethra) columns — from the new `predict:` summary line:
   λ_avg   : average poisson_rate across tareth vars with drift history (forms-on run)
-  watch_Q : total "queued (parent X in watch state)" pre-audits fired (forms-on run)
+  watch_Q : total "queued (source_edge X in watch state)" pre-audits fired (forms-on run)
 """
 
 from __future__ import annotations
@@ -303,7 +303,7 @@ def run_one(
         t0 = time.perf_counter()
         proc = subprocess.run(
             cmd,
-            cwd=Path(__file__).resolve().parents[1],
+            cwd=Path(__file__).resolve().source_edges[1],
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,

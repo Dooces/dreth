@@ -104,7 +104,7 @@ The important shift is that nethra is both:
 
 Nethra-of-nethra is therefore not just compression. It is also fault-localization topology.
 
-The parent nethra does not need a complete internal decomposition before failure. If the parent works, no internal accounting is needed. If it fails, the failure earns the cost of decomposition. Newly created subnethras then reduce future repair cost.
+The source_edge nethra does not need a complete internal decomposition before failure. If the source_edge works, no internal accounting is needed. If it fails, the failure earns the cost of decomposition. Newly created subnethras then reduce future repair cost.
 
 ## Scaling clarification
 
@@ -181,7 +181,7 @@ If x1 earned a trass skip cert while x0 was excluded from the tested target set,
 
 Reachability is not the same as active authority.
 
-A nethra can be reachable because a parent, log, old cert, index, or archive references it. That does not require proactive cleanup. It only matters operationally when the nethra is activated for shortcutting, routing, repair, composition, or consolidation.
+A nethra can be reachable because a source_edge, log, old cert, index, or archive references it. That does not require proactive cleanup. It only matters operationally when the nethra is activated for shortcutting, routing, repair, composition, or consolidation.
 
 Correct handling:
 

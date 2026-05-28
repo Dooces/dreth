@@ -43,7 +43,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().source_edge.source_edge))
 
 from dreth.world import CausalWorld
 from dreth.agent import ChainedAgent
@@ -52,10 +52,10 @@ from dreth.fit import fit_var
 from dreth.functions import FUNC_LIBRARY
 from dreth.hybrid import (
     SymbolicResidualPredictor,
-    SensitivityParentRanker,
-    HistoryParentRanker,
-    HistoryRescueParentRanker,
-    NeuralHistoryParentRanker,
+    Sensitivitysource_edgeRanker,
+    Historysource_edgeRanker,
+    HistoryRescuesource_edgeRanker,
+    NeuralHistorysource_edgeRanker,
     DiscriminationProbeProposer,
     HistoryProbeProposer,
     HistoryRescueProbeProposer,
@@ -89,9 +89,9 @@ _ALLOWED_SCHEDULES = (
     "false_trass",
     "blind_challenge",
 )
-_DEFAULT_PARENT_RANKER = "neural_history"
+_DEFAULT_source_edge_RANKER = "neural_history"
 _DEFAULT_PROBE_PROPOSER = "none"
-_POLICY_REPORT_PARENT_RANKERS = "sensitivity,history,history_rescue,neural_history"
+_POLICY_REPORT_source_edge_RANKERS = "sensitivity,history,history_rescue,neural_history"
 _POLICY_REPORT_PROBE_PROPOSERS = "none,history,history_rescue"
 _POLICY_REPORT_BASELINE = "sensitivity/none"
 # Shadow selector fields appended to TSV only (not to the printed table).
@@ -145,21 +145,21 @@ def _parse_schedule_list(s: str) -> List[str]:
     return _parse_choice_list(s, _ALLOWED_SCHEDULES, "--schedule")
 
 
-def _provider_policy_pairs(parent_arg: str, probe_arg: str) -> List[Tuple[str, str]]:
-    parents = _parse_choice_list(
-        parent_arg, ("sensitivity", "history", "history_rescue", "neural_history"), "--parent-ranker"
+def _provider_policy_pairs(source_edge_arg: str, probe_arg: str) -> List[Tuple[str, str]]:
+    source_edges = _parse_choice_list(
+        source_edge_arg, ("sensitivity", "history", "history_rescue", "neural_history"), "--source_edge-ranker"
     )
     probes = _parse_choice_list(
         probe_arg, ("none", "history", "history_rescue"), "--probe-proposer"
     )
-    if len(parents) == len(probes):
-        return list(zip(parents, probes))
-    if len(parents) == 1:
-        return [(parents[0], probe) for probe in probes]
+    if len(source_edges) == len(probes):
+        return list(zip(source_edges, probes))
+    if len(source_edges) == 1:
+        return [(source_edges[0], probe) for probe in probes]
     if len(probes) == 1:
-        return [(parent, probes[0]) for parent in parents]
+        return [(source_edge, probes[0]) for source_edge in source_edges]
     raise SystemExit(
-        "--parent-ranker and --probe-proposer comma lists must have equal length, "
+        "--source_edge-ranker and --probe-proposer comma lists must have equal length, "
         "unless one side has exactly one value"
     )
 
@@ -188,7 +188,7 @@ class RunConfig:
     shadow_key_min_ok: int = 100
     shadow_key_min_clean_streak: int = 100
     shadow_key_symbolic_false_ok_tolerance: int = 0
-    parent_ranker: str = "neural_history"  # "sensitivity" | "history" | "history_rescue" | "neural_history"
+    source_edge_ranker: str = "neural_history"  # "sensitivity" | "history" | "history_rescue" | "neural_history"
     probe_proposer: str = "none"        # "none" | "history" | "history_rescue"
     relative_authority_report: bool = False
     relative_authority_frontier_report: bool = False
@@ -326,13 +326,13 @@ class ArchMetrics:
     shadow_would_miss_active_failure: int = 0
     # Feature-calibrator key-usage counters (nonzero only when shadow_calibrator=feature)
     shadow_feature_key_func_var: int = 0
-    shadow_feature_key_func_tier_parentcount: int = 0
+    shadow_feature_key_func_tier_source_edgecount: int = 0
     shadow_feature_key_func_tier: int = 0
     shadow_feature_key_func: int = 0
     shadow_feature_key_global: int = 0
     shadow_feature_key_insufficient: int = 0
     shadow_feature_fok_func_var: int = 0
-    shadow_feature_fok_func_tier_parentcount: int = 0
+    shadow_feature_fok_func_tier_source_edgecount: int = 0
     shadow_feature_fok_func_tier: int = 0
     shadow_feature_fok_func: int = 0
     shadow_feature_fok_global: int = 0
@@ -353,24 +353,24 @@ class ArchMetrics:
     hybrid_residual_predictor_calls: int = 0
     hybrid_residual_ok: int = 0
     hybrid_residual_stressed: int = 0
-    hybrid_parent_ranker_calls: int = 0
+    hybrid_source_edge_ranker_calls: int = 0
     hybrid_probe_proposer_calls: int = 0
     hybrid_expert_router_calls: int = 0
     hybrid_repair_agenda_items: int = 0
     hybrid_repair_agenda_scope_mean: float = 0.0
     hybrid_repair_agenda_scope_max: int = 0
-    parent_proposal_calls: int = 0
-    parent_proposal_hit_rate: float = 0.0
-    parent_proposal_miss_count: int = 0
-    parent_proposal_rank_mean: float = 0.0
-    parent_proposal_rank_max: int = 0
+    source_edge_proposal_calls: int = 0
+    source_edge_proposal_hit_rate: float = 0.0
+    source_edge_proposal_miss_count: int = 0
+    source_edge_proposal_rank_mean: float = 0.0
+    source_edge_proposal_rank_max: int = 0
     history_ranker_calls: int = 0
     sensitivity_rescue_calls: int = 0
     sensitivity_rescue_interventions: int = 0
     rescue_candidates_added: int = 0
-    rescue_chosen_parent_hits: int = 0
-    chosen_parent_from_history: int = 0
-    chosen_parent_from_rescue: int = 0
+    rescue_chosen_source_edge_hits: int = 0
+    chosen_source_edge_from_history: int = 0
+    chosen_source_edge_from_rescue: int = 0
     provider_probes_proposed: int = 0
     provider_probes_valid: int = 0
     provider_probes_invalid: int = 0
@@ -387,38 +387,38 @@ class ArchMetrics:
     relative_authority_top_examples: List[str] = field(default_factory=list)
     graph_frontier_evals: int = 0
     graph_frontier_avg_size: float = 0.0
-    graph_frontier_chosen_parent_recall: float = 0.0
+    graph_frontier_chosen_source_edge_recall: float = 0.0
     graph_frontier_revoked_recall: float = 0.0
     graph_frontier_dormant_recall: float = 0.0
-    direct_frontier_chosen_parent_recall: float = 0.0
+    direct_frontier_chosen_source_edge_recall: float = 0.0
     direct_frontier_revoked_recall: float = 0.0
     direct_frontier_dormant_recall: float = 0.0
-    loo_frontier_chosen_parent_recall: float = 0.0
+    loo_frontier_chosen_source_edge_recall: float = 0.0
     loo_frontier_revoked_recall: float = 0.0
     loo_frontier_dormant_recall: float = 0.0
-    graph_frontier_chosen_parent_hits: int = 0
-    graph_frontier_chosen_parent_total: int = 0
+    graph_frontier_chosen_source_edge_hits: int = 0
+    graph_frontier_chosen_source_edge_total: int = 0
     graph_frontier_revoked_hits: int = 0
     graph_frontier_revoked_total: int = 0
     graph_frontier_dormant_hits: int = 0
     graph_frontier_dormant_total: int = 0
-    direct_frontier_chosen_parent_hits: int = 0
-    direct_frontier_chosen_parent_total: int = 0
+    direct_frontier_chosen_source_edge_hits: int = 0
+    direct_frontier_chosen_source_edge_total: int = 0
     direct_frontier_revoked_hits: int = 0
     direct_frontier_revoked_total: int = 0
     direct_frontier_dormant_hits: int = 0
     direct_frontier_dormant_total: int = 0
-    loo_frontier_chosen_parent_hits: int = 0
-    loo_frontier_chosen_parent_total: int = 0
+    loo_frontier_chosen_source_edge_hits: int = 0
+    loo_frontier_chosen_source_edge_total: int = 0
     loo_frontier_revoked_hits: int = 0
     loo_frontier_revoked_total: int = 0
     loo_frontier_dormant_hits: int = 0
     loo_frontier_dormant_total: int = 0
     temporal_frontier_evals: int = 0
     temporal_frontier_avg_size: float = 0.0
-    temporal_frontier_chosen_parent_hits: int = 0
-    temporal_frontier_chosen_parent_total: int = 0
-    temporal_frontier_chosen_parent_recall: float = 0.0
+    temporal_frontier_chosen_source_edge_hits: int = 0
+    temporal_frontier_chosen_source_edge_total: int = 0
+    temporal_frontier_chosen_source_edge_recall: float = 0.0
     temporal_frontier_revoked_hits: int = 0
     temporal_frontier_revoked_total: int = 0
     temporal_frontier_revoked_recall: float = 0.0
@@ -664,8 +664,8 @@ class RunResult:
 
 @dataclass
 class SparseVarState:
-    candidate_parents: List[int]
-    parents: Tuple[int, ...]
+    candidate_source_edges: List[int]
+    source_edges: Tuple[int, ...]
     func: str
     residuals: List[float]
     last_refit_cycle: int
@@ -677,7 +677,7 @@ class SparseVarState:
 class SparseCachedRefitAgent:
     """Sparse-cached refit baseline (K=10, window=8, threshold=3).
 
-    Per variable: maintains a top-K candidate parent set screened by
+    Per variable: maintains a top-K candidate source_edge set screened by
     intervention sensitivity (|predict(x=0.9) - predict(x=0.1)|). Each cycle,
     reads current world state to compute a residual. If the rolling window
     accumulates >= failure_threshold failures, refits using the candidate set.
@@ -730,24 +730,24 @@ class SparseCachedRefitAgent:
     def _predict(self, y: int) -> float:
         vs = self._state[y]
         fn = FUNC_LIBRARY.get(vs.func)
-        if fn is None or not vs.parents:
+        if fn is None or not vs.source_edges:
             return 0.0
         try:
-            return fn([self.world.state[p] for p in vs.parents])
+            return fn([self.world.state[p] for p in vs.source_edges])
         except Exception:
             return 0.0
 
     def _do_refit(self, y: int, candidates: List[int]) -> None:
         available = set(candidates) if candidates else None
-        parents, func, _, _ = fit_var(
+        source_edges, func, _, _ = fit_var(
             y, self.world, self.rng,
             self.intervention_budget, self.tolerance,
-            available_parents=available,
+            available_source_edges=available,
         )
         self.total_interventions += self.intervention_budget
         self.full_audit_count += 1
         vs = self._state[y]
-        vs.parents = tuple(parents)
+        vs.source_edges = tuple(source_edges)
         vs.func = func
         vs.last_refit_cycle = self._cycle
         vs.refit_count += 1
@@ -763,8 +763,8 @@ class SparseCachedRefitAgent:
     def _init_var(self, y: int) -> None:
         candidates = self._screen_candidates(y)
         self._state[y] = SparseVarState(
-            candidate_parents=candidates,
-            parents=(),
+            candidate_source_edges=candidates,
+            source_edges=(),
             func="",
             residuals=[],
             last_refit_cycle=0,
@@ -785,7 +785,7 @@ class SparseCachedRefitAgent:
                 continue
             candidates = self._screen_candidates(y)
             vs = self._state[y]
-            vs.candidate_parents = candidates
+            vs.candidate_source_edges = candidates
             vs.candidate_refresh_count += 1
             vs.last_refresh_cycle = self._cycle
             self.candidate_refresh_count += 1
@@ -807,13 +807,13 @@ class SparseCachedRefitAgent:
                 self.skip_count += 1
                 continue
             self.sentinel_fail_count += 1
-            self._do_refit(y, vs.candidate_parents)
+            self._do_refit(y, vs.candidate_source_edges)
             new_residual = self._current_residual(y)
             vs.residuals = [new_residual]
             if new_residual > self.tolerance:
                 if self._cycle - vs.last_refresh_cycle >= self.CANDIDATE_REFRESH_INTERVAL:
                     new_candidates = self._screen_candidates(y)
-                    vs.candidate_parents = new_candidates
+                    vs.candidate_source_edges = new_candidates
                     vs.candidate_refresh_count += 1
                     vs.last_refresh_cycle = self._cycle
                     self.candidate_refresh_count += 1
@@ -886,19 +886,19 @@ def _build_and_run_dreth(
     # In "interfaces" mode all four symbolic default providers are installed;
     # they reproduce existing behavior so metrics remain compatible.
     _residual_predictor = None
-    _parent_ranker = None
+    _source_edge_ranker = None
     _probe_proposer = None
     _expert_router = None
     if cfg.hybrid_control == "interfaces":
         _residual_predictor = SymbolicResidualPredictor()
-        if cfg.parent_ranker == "neural_history":
-            _parent_ranker = NeuralHistoryParentRanker(n_vars=world.n_vars)
-        elif cfg.parent_ranker == "history_rescue":
-            _parent_ranker = HistoryRescueParentRanker(world)
-        elif cfg.parent_ranker == "history":
-            _parent_ranker = HistoryParentRanker()
+        if cfg.source_edge_ranker == "neural_history":
+            _source_edge_ranker = NeuralHistorysource_edgeRanker(n_vars=world.n_vars)
+        elif cfg.source_edge_ranker == "history_rescue":
+            _source_edge_ranker = HistoryRescuesource_edgeRanker(world)
+        elif cfg.source_edge_ranker == "history":
+            _source_edge_ranker = Historysource_edgeRanker()
         else:
-            _parent_ranker = SensitivityParentRanker(world)
+            _source_edge_ranker = Sensitivitysource_edgeRanker(world)
         if cfg.probe_proposer == "history_rescue":
             _probe_proposer = HistoryRescueProbeProposer()
         elif cfg.probe_proposer == "history":
@@ -923,7 +923,7 @@ def _build_and_run_dreth(
             mode=cfg.nethra_memory,
             run_id=(
                 f"{cfg.schedule}:n{cfg.n_vars}:c{cfg.cycles}:"
-                f"seed{cfg.seed}:{cfg.parent_ranker}/{cfg.probe_proposer}"
+                f"seed{cfg.seed}:{cfg.source_edge_ranker}/{cfg.probe_proposer}"
             ),
             seed=cfg.seed,
         )
@@ -936,7 +936,7 @@ def _build_and_run_dreth(
         priority_audit_budget=max(1, cfg.n_vars // 2),
         consequence_weight=consequence_weight,
         residual_predictor=_residual_predictor,
-        parent_ranker=_parent_ranker,
+        source_edge_ranker=_source_edge_ranker,
         probe_proposer=_probe_proposer,
         expert_router=_expert_router,
         repair_agenda_enabled=cfg.repair_agenda_enabled,
@@ -957,12 +957,12 @@ def _build_and_run_dreth(
     prev_iv = 0
     prev_sent_skip = 0
 
-    def _snap_parents() -> Dict[int, tuple]:
-        return {v: agent.ledger.vars[v].parents for v in range(world.visible_count)}
+    def _snap_source_edges() -> Dict[int, tuple]:
+        return {v: agent.ledger.vars[v].source_edges for v in range(world.visible_count)}
 
     for cycle in range(1, cfg.cycles + 1):
         if log_interval > 0:
-            pre_parents = _snap_parents()
+            pre_source_edges = _snap_source_edges()
 
         m = world.perturb_by_schedule(cycle, cfg.schedule,
                                       settle_cycles=cfg.settle_cycles)
@@ -974,7 +974,7 @@ def _build_and_run_dreth(
         if log_interval > 0:
             changed = [
                 v for v in range(world.visible_count)
-                if agent.ledger.vars[v].parents != pre_parents.get(v)
+                if agent.ledger.vars[v].source_edges != pre_source_edges.get(v)
             ]
 
             if cycle % log_interval == 0:
@@ -1183,13 +1183,13 @@ def _extract_arch_metrics(agent: ChainedAgent, world: CausalWorld) -> ArchMetric
     m.shadow_false_ok_vs_active_sentinel = getattr(agent, "_shadow_false_ok_vs_active_sentinel", 0)
     m.shadow_would_miss_active_failure = getattr(agent, "_shadow_would_miss_active_failure", 0)
     m.shadow_feature_key_func_var             = getattr(agent, "_shadow_feature_key_func_var", 0)
-    m.shadow_feature_key_func_tier_parentcount = getattr(agent, "_shadow_feature_key_func_tier_parentcount", 0)
+    m.shadow_feature_key_func_tier_source_edgecount = getattr(agent, "_shadow_feature_key_func_tier_source_edgecount", 0)
     m.shadow_feature_key_func_tier            = getattr(agent, "_shadow_feature_key_func_tier", 0)
     m.shadow_feature_key_func                 = getattr(agent, "_shadow_feature_key_func", 0)
     m.shadow_feature_key_global               = getattr(agent, "_shadow_feature_key_global", 0)
     m.shadow_feature_key_insufficient         = getattr(agent, "_shadow_feature_key_insufficient", 0)
     m.shadow_feature_fok_func_var             = getattr(agent, "_shadow_feature_fok_func_var", 0)
-    m.shadow_feature_fok_func_tier_parentcount = getattr(agent, "_shadow_feature_fok_func_tier_parentcount", 0)
+    m.shadow_feature_fok_func_tier_source_edgecount = getattr(agent, "_shadow_feature_fok_func_tier_source_edgecount", 0)
     m.shadow_feature_fok_func_tier            = getattr(agent, "_shadow_feature_fok_func_tier", 0)
     m.shadow_feature_fok_func                 = getattr(agent, "_shadow_feature_fok_func", 0)
     m.shadow_feature_fok_global               = getattr(agent, "_shadow_feature_fok_global", 0)
@@ -1214,23 +1214,23 @@ def _extract_arch_metrics(agent: ChainedAgent, world: CausalWorld) -> ArchMetric
     m.hybrid_residual_predictor_calls = getattr(agent, "_hybrid_residual_predictor_calls", 0)
     m.hybrid_residual_ok = getattr(agent, "_hybrid_residual_ok", 0)
     m.hybrid_residual_stressed = getattr(agent, "_hybrid_residual_stressed", 0)
-    m.hybrid_parent_ranker_calls = getattr(agent, "_hybrid_parent_ranker_calls", 0)
+    m.hybrid_source_edge_ranker_calls = getattr(agent, "_hybrid_source_edge_ranker_calls", 0)
     m.hybrid_probe_proposer_calls = getattr(agent, "_hybrid_probe_proposer_calls", 0)
     m.hybrid_expert_router_calls = getattr(agent, "_hybrid_expert_router_calls", 0)
-    _ppd = getattr(agent, "_parent_proposal_diagnostics", None)
+    _ppd = getattr(agent, "_source_edge_proposal_diagnostics", None)
     if _ppd is not None:
-        m.parent_proposal_calls = _ppd.calls
-        m.parent_proposal_hit_rate = _ppd.chosen_parent_hit_rate
-        m.parent_proposal_miss_count = _ppd.miss_chosen_parent_count
-        m.parent_proposal_rank_mean = _ppd.rank_of_chosen_parent_mean
-        m.parent_proposal_rank_max = _ppd.rank_of_chosen_parent_max
+        m.source_edge_proposal_calls = _ppd.calls
+        m.source_edge_proposal_hit_rate = _ppd.chosen_source_edge_hit_rate
+        m.source_edge_proposal_miss_count = _ppd.miss_chosen_source_edge_count
+        m.source_edge_proposal_rank_mean = _ppd.rank_of_chosen_source_edge_mean
+        m.source_edge_proposal_rank_max = _ppd.rank_of_chosen_source_edge_max
         m.history_ranker_calls = _ppd.history_ranker_calls
         m.sensitivity_rescue_calls = _ppd.sensitivity_rescue_calls
         m.sensitivity_rescue_interventions = _ppd.sensitivity_rescue_interventions
         m.rescue_candidates_added = _ppd.rescue_candidates_added
-        m.rescue_chosen_parent_hits = _ppd.rescue_chosen_parent_hits
-        m.chosen_parent_from_history = _ppd.chosen_parent_from_history
-        m.chosen_parent_from_rescue = _ppd.chosen_parent_from_rescue
+        m.rescue_chosen_source_edge_hits = _ppd.rescue_chosen_source_edge_hits
+        m.chosen_source_edge_from_history = _ppd.chosen_source_edge_from_history
+        m.chosen_source_edge_from_rescue = _ppd.chosen_source_edge_from_rescue
     _prd = getattr(agent, "_probe_proposal_diagnostics", None)
     if _prd is not None:
         m.provider_probes_proposed = _prd.provider_probes_proposed
@@ -1452,14 +1452,14 @@ def _extract_arch_metrics(agent: ChainedAgent, world: CausalWorld) -> ArchMetric
         _tfs = _temporal_frontier.summary()
         m.temporal_frontier_evals = int(_tfs["temporal_frontier_evals"])
         m.temporal_frontier_avg_size = float(_tfs["temporal_frontier_avg_size"])
-        m.temporal_frontier_chosen_parent_hits = int(
-            _tfs["temporal_frontier_chosen_parent_hits"]
+        m.temporal_frontier_chosen_source_edge_hits = int(
+            _tfs["temporal_frontier_chosen_source_edge_hits"]
         )
-        m.temporal_frontier_chosen_parent_total = int(
-            _tfs["temporal_frontier_chosen_parent_total"]
+        m.temporal_frontier_chosen_source_edge_total = int(
+            _tfs["temporal_frontier_chosen_source_edge_total"]
         )
-        m.temporal_frontier_chosen_parent_recall = float(
-            _tfs["temporal_frontier_chosen_parent_recall"]
+        m.temporal_frontier_chosen_source_edge_recall = float(
+            _tfs["temporal_frontier_chosen_source_edge_recall"]
         )
         m.temporal_frontier_revoked_hits = int(_tfs["temporal_frontier_revoked_hits"])
         m.temporal_frontier_revoked_total = int(_tfs["temporal_frontier_revoked_total"])
@@ -1546,21 +1546,21 @@ def _blind_challenge_evaluation(agent: ChainedAgent, world: CausalWorld) -> Dict
     for var in range(world.visible_count):
         n = agent.ledger.vars[var]
         rel = relation_by_var.get(var, {})
-        truth_parents = set(int(p) for p in rel.get("parents", []) or [])
-        delayed_parents = {
-            int(edge.get("parent"))
+        truth_source_edges = set(int(p) for p in rel.get("source_edges", []) or [])
+        delayed_source_edges = {
+            int(edge.get("source_edge"))
             for edge in rel.get("delayed_edges", []) or []
-            if isinstance(edge, dict) and edge.get("parent") is not None
+            if isinstance(edge, dict) and edge.get("source_edge") is not None
         }
-        truth_scope = truth_parents | delayed_parents
-        learned_parents = set(int(p) for p in n.parents)
-        overlap = sorted(learned_parents & truth_scope)
+        truth_scope = truth_source_edges | delayed_source_edges
+        learned_source_edges = set(int(p) for p in n.source_edges)
+        overlap = sorted(learned_source_edges & truth_scope)
         if overlap:
             learned_overlap += 1
         role = n.role_for("skip")
         certified_like = n.status == "certified" or bool(n.authoritative)
         non_root = bool(truth_scope or rel.get("latents") or rel.get("relation_type") != "symbolic")
-        if certified_like and non_root and not overlap and learned_parents:
+        if certified_like and non_root and not overlap and learned_source_edges:
             external_mismatch_under_authority += 1
         if role == "untested" or n.status in {"uncertain", "proposed"}:
             uncertain += 1
@@ -1575,10 +1575,10 @@ def _blind_challenge_evaluation(agent: ChainedAgent, world: CausalWorld) -> Dict
                 "second_score": fd.second_score,
                 "margin": fd.margin,
                 "failure_class": fd.failure_class,
-                "best_parents": list(fd.best_parents),
+                "best_source_edges": list(fd.best_source_edges),
                 "best_func": fd.best_func,
                 "hypothesis_count": fd.hypothesis_count,
-                "available_parent_count": len(fd.available_parents),
+                "available_source_edge_count": len(fd.available_source_edges),
                 "tie_count": len(fd.tie_set),
                 "near_tie_count": len(fd.near_tie_candidates),
             }
@@ -1586,9 +1586,9 @@ def _blind_challenge_evaluation(agent: ChainedAgent, world: CausalWorld) -> Dict
         ]
         repeated_stable_fit = False
         if len(var_fits) >= 2:
-            latest_sig = (tuple(var_fits[-1].best_parents), var_fits[-1].best_func)
+            latest_sig = (tuple(var_fits[-1].best_source_edges), var_fits[-1].best_func)
             repeated_stable_fit = all(
-                (tuple(fd.best_parents), fd.best_func) == latest_sig and fd.margin > 0
+                (tuple(fd.best_source_edges), fd.best_func) == latest_sig and fd.margin > 0
                 for fd in var_fits[-min(3, len(var_fits)):]
             )
         revoked_by = [
@@ -1602,13 +1602,13 @@ def _blind_challenge_evaluation(agent: ChainedAgent, world: CausalWorld) -> Dict
             "var": var,
             "relation_type": rel.get("relation_type"),
             "truth_func": rel.get("func"),
-            "truth_parents": sorted(truth_parents),
-            "truth_delayed_parents": sorted(delayed_parents),
+            "truth_source_edges": sorted(truth_source_edges),
+            "truth_delayed_source_edges": sorted(delayed_source_edges),
             "truth_latents": list(rel.get("latents", []) or []),
             "agent_func_compatible": bool(rel.get("agent_func_compatible")),
-            "learned_parents": sorted(learned_parents),
+            "learned_source_edges": sorted(learned_source_edges),
             "learned_func": n.func,
-            "learned_parent_overlap": overlap,
+            "learned_source_edge_overlap": overlap,
             "status": n.status,
             "skip_role": role,
             "authoritative": bool(n.authoritative),
@@ -1640,9 +1640,9 @@ def _blind_challenge_evaluation(agent: ChainedAgent, world: CausalWorld) -> Dict
             "last_fit_tie_count": len(last_fit.tie_set) if last_fit else None,
             "last_fit_near_tie_count": len(last_fit.near_tie_candidates) if last_fit else None,
             "last_fit_hypothesis_count": last_fit.hypothesis_count if last_fit else None,
-            "last_fit_available_parent_count": len(last_fit.available_parents) if last_fit else None,
-            "parent_proposal_rank": None,
-            "parent_proposal_rank_available": False,
+            "last_fit_available_source_edge_count": len(last_fit.available_source_edges) if last_fit else None,
+            "source_edge_proposal_rank": None,
+            "source_edge_proposal_rank_available": False,
             "repeatedly_stable_under_probes": repeated_stable_fit,
             "audit_stable_count": n.audit_stable_count,
             "revoked_certs": len(revoked_by),
@@ -2074,13 +2074,13 @@ def _print_shadow_calibration_summary(results: List[RunResult]) -> None:
         miss_iv_rate_act  = miss_act / max(1, save_iv)
 
         kfv  = sum(r.arch.shadow_feature_key_func_var for r in runs)
-        kftp = sum(r.arch.shadow_feature_key_func_tier_parentcount for r in runs)
+        kftp = sum(r.arch.shadow_feature_key_func_tier_source_edgecount for r in runs)
         kft  = sum(r.arch.shadow_feature_key_func_tier for r in runs)
         kf   = sum(r.arch.shadow_feature_key_func for r in runs)
         kg   = sum(r.arch.shadow_feature_key_global for r in runs)
         ki   = sum(r.arch.shadow_feature_key_insufficient for r in runs)
         fok_fv  = sum(r.arch.shadow_feature_fok_func_var for r in runs)
-        fok_ftp = sum(r.arch.shadow_feature_fok_func_tier_parentcount for r in runs)
+        fok_ftp = sum(r.arch.shadow_feature_fok_func_tier_source_edgecount for r in runs)
         fok_ft  = sum(r.arch.shadow_feature_fok_func_tier for r in runs)
         fok_f   = sum(r.arch.shadow_feature_fok_func for r in runs)
         fok_g   = sum(r.arch.shadow_feature_fok_global for r in runs)
@@ -2128,14 +2128,14 @@ def _print_shadow_calibration_summary(results: List[RunResult]) -> None:
         if feature_mode:
             print(f"    key_used distribution:"
                   f"  shadow_feature_key_func_var={kfv}"
-                  f"  shadow_feature_key_func_tier_parentcount={kftp}"
+                  f"  shadow_feature_key_func_tier_source_edgecount={kftp}"
                   f"  shadow_feature_key_func_tier={kft}"
                   f"  shadow_feature_key_func={kf}"
                   f"  shadow_feature_key_global={kg}"
                   f"  shadow_feature_key_insufficient={ki}")
             print(f"    false_ok grouped by key_used:"
                   f"  func_var={fok_fv}"
-                  f"  func_tier_parentcount={fok_ftp}"
+                  f"  func_tier_source_edgecount={fok_ftp}"
                   f"  func_tier={fok_ft}"
                   f"  func={fok_f}"
                   f"  global={fok_g}")
@@ -2198,7 +2198,7 @@ def _quality_for_runs(runs: List[RunResult], weights: QualityWeights) -> RunQual
 
 
 def _policy_label(r: RunResult) -> str:
-    return f"{r.config.parent_ranker}/{r.config.probe_proposer}"
+    return f"{r.config.source_edge_ranker}/{r.config.probe_proposer}"
 
 
 def _print_provider_policy_comparison(results: List[RunResult], weights: QualityWeights) -> None:
@@ -2288,7 +2288,7 @@ def _build_policy_report_rows(
             "n_vars": n_vars,
             "cycles": cycles,
             "policy": policy,
-            "parent_ranker": runs[0].config.parent_ranker,
+            "source_edge_ranker": runs[0].config.source_edge_ranker,
             "probe_proposer": runs[0].config.probe_proposer,
             "runs": len(runs),
             "avg_quality_cost": q.quality_cost / n,
@@ -2633,33 +2633,33 @@ def _print_aggregate(results: List[RunResult], weights: QualityWeights = Quality
         print(f"  would_save_iv={_shadow_wsv_t}  would_miss_symbolic_stress={_shadow_wms_t}")
         print(f"  false_ok_vs_active={_shadow_fas_t}  would_miss_active_failure={_shadow_wma_t}")
         _fkey_total = sum(
-            r.arch.shadow_feature_key_func_var + r.arch.shadow_feature_key_func_tier_parentcount
+            r.arch.shadow_feature_key_func_var + r.arch.shadow_feature_key_func_tier_source_edgecount
             + r.arch.shadow_feature_key_func_tier + r.arch.shadow_feature_key_func
             + r.arch.shadow_feature_key_global + r.arch.shadow_feature_key_insufficient
             for r in ok_runs
         )
         if _fkey_total > 0:
             _kfv  = sum(r.arch.shadow_feature_key_func_var for r in ok_runs)
-            _kftp = sum(r.arch.shadow_feature_key_func_tier_parentcount for r in ok_runs)
+            _kftp = sum(r.arch.shadow_feature_key_func_tier_source_edgecount for r in ok_runs)
             _kft  = sum(r.arch.shadow_feature_key_func_tier for r in ok_runs)
             _kf   = sum(r.arch.shadow_feature_key_func for r in ok_runs)
             _kg   = sum(r.arch.shadow_feature_key_global for r in ok_runs)
             _ki   = sum(r.arch.shadow_feature_key_insufficient for r in ok_runs)
             _fok_fv  = sum(r.arch.shadow_feature_fok_func_var for r in ok_runs)
-            _fok_ftp = sum(r.arch.shadow_feature_fok_func_tier_parentcount for r in ok_runs)
+            _fok_ftp = sum(r.arch.shadow_feature_fok_func_tier_source_edgecount for r in ok_runs)
             _fok_ft  = sum(r.arch.shadow_feature_fok_func_tier for r in ok_runs)
             _fok_f   = sum(r.arch.shadow_feature_fok_func for r in ok_runs)
             _fok_g   = sum(r.arch.shadow_feature_fok_global for r in ok_runs)
             print(f"  key_used distribution:"
                   f"  shadow_feature_key_func_var={_kfv}"
-                  f"  shadow_feature_key_func_tier_parentcount={_kftp}"
+                  f"  shadow_feature_key_func_tier_source_edgecount={_kftp}"
                   f"  shadow_feature_key_func_tier={_kft}"
                   f"  shadow_feature_key_func={_kf}"
                   f"  shadow_feature_key_global={_kg}"
                   f"  shadow_feature_key_insufficient={_ki}")
             print(f"  false_ok grouped by key_used:"
                   f"  func_var={_fok_fv}"
-                  f"  func_tier_parentcount={_fok_ftp}"
+                  f"  func_tier_source_edgecount={_fok_ftp}"
                   f"  func_tier={_fok_ft}"
                   f"  func={_fok_f}"
                   f"  global={_fok_g}")
@@ -2722,7 +2722,7 @@ def _print_aggregate(results: List[RunResult], weights: QualityWeights = Quality
     # Print hybrid metrics whenever any provider was active, even if some counts
     # are zero — zero counts expose wiring gaps immediately.
     _hybrid_res_calls = sum(r.arch.hybrid_residual_predictor_calls for r in ok_runs)
-    _hybrid_pr_calls  = sum(r.arch.hybrid_parent_ranker_calls for r in ok_runs)
+    _hybrid_pr_calls  = sum(r.arch.hybrid_source_edge_ranker_calls for r in ok_runs)
     _hybrid_pp_calls  = sum(r.arch.hybrid_probe_proposer_calls for r in ok_runs)
     _hybrid_er_calls  = sum(r.arch.hybrid_expert_router_calls for r in ok_runs)
     _any_hybrid = _hybrid_res_calls + _hybrid_pr_calls + _hybrid_pp_calls + _hybrid_er_calls
@@ -2734,29 +2734,29 @@ def _print_aggregate(results: List[RunResult], weights: QualityWeights = Quality
             f"  ok={_hybrid_ok}  stressed={_hybrid_str}"
         )
         print(
-            f"  hybrid parent_ranker:      calls={_hybrid_pr_calls}"
+            f"  hybrid source_edge_ranker:      calls={_hybrid_pr_calls}"
             f"  probe_proposer: calls={_hybrid_pp_calls}"
             f"  expert_router: calls={_hybrid_er_calls}"
         )
-        _parent_prop_calls = sum(r.arch.parent_proposal_calls for r in ok_runs)
-        if _parent_prop_calls > 0:
-            _parent_hit_rate = (
-                sum(r.arch.parent_proposal_hit_rate * r.arch.parent_proposal_calls for r in ok_runs)
-                / max(1, _parent_prop_calls)
+        _source_edge_prop_calls = sum(r.arch.source_edge_proposal_calls for r in ok_runs)
+        if _source_edge_prop_calls > 0:
+            _source_edge_hit_rate = (
+                sum(r.arch.source_edge_proposal_hit_rate * r.arch.source_edge_proposal_calls for r in ok_runs)
+                / max(1, _source_edge_prop_calls)
             )
-            _parent_rank_mean = (
-                sum(r.arch.parent_proposal_rank_mean * r.arch.parent_proposal_calls for r in ok_runs)
-                / max(1, _parent_prop_calls)
+            _source_edge_rank_mean = (
+                sum(r.arch.source_edge_proposal_rank_mean * r.arch.source_edge_proposal_calls for r in ok_runs)
+                / max(1, _source_edge_prop_calls)
             )
-            _parent_rank_max = max(r.arch.parent_proposal_rank_max for r in ok_runs)
-            _parent_misses = sum(r.arch.parent_proposal_miss_count for r in ok_runs)
-            print("  parent_proposal:")
+            _source_edge_rank_max = max(r.arch.source_edge_proposal_rank_max for r in ok_runs)
+            _source_edge_misses = sum(r.arch.source_edge_proposal_miss_count for r in ok_runs)
+            print("  source_edge_proposal:")
             print(
-                f"    calls={_parent_prop_calls} "
-                f"chosen_parent_hit_rate={_parent_hit_rate:.3f} "
-                f"miss_chosen_parent_count={_parent_misses} "
-                f"rank_mean={_parent_rank_mean:.2f} "
-                f"rank_max={_parent_rank_max}"
+                f"    calls={_source_edge_prop_calls} "
+                f"chosen_source_edge_hit_rate={_source_edge_hit_rate:.3f} "
+                f"miss_chosen_source_edge_count={_source_edge_misses} "
+                f"rank_mean={_source_edge_rank_mean:.2f} "
+                f"rank_max={_source_edge_rank_max}"
             )
             _rescue_calls = sum(r.arch.sensitivity_rescue_calls for r in ok_runs)
             if _rescue_calls > 0:
@@ -2768,9 +2768,9 @@ def _print_aggregate(results: List[RunResult], weights: QualityWeights = Quality
                 )
                 print(
                     f"    rescue_candidates_added={sum(r.arch.rescue_candidates_added for r in ok_runs)} "
-                    f"rescue_chosen_parent_hits={sum(r.arch.rescue_chosen_parent_hits for r in ok_runs)} "
-                    f"chosen_parent_from_history={sum(r.arch.chosen_parent_from_history for r in ok_runs)} "
-                    f"chosen_parent_from_rescue={sum(r.arch.chosen_parent_from_rescue for r in ok_runs)}"
+                    f"rescue_chosen_source_edge_hits={sum(r.arch.rescue_chosen_source_edge_hits for r in ok_runs)} "
+                    f"chosen_source_edge_from_history={sum(r.arch.chosen_source_edge_from_history for r in ok_runs)} "
+                    f"chosen_source_edge_from_rescue={sum(r.arch.chosen_source_edge_from_rescue for r in ok_runs)}"
                 )
         _probe_prop_total = sum(r.arch.provider_probes_proposed for r in ok_runs)
         if _probe_prop_total > 0 or _hybrid_pp_calls > 0:
@@ -2856,9 +2856,9 @@ def _print_aggregate(results: List[RunResult], weights: QualityWeights = Quality
             total = sum(getattr(r.arch, total_attr) for r in ok_runs)
             return f"{(hits / total):.3f}" if total else "N/A"
 
-        chosen_parent_recall = _label_recall(
-            "direct_frontier_chosen_parent_hits",
-            "direct_frontier_chosen_parent_total",
+        chosen_source_edge_recall = _label_recall(
+            "direct_frontier_chosen_source_edge_hits",
+            "direct_frontier_chosen_source_edge_total",
         )
         revoked_neighbor_recall = _label_recall(
             "direct_frontier_revoked_hits",
@@ -2868,9 +2868,9 @@ def _print_aggregate(results: List[RunResult], weights: QualityWeights = Quality
             "direct_frontier_dormant_hits",
             "direct_frontier_dormant_total",
         )
-        loo_chosen_parent_recall = _label_recall(
-            "loo_frontier_chosen_parent_hits",
-            "loo_frontier_chosen_parent_total",
+        loo_chosen_source_edge_recall = _label_recall(
+            "loo_frontier_chosen_source_edge_hits",
+            "loo_frontier_chosen_source_edge_total",
         )
         loo_revoked_neighbor_recall = _label_recall(
             "loo_frontier_revoked_hits",
@@ -2885,8 +2885,8 @@ def _print_aggregate(results: List[RunResult], weights: QualityWeights = Quality
         print("relative_authority_frontier:")
         print(f"  evals={total_evals}")
         print(f"  avg_frontier_size={avg_frontier_size:.1f}")
-        print(f"  direct_frontier_chosen_parent_recall={chosen_parent_recall}")
-        print(f"  loo_frontier_chosen_parent_recall={loo_chosen_parent_recall}")
+        print(f"  direct_frontier_chosen_source_edge_recall={chosen_source_edge_recall}")
+        print(f"  loo_frontier_chosen_source_edge_recall={loo_chosen_source_edge_recall}")
         print(f"  direct_frontier_revoked_recall={revoked_neighbor_recall}")
         print(f"  loo_frontier_revoked_recall={loo_revoked_neighbor_recall}")
         print(f"  direct_frontier_dormant_recall={dormant_neighbor_recall}")
@@ -2915,8 +2915,8 @@ def _print_aggregate(results: List[RunResult], weights: QualityWeights = Quality
         )
         frontier_fraction = avg_size / avg_visible if avg_visible else 0.0
         reduction = 1.0 - frontier_fraction if total_evals else 0.0
-        chosen_hits = sum(r.arch.temporal_frontier_chosen_parent_hits for r in ok_runs)
-        chosen_total = sum(r.arch.temporal_frontier_chosen_parent_total for r in ok_runs)
+        chosen_hits = sum(r.arch.temporal_frontier_chosen_source_edge_hits for r in ok_runs)
+        chosen_total = sum(r.arch.temporal_frontier_chosen_source_edge_total for r in ok_runs)
         revoked_hits = sum(r.arch.temporal_frontier_revoked_hits for r in ok_runs)
         revoked_total = sum(r.arch.temporal_frontier_revoked_total for r in ok_runs)
         chosen_recall = chosen_hits / chosen_total if chosen_total else 0.0
@@ -2927,7 +2927,7 @@ def _print_aggregate(results: List[RunResult], weights: QualityWeights = Quality
         print(f"  avg_visible_count={avg_visible:.1f}")
         print(f"  avg_frontier_size={avg_size:.1f}")
         print(f"  frontier_fraction={frontier_fraction:.3f}")
-        print(f"  chosen_parent_recall={chosen_recall:.3f}")
+        print(f"  chosen_source_edge_recall={chosen_recall:.3f}")
         print(f"  random_recall_baseline={frontier_fraction:.3f}")
         print(f"  recall_lift={recall_lift:.3f}")
         revoked_recall = (
@@ -3020,8 +3020,8 @@ def main():
     p.add_argument("--hybrid-control", default="off",
                    choices=["off", "interfaces"],
                    help="hybrid control mode: off=current behavior; interfaces=symbolic provider wrappers (default: off)")
-    p.add_argument("--parent-ranker", default=None,
-                   help=("parent ranker provider(s) for --hybrid-control interfaces. "
+    p.add_argument("--source_edge-ranker", default=None,
+                   help=("source_edge ranker provider(s) for --hybrid-control interfaces. "
                          "Use comma-separated values to compare policies: "
                          "sensitivity,history,history_rescue,neural_history (default: neural_history)"))
     p.add_argument("--probe-proposer", default=None,
@@ -3190,16 +3190,16 @@ def main():
         args.authority_derivation_policy,
     )
 
-    parent_ranker_arg = args.parent_ranker
+    source_edge_ranker_arg = args.source_edge_ranker
     probe_proposer_arg = args.probe_proposer
     if args.policy_report:
-        if parent_ranker_arg is None:
-            parent_ranker_arg = _POLICY_REPORT_PARENT_RANKERS
+        if source_edge_ranker_arg is None:
+            source_edge_ranker_arg = _POLICY_REPORT_source_edge_RANKERS
         if probe_proposer_arg is None:
             probe_proposer_arg = _POLICY_REPORT_PROBE_PROPOSERS
     else:
-        if parent_ranker_arg is None:
-            parent_ranker_arg = _DEFAULT_PARENT_RANKER
+        if source_edge_ranker_arg is None:
+            source_edge_ranker_arg = _DEFAULT_source_edge_RANKER
         if probe_proposer_arg is None:
             probe_proposer_arg = _DEFAULT_PROBE_PROPOSER
 
@@ -3207,9 +3207,9 @@ def main():
     cycle_list = [int(x) for x in args.cycles.split(",")]
     seed_list  = [int(x) for x in args.seeds.split(",")]
     schedule_list = _parse_schedule_list(args.schedule)
-    policy_pairs = _provider_policy_pairs(parent_ranker_arg, probe_proposer_arg)
+    policy_pairs = _provider_policy_pairs(source_edge_ranker_arg, probe_proposer_arg)
     if args.policy_report and _POLICY_REPORT_BASELINE not in {
-        f"{parent}/{probe}" for parent, probe in policy_pairs
+        f"{source_edge}/{probe}" for source_edge, probe in policy_pairs
     }:
         raise SystemExit("--policy-report requires sensitivity/none baseline policy")
 
@@ -3252,7 +3252,7 @@ def main():
                   shadow_key_min_ok=args.shadow_key_min_ok,
                   shadow_key_min_clean_streak=args.shadow_key_min_clean_streak,
                   shadow_key_symbolic_false_ok_tolerance=args.shadow_key_symbolic_false_ok_tolerance,
-                  parent_ranker=parent_ranker,
+                  source_edge_ranker=source_edge_ranker,
                   probe_proposer=probe_proposer,
                   relative_authority_report=args.relative_authority_report,
                   relative_authority_frontier_report=args.relative_authority_frontier_report,
@@ -3278,7 +3278,7 @@ def main():
         for c in cycle_list
         for s in seed_list
         for f, ms, w in shadow_combos
-        for parent_ranker, probe_proposer in policy_pairs
+        for source_edge_ranker, probe_proposer in policy_pairs
     ]
 
     total = len(configs)
@@ -3412,7 +3412,7 @@ def main():
                     "seed": r.config.seed,
                     "schedule": r.config.schedule,
                     "policy": _policy_label(r),
-                    "parent_ranker": r.config.parent_ranker,
+                    "source_edge_ranker": r.config.source_edge_ranker,
                     "probe_proposer": r.config.probe_proposer,
                     "elapsed": round(r.elapsed, 3),
                     "ok": r.ok,
@@ -3452,18 +3452,18 @@ def main():
                     "shadow_key_revoked_would_miss_active_failure": (
                         r.arch.shadow_key_revoked_would_miss_active_failure
                     ),
-                    "parent_proposal_calls": r.arch.parent_proposal_calls,
-                    "parent_proposal_hit_rate": round(r.arch.parent_proposal_hit_rate, 6),
-                    "parent_proposal_miss_count": r.arch.parent_proposal_miss_count,
-                    "parent_proposal_rank_mean": round(r.arch.parent_proposal_rank_mean, 6),
-                    "parent_proposal_rank_max": r.arch.parent_proposal_rank_max,
+                    "source_edge_proposal_calls": r.arch.source_edge_proposal_calls,
+                    "source_edge_proposal_hit_rate": round(r.arch.source_edge_proposal_hit_rate, 6),
+                    "source_edge_proposal_miss_count": r.arch.source_edge_proposal_miss_count,
+                    "source_edge_proposal_rank_mean": round(r.arch.source_edge_proposal_rank_mean, 6),
+                    "source_edge_proposal_rank_max": r.arch.source_edge_proposal_rank_max,
                     "history_ranker_calls": r.arch.history_ranker_calls,
                     "sensitivity_rescue_calls": r.arch.sensitivity_rescue_calls,
                     "sensitivity_rescue_interventions": r.arch.sensitivity_rescue_interventions,
                     "rescue_candidates_added": r.arch.rescue_candidates_added,
-                    "rescue_chosen_parent_hits": r.arch.rescue_chosen_parent_hits,
-                    "chosen_parent_from_history": r.arch.chosen_parent_from_history,
-                    "chosen_parent_from_rescue": r.arch.chosen_parent_from_rescue,
+                    "rescue_chosen_source_edge_hits": r.arch.rescue_chosen_source_edge_hits,
+                    "chosen_source_edge_from_history": r.arch.chosen_source_edge_from_history,
+                    "chosen_source_edge_from_rescue": r.arch.chosen_source_edge_from_rescue,
                     "provider_probes_proposed": r.arch.provider_probes_proposed,
                     "provider_probes_valid": r.arch.provider_probes_valid,
                     "provider_probes_invalid": r.arch.provider_probes_invalid,
@@ -3709,8 +3709,8 @@ def main():
                     rec.update({
                         "graph_frontier_evals": r.arch.graph_frontier_evals,
                         "graph_frontier_avg_size": round(r.arch.graph_frontier_avg_size, 6),
-                        "graph_frontier_chosen_parent_recall": round(
-                            r.arch.graph_frontier_chosen_parent_recall, 6
+                        "graph_frontier_chosen_source_edge_recall": round(
+                            r.arch.graph_frontier_chosen_source_edge_recall, 6
                         ),
                         "graph_frontier_revoked_recall": round(
                             r.arch.graph_frontier_revoked_recall, 6
@@ -3718,11 +3718,11 @@ def main():
                         "graph_frontier_dormant_recall": round(
                             r.arch.graph_frontier_dormant_recall, 6
                         ),
-                        "direct_frontier_chosen_parent_recall": round(
-                            r.arch.direct_frontier_chosen_parent_recall, 6
+                        "direct_frontier_chosen_source_edge_recall": round(
+                            r.arch.direct_frontier_chosen_source_edge_recall, 6
                         ),
-                        "loo_frontier_chosen_parent_recall": round(
-                            r.arch.loo_frontier_chosen_parent_recall, 6
+                        "loo_frontier_chosen_source_edge_recall": round(
+                            r.arch.loo_frontier_chosen_source_edge_recall, 6
                         ),
                         "direct_frontier_revoked_recall": round(
                             r.arch.direct_frontier_revoked_recall, 6
@@ -3743,14 +3743,14 @@ def main():
                         "temporal_frontier_avg_size": round(
                             r.arch.temporal_frontier_avg_size, 6
                         ),
-                        "temporal_frontier_chosen_parent_hits": (
-                            r.arch.temporal_frontier_chosen_parent_hits
+                        "temporal_frontier_chosen_source_edge_hits": (
+                            r.arch.temporal_frontier_chosen_source_edge_hits
                         ),
-                        "temporal_frontier_chosen_parent_total": (
-                            r.arch.temporal_frontier_chosen_parent_total
+                        "temporal_frontier_chosen_source_edge_total": (
+                            r.arch.temporal_frontier_chosen_source_edge_total
                         ),
-                        "temporal_frontier_chosen_parent_recall": round(
-                            r.arch.temporal_frontier_chosen_parent_recall, 6
+                        "temporal_frontier_chosen_source_edge_recall": round(
+                            r.arch.temporal_frontier_chosen_source_edge_recall, 6
                         ),
                         "temporal_frontier_revoked_hits": (
                             r.arch.temporal_frontier_revoked_hits

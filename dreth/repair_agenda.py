@@ -28,7 +28,7 @@ class RepairAgendaItem:
     """
     cycle: int
     target_var: int
-    failure_kind: str            # "sentinel_failure" | "parent_change" | "func_change" | "unknown"
+    failure_kind: str            # "sentinel_failure" | "source_edge_change" | "func_change" | "unknown"
     source: str                  # "needs_audit" | "cascade" | "manual"
     covering_regime_id: Optional[str]    # regime covering this var, if any
     covering_composite_id: Optional[int] # composite index covering this var, if any

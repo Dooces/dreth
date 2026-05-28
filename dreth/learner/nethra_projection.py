@@ -17,14 +17,14 @@ if TYPE_CHECKING:
 
 # Which use_rights are allowed to influence each operation hook.
 _HOOK_USE_RIGHTS: dict[str, frozenset[str]] = {
-    "parent_candidates": frozenset({"ranking_hint", "soft_filter"}),
+    "source_edge_candidates": frozenset({"ranking_hint", "soft_filter"}),
     "ranking_hint":      frozenset({"ranking_hint", "soft_filter"}),
     "probe_hint":        frozenset({"probe_hint",   "soft_filter"}),
 }
 
 # Hooks that carry primary projection authority.
 # Trass and unresolved surfaces must not emit for these hooks.
-_PRIMARY_HOOKS: frozenset[str] = frozenset({"parent_candidates", "ranking_hint", "probe_hint"})
+_PRIMARY_HOOKS: frozenset[str] = frozenset({"source_edge_candidates", "ranking_hint", "probe_hint"})
 
 # Role states that block primary projection.
 _BLOCKED_PRIMARY_ROLE_STATES: frozenset[str] = frozenset({"trass", "unresolved"})

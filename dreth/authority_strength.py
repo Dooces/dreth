@@ -169,7 +169,7 @@ def _recent_churn(fits: list[Any]) -> bool:
     recent = fits[-4:]
     signatures = {
         (
-            tuple(int(p) for p in getattr(fd, "best_parents", ()) or ()),
+            tuple(int(p) for p in getattr(fd, "best_source_edges", ()) or ()),
             str(getattr(fd, "best_func", "")),
         )
         for fd in recent
@@ -218,14 +218,14 @@ def _open_novelty_vars(agent: Any) -> set[int]:
     }
 
 
-def _var_nethra_id(var: int, parents: tuple[int, ...], func: str) -> str:
-    return f"var_fit:x{int(var)}:{func}({','.join(str(int(p)) for p in parents)})"
+def _var_nethra_id(var: int, source_edges: tuple[int, ...], func: str) -> str:
+    return f"var_fit:x{int(var)}:{func}({','.join(str(int(p)) for p in source_edges)})"
 
 
-def _context_key(var: int, visible: int, parents: tuple[int, ...]) -> str:
+def _context_key(var: int, visible: int, source_edges: tuple[int, ...]) -> str:
     bits = [f"authority_strength", f"x{int(var)}", f"vis={int(visible)}"]
-    if parents:
-        bits.append("parents=" + ",".join(str(int(p)) for p in parents))
+    if source_edges:
+        bits.append("source_edges=" + ",".join(str(int(p)) for p in source_edges))
     return "|".join(bits)
 
 
@@ -959,7 +959,7 @@ def compute_authority_strength_records(agent: Any, cycle: int) -> list[Authority
 
     for var in range(visible):
         n = ledger.vars[var]
-        parents = tuple(int(p) for p in getattr(n, "parents", ()) or ())
+        source_edges = tuple(int(p) for p in getattr(n, "source_edges", ()) or ())
         func = str(getattr(n, "func", ""))
         fits = fit_by_var.get(var, [])
         last_fit = fits[-1] if fits else None
@@ -973,7 +973,7 @@ def compute_authority_strength_records(agent: Any, cycle: int) -> list[Authority
         frontier = getattr(n, "tied_frontier", None)
         if frontier is not None:
             tie_count = max(tie_count, len(getattr(frontier, "candidates", ()) or ()))
-        nid = _var_nethra_id(var, parents, func)
+        nid = _var_nethra_id(var, source_edges, func)
         var_cluster_signals = set(cluster_signals.get(var, set()))
         if var in regime_failed_vars:
             var_cluster_signals.add("regime_sentinel_failure")
@@ -1005,7 +1005,7 @@ def compute_authority_strength_records(agent: Any, cycle: int) -> list[Authority
         records.append(AuthorityStrengthRecord(
             var=var,
             nethra_id=nid,
-            context_key=_context_key(var, visible, parents),
+            context_key=_context_key(var, visible, source_edges),
             cycle=int(cycle),
             strength=strength,
             reason=reason,

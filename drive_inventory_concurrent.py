@@ -85,12 +85,12 @@ def fail(msg: str, code: int = 1) -> None:
     raise SystemExit(code)
 
 
-def ensure_parent(path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+def ensure_source_edge(path: Path) -> None:
+    path.source_edge.mkdir(source_edges=True, exist_ok=True)
 
 
 def connect(db: Path) -> sqlite3.Connection:
-    ensure_parent(db)
+    ensure_source_edge(db)
     con = sqlite3.connect(str(db), timeout=60)
     con.execute("PRAGMA journal_mode=WAL;")
     con.execute("PRAGMA synchronous=NORMAL;")
@@ -360,7 +360,7 @@ def scan_roots(db: Path, roots: list[str], reset: bool, workers: int) -> None:
 
 
 def write_tsv(rows: Iterable[tuple], headers: list[str], out: Path) -> None:
-    ensure_parent(out)
+    ensure_source_edge(out)
     with out.open("w", newline="", encoding="utf-8") as f:
         w = csv.writer(f, delimiter="\t")
         w.writerow(headers)
@@ -467,7 +467,7 @@ def compare_trees(a: str, b: str, outdir: Path, workers: int) -> None:
         else:
             different_size.append((rel, sa, sb, path_a, path_b))
 
-    outdir.mkdir(parents=True, exist_ok=True)
+    outdir.mkdir(source_edges=True, exist_ok=True)
     write_tsv(((rel, format_size(size), size, a_path, b_path) for rel, size, a_path, b_path in same),
               ["relpath", "human_size", "bytes", "path_a", "path_b"], outdir / "compare_same_files.tsv")
     write_tsv(((rel, format_size(sa), sa, format_size(sb), sb, a_path, b_path)
@@ -578,7 +578,7 @@ def hash_list(db: Path, input_file: str, outdir: Path, workers: int) -> None:
 
     rows = cached_rows + new_rows
     out = outdir / "sha256_hashes.tsv"
-    ensure_parent(out)
+    ensure_source_edge(out)
     with out.open("w", newline="", encoding="utf-8") as f:
         w = csv.writer(f, delimiter="\t")
         w.writerow(["sha256", "human_size", "bytes", "path"])

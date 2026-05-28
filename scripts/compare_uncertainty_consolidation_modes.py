@@ -11,7 +11,7 @@ from pathlib import Path
 from statistics import mean
 from typing import Any, Iterable, TextIO
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().source_edges[1]
 sys.path.insert(0, str(ROOT))
 
 from dreth.learner.uncertainty_consolidation import (
@@ -27,7 +27,7 @@ BEHAVIOR_FIELDS = (
     "revocations",
     "unique_fails",
     "quality_cost",
-    "temporal_frontier_chosen_parent_recall",
+    "temporal_frontier_chosen_source_edge_recall",
     "temporal_frontier_recall_lift",
     "dormant_total",
     "vars_open_novelty",
@@ -42,7 +42,7 @@ LOWER_IS_BETTER = {
     "vars_open_novelty",
 }
 HIGHER_IS_BETTER = {
-    "temporal_frontier_chosen_parent_recall",
+    "temporal_frontier_chosen_source_edge_recall",
     "temporal_frontier_recall_lift",
     "dormant_total",
 }
@@ -173,7 +173,7 @@ def _benefit_attributable(deltas: dict[str, float], warnings: list[str]) -> bool
         deltas.get("quality_cost", 0.0) < 0
         or deltas.get("revocations", 0.0) < 0
         or deltas.get("unique_fails", 0.0) < 0
-        or deltas.get("temporal_frontier_chosen_parent_recall", 0.0) > 0
+        or deltas.get("temporal_frontier_chosen_source_edge_recall", 0.0) > 0
         or deltas.get("temporal_frontier_recall_lift", 0.0) > 0
     )
 

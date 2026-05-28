@@ -109,9 +109,9 @@ def compute_basic_outcome(rows: Iterable[dict[str, Any]]) -> BasicOutcome:
         out.novelty_open += _as_int(row.get("vars_open_novelty"))
         out.frontier_stress += _as_int(row.get("frontier_cleared"))
         out.graph_frontier_evals += _as_int(row.get("graph_frontier_evals"))
-        out.graph_frontier_recall_total += _as_float(row.get("graph_frontier_chosen_parent_recall"))
+        out.graph_frontier_recall_total += _as_float(row.get("graph_frontier_chosen_source_edge_recall"))
         out.temporal_frontier_evals += _as_int(row.get("temporal_frontier_evals"))
-        out.temporal_frontier_recall_total += _as_float(row.get("temporal_frontier_chosen_parent_recall"))
+        out.temporal_frontier_recall_total += _as_float(row.get("temporal_frontier_chosen_source_edge_recall"))
         out.temporal_frontier_lift_total += _as_float(row.get("temporal_frontier_recall_lift"))
     return out
 
@@ -147,19 +147,19 @@ def compute_discovery_summary(rows: Iterable[dict[str, Any]]) -> DiscoverySummar
             if not isinstance(item, dict):
                 continue
             rel_type = str(item.get("relation_type") or "unknown")
-            overlap = bool(item.get("learned_parent_overlap"))
-            truth_parents = bool(item.get("truth_parents") or item.get("truth_delayed_parents"))
+            overlap = bool(item.get("learned_source_edge_overlap"))
+            truth_source_edges = bool(item.get("truth_source_edges") or item.get("truth_delayed_source_edges"))
             compatible = bool(item.get("agent_func_compatible"))
             certified = item.get("status") == "certified" or bool(item.get("authoritative"))
             uncertain = item.get("status") in {"uncertain", "proposed"} or item.get("skip_role") == "untested"
             withheld = not bool(item.get("authoritative")) or item.get("skip_role") in {"untested", "noise_floor"}
-            learned_parents = bool(item.get("learned_parents"))
+            learned_source_edges = bool(item.get("learned_source_edges"))
 
-            if certified and (overlap or (compatible and not truth_parents)):
+            if certified and (overlap or (compatible and not truth_source_edges)):
                 summary.appeared_learned[rel_type] += 1
-            elif truth_parents and not overlap:
+            elif truth_source_edges and not overlap:
                 summary.failed_to_learn[rel_type] += 1
-            hidden_mismatch_under_authority = certified and truth_parents and learned_parents and not overlap
+            hidden_mismatch_under_authority = certified and truth_source_edges and learned_source_edges and not overlap
             if hidden_mismatch_under_authority:
                 summary.external_mismatch_under_authority[rel_type] += 1
                 stressed = (
@@ -224,7 +224,7 @@ def print_report(rows: list[dict[str, Any]], out: TextIO | None = None) -> None:
     )
     if basic.graph_frontier_evals:
         avg = basic.graph_frontier_recall_total / max(1, basic.runs)
-        print(f"  graph_frontier: evals={basic.graph_frontier_evals} avg_chosen_parent_recall={avg:.3f}", file=out)
+        print(f"  graph_frontier: evals={basic.graph_frontier_evals} avg_chosen_source_edge_recall={avg:.3f}", file=out)
     if basic.temporal_frontier_evals:
         avg_recall = basic.temporal_frontier_recall_total / max(1, basic.runs)
         avg_lift = basic.temporal_frontier_lift_total / max(1, basic.runs)
@@ -259,7 +259,7 @@ def print_report(rows: list[dict[str, Any]], out: TextIO | None = None) -> None:
     if basic.graph_frontier_evals or basic.temporal_frontier_evals:
         print("  structures where graph locality helped:", file=out)
         if basic.graph_frontier_evals:
-            print("    graph frontier produced post-hoc chosen-parent recall signal", file=out)
+            print("    graph frontier produced post-hoc chosen-source_edge recall signal", file=out)
         if basic.temporal_frontier_evals:
             print("    temporal frontier produced post-hoc recall/lift signal", file=out)
     else:

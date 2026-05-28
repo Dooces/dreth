@@ -20,7 +20,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, TextIO
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().source_edges[1]))
 
 from dreth.uncertainty_governance import (
     PROPOSAL_ACTIONS,
@@ -220,8 +220,8 @@ def print_report(
         "  logic, authority records, and throttling are all unaffected.\n"
         "  Governance proposals are NOT correct actions. Hidden truth is used\n"
         "  only post-hoc in sections D and E to select cases for interpretation;\n"
-        "  the governance classifier itself never reads truth_parents, truth_func,\n"
-        "  truth_delayed_parents, truth_latents, or any hidden-world field.",
+        "  the governance classifier itself never reads truth_source_edges, truth_func,\n"
+        "  truth_delayed_source_edges, truth_latents, or any hidden-world field.",
         file=out,
     )
 

@@ -47,8 +47,8 @@ class RefitBaseline:
         """First-time fits for all currently-visible vars."""
         self.last = []
         for v in range(self.world.visible_count):
-            parents, func, _, _ = fit_var(v, self.world, self.rng, self.intervention_budget, DEFAULT_TOLERANCE)
-            self.last.append((parents, func))
+            source_edges, func, _, _ = fit_var(v, self.world, self.rng, self.intervention_budget, DEFAULT_TOLERANCE)
+            self.last.append((source_edges, func))
             self.total_interventions += self.intervention_budget
 
     def run_cycle(self, mutation: HiddenMutation) -> None:
@@ -61,14 +61,14 @@ class RefitBaseline:
         any_changed = False
         while len(self.last) < self.world.visible_count:
             v = len(self.last)
-            parents, func, _, _ = fit_var(v, self.world, self.rng, self.intervention_budget, DEFAULT_TOLERANCE)
-            self.last.append((parents, func))
+            source_edges, func, _, _ = fit_var(v, self.world, self.rng, self.intervention_budget, DEFAULT_TOLERANCE)
+            self.last.append((source_edges, func))
             self.total_interventions += self.intervention_budget
         for v in range(self.world.visible_count):
-            parents, func, _, _ = fit_var(v, self.world, self.rng, self.intervention_budget, DEFAULT_TOLERANCE)
-            new.append((parents, func))
+            source_edges, func, _, _ = fit_var(v, self.world, self.rng, self.intervention_budget, DEFAULT_TOLERANCE)
+            new.append((source_edges, func))
             self.total_interventions += self.intervention_budget
-            if (parents, func) != self.last[v]:
+            if (source_edges, func) != self.last[v]:
                 any_changed = True
         self.last = new
         self.records.append((mutation.cycle, mutation.rule_changed, any_changed))

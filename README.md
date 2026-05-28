@@ -31,9 +31,9 @@ The useful separation is:
 
 ### StructureGraph
 
-The structure graph is the reusable substrate. It contains learned and observed structure: variables, functions, parent sets, candidate hypotheses, tied frontiers, dormant alternatives, probes, sentinels, experts, residual patterns, temporal traces, context-role records, and scaffold/sleep products.
+The structure graph is the reusable substrate. It contains learned and observed structure: variables, functions, source_edge sets, candidate hypotheses, tied frontiers, dormant alternatives, probes, sentinels, experts, residual patterns, temporal traces, context-role records, and scaffold/sleep products.
 
-Structure can be shared across contexts. For example, two different apparent regimes may both touch an `ADD` operator family, a delayed-effect pattern, or a sensor-noise structure.
+Structure can be shared across contexts. For example, two different apsource_edge regimes may both touch an `ADD` operator family, a delayed-effect pattern, or a sensor-noise structure.
 
 ### Nethra
 
@@ -81,7 +81,7 @@ This lets a current context reuse part of one prior substrate, part of another, 
 
 The agent does not need to know that it moved from "world A" to "world B." It only needs to detect that the active nethra set lost recognition power: predictions degrade, old filters stop matching, sentinels fail, ranking lift drops, or familiar handles no longer retrieve usable structure.
 
-That recognition collapse opens a regime-boundary candidate. Old nethras are downgraded to hints. Any local overlap with existing structure is tested. If recurrent overlap improves prediction, parent ranking, probe choice, or repair localization, a new local bridge forms. If multiple bridges co-activate and keep improving search, a regime nethra emerges.
+That recognition collapse opens a regime-boundary candidate. Old nethras are downgraded to hints. Any local overlap with existing structure is tested. If recurrent overlap improves prediction, source_edge ranking, probe choice, or repair localization, a new local bridge forms. If multiple bridges co-activate and keep improving search, a regime nethra emerges.
 
 A regime is therefore an active, stable expression over nethras, not a label handed to the agent.
 
@@ -92,7 +92,7 @@ A regime is therefore an active, stable expression over nethras, not a label han
 | `dreth/world.py` | Hidden causal worlds and schedules. Provides observed scalar variables, interventions, drift/regime schedules, and blind challenge generation. Hidden debug state is for offline analysis only. |
 | `dreth/agent.py` | `ChainedAgent`, the main control loop. Runs audits, fits, sentinels, frontier handling, repair agenda integration, uncertainty consolidation assists, and context-role recording. |
 | `dreth/ledger.py` | Core data structures for variable handles, authority records, tied frontiers, dormant alternatives, composites, envelopes, and revocation state. |
-| `dreth/fit.py` | Enumerates and scores parent/function hypotheses under the agent vocabulary. Produces best fits, ties, near-ties, and diagnostics. |
+| `dreth/fit.py` | Enumerates and scores source_edge/function hypotheses under the agent vocabulary. Produces best fits, ties, near-ties, and diagnostics. |
 | `dreth/sentinels.py` | Selects and checks sentinel probes used to cheaply test whether prior structure still holds. |
 | `dreth/regime.py` | Tracks recurring co-failure/regime patterns. Existing regime handling is still less mature than the lens/expression model described here. |
 | `dreth/context_role_index.py` | Current provenance index over nethra graph nodes and context roles. Useful, but not yet a full nethra-expression compiler. |
@@ -105,7 +105,7 @@ At a high level, the agent repeatedly:
 1. Observes current scalar world state.
 2. Chooses what needs attention under a limited audit budget.
 3. Runs full audits when a variable or handle needs repair or initial structure.
-4. Fits candidate parent/function hypotheses using agent-visible probes.
+4. Fits candidate source_edge/function hypotheses using agent-visible probes.
 5. Records ties, near-ties, margins, alternatives, novelty, uncertainty, and role changes.
 6. Installs the best available working structure into the ledger.
 7. Uses sentinels, composites, and role records to reduce repeated work when evidence supports it.

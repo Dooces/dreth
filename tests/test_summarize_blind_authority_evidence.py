@@ -5,7 +5,7 @@ import os
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().source_edges[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 
@@ -21,9 +21,9 @@ def _item(**overrides):
     base = {
         "var": 0,
         "relation_type": "delayed",
-        "truth_parents": [1],
-        "truth_delayed_parents": [],
-        "learned_parents": [2],
+        "truth_source_edges": [1],
+        "truth_delayed_source_edges": [],
+        "learned_source_edges": [2],
         "learned_func": "FIRST",
         "authoritative": True,
         "status": "certified",
@@ -234,12 +234,12 @@ def test_section_f_strict_changes_weak_surrogate_handling(tmp_path: Path, capsys
 
 
 def test_section_f_hidden_truth_selects_not_classifies(tmp_path: Path, capsys) -> None:
-    # truth_parents selects the mismatch case; throttle classification must not
-    # depend on truth_parents or truth_func.
+    # truth_source_edges selects the mismatch case; throttle classification must not
+    # depend on truth_source_edges or truth_func.
     item_with_truth = _item(
-        truth_parents=[1],
-        truth_delayed_parents=[],
-        learned_parents=[2],
+        truth_source_edges=[1],
+        truth_delayed_source_edges=[],
+        learned_source_edges=[2],
         truth_func="HIDDEN",
         strong_observations=5,
         sentinel_count=3,
@@ -268,9 +268,9 @@ def test_section_g_passive_stress_explicitly_shown(tmp_path: Path, capsys) -> No
     # rev=0, drift=0 but passive_stress_recent > 0.  Section G must name
     # passive_stress_trigger as the active trigger for this case.
     item = _item(
-        truth_parents=[1],
-        truth_delayed_parents=[],
-        learned_parents=[2],
+        truth_source_edges=[1],
+        truth_delayed_source_edges=[],
+        learned_source_edges=[2],
         authoritative=True,
         recent_revocations=0,
         recent_detected_drift=0,
@@ -317,8 +317,8 @@ def test_section_g_prints_for_all_report_modes(tmp_path: Path, capsys) -> None:
 def test_section_g_by_reason_shows_trigger_source(tmp_path: Path, capsys) -> None:
     # A contradicted case driven by revocations: by_reason must show rev>0.
     item = _item(
-        truth_parents=[1],
-        learned_parents=[2],
+        truth_source_edges=[1],
+        learned_source_edges=[2],
         recent_revocations=2,
         recent_detected_drift=0,
         consecutive_sentinel_failures=0,

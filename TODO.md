@@ -121,7 +121,7 @@ NethraExpressionProposal:
   vars
   contexts
   common_signatures
-  common_parents
+  common_source_edges
   operation:
     - union
     - intersection
@@ -186,7 +186,7 @@ Use visible/exported fields only:
   - vars/components touched
   - contexts/context families
   - role histories/surfaces
-  - parent/signature overlap
+  - source_edge/signature overlap
   - recurring signal overlap
   - source kind overlap
   - sentinel/revocation/failure counters if visible
@@ -195,9 +195,9 @@ Use visible/exported fields only:
   - temporal proximity if temporal records exist
 
 Do not use:
-  - truth_parents
+  - truth_source_edges
   - truth_func
-  - truth_delayed_parents
+  - truth_delayed_source_edges
   - truth_latents
   - debug_blind_challenge_manifest
   - relation_type except in a separate post-hoc report section disabled by default

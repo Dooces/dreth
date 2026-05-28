@@ -5,7 +5,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().source_edges[2]
 sys.path.insert(0, str(ROOT))
 
 from dreth.learner.nethra_mind_store import NethraMindStore, effective_use_right
@@ -32,7 +32,7 @@ def _sleep_product(
         "proposal_id": proposal_id,
         "member_nethras": member_nethras or ["n1", "n2"],
         "touched_atoms": ["x0", "x1"],
-        "touched_structure_refs": ["parents:0,1"],
+        "touched_structure_refs": ["source_edges:0,1"],
         "proposed_use_right": proposed_use_right,
         "proposed_context_scope": "test_ctx",
         "salience_delta": 0.5,
@@ -47,7 +47,7 @@ def _record_row(
     nethra_id: str = "nid1",
     atoms: list[str] | None = None,
     *,
-    context_scope: str = "parent_candidates|x0|vis=3",
+    context_scope: str = "source_edge_candidates|x0|vis=3",
     use_right: str = "ranking_hint",
     success_count: int = 0,
     salience: float = 0.0,
@@ -68,7 +68,7 @@ def _record_row(
         "cycle_end": cycle_end,
         "nethra_id": nethra_id,
         "touched_atoms": atoms,
-        "touched_structure_refs": ["parents:0"],
+        "touched_structure_refs": ["source_edges:0"],
         "member_nethras": [nethra_id],
         "contexts": [context_scope],
         "context_scope": context_scope,
@@ -191,7 +191,7 @@ def test_record_mode_equals_off_with_compacted_mind_loaded():
             var=0,
             context_key="test_ctx",
             candidates=original,
-            hook="parent_candidates",
+            hook="source_edge_candidates",
             cycle=1,
         )
         assert tuple(ranked) == original
@@ -204,7 +204,7 @@ def test_assist_reorders_using_ranking_hint_from_compacted_mind():
         _record_row(
             "nid_x2",
             atoms=["x2"],
-            context_scope="parent_candidates|x0|vis=3",
+            context_scope="source_edge_candidates|x0|vis=3",
             use_right="ranking_hint",
             success_count=5,
             salience=2.0,
@@ -225,9 +225,9 @@ def test_assist_reorders_using_ranking_hint_from_compacted_mind():
 
         ranked = idx.rank_candidates(
             var=0,
-            context_key="parent_candidates|x0|vis=3",
+            context_key="source_edge_candidates|x0|vis=3",
             candidates=(1, 2),
-            hook="parent_candidates",
+            hook="source_edge_candidates",
             cycle=50,
         )
         # x2 is the ranking_hint atom → candidate 2 moves to front
@@ -264,7 +264,7 @@ def test_hidden_truth_fields_are_not_ingested():
     store = NethraMindStore()
 
     row_with_truth = _record_row("bad_nid")
-    row_with_truth["truth_parents"] = [1, 2]
+    row_with_truth["truth_source_edges"] = [1, 2]
     store.ingest_record(row_with_truth, line_no=1, generation=0)
     assert "bad_nid" not in store._nodes
 
@@ -281,7 +281,7 @@ def test_hidden_truth_fields_are_not_ingested():
         "context_key": "ctx",
         "active_atoms": ["x0"],
         "active_nethras": [],
-        "hook": "parent_candidates",
+        "hook": "source_edge_candidates",
         "use_right": "ranking_hint",
         "behavior_effect": 1,
         "hidden_truth_used": True,
@@ -365,7 +365,7 @@ def test_structural_id_stable_across_repeated_ingestion():
         "entry_kind": "sleep_product",
         "member_nethras": ["m1"],
         "touched_atoms": ["x3"],
-        "touched_structure_refs": ["parents:3"],
+        "touched_structure_refs": ["source_edges:3"],
         "proposed_use_right": "feature_only",
         "proposed_context_scope": "ctx_a",
         "salience_delta": 0.2,
@@ -394,7 +394,7 @@ def test_experience_events_update_existing_nodes_only():
         "context_key": "ctx",
         "active_atoms": ["x0"],
         "active_nethras": ["nid_e", "nid_ghost"],
-        "hook": "parent_candidates",
+        "hook": "source_edge_candidates",
         "use_right": "ranking_hint",
         "behavior_effect": 1,
         "success": True,
@@ -421,7 +421,7 @@ def test_authority_effect_count_never_propagated_through_experience_events():
         "context_key": "ctx",
         "active_atoms": ["x0"],
         "active_nethras": ["nid_auth"],
-        "hook": "parent_candidates",
+        "hook": "source_edge_candidates",
         "use_right": "ranking_hint",
         "behavior_effect": 1,
         "authority_effect": 99,

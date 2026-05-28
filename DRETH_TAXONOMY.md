@@ -85,7 +85,7 @@ The concrete conditions under which a role was tested.
 
 Examples:
 
-- parent signature
+- source_edge signature
 - form/operator identity
 - route family
 - gate values
@@ -149,7 +149,7 @@ local trass certificates.
 Run role certification when role evidence may have changed:
 
 - first encounter
-- parent/signature change
+- source_edge/signature change
 - sentinel failure
 - compression mismatch
 - routing mismatch

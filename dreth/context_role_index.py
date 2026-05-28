@@ -47,7 +47,7 @@ EdgeKind = Literal[
     "coactive-with",
     "prior-trass-with",
     "prior-tareth-with",
-    "shares-parent",
+    "shares-source_edge",
     "shares-context",
 ]
 
@@ -60,7 +60,7 @@ class NethraNode:
     kind: NethraKind = "unknown"
     target_var: int | None = None
     components: tuple[int, ...] = ()
-    learned_parents: tuple[int, ...] = ()
+    learned_source_edges: tuple[int, ...] = ()
     learned_func: str = ""
     signature: str = ""
     first_seen_cycle: int = 0
@@ -108,7 +108,7 @@ class ContextRoleRecord:
 class ContextRoleMatchQuality:
     shared_var: bool = False
     shared_target_var: bool = False
-    shared_parent_count: int = 0
+    shared_source_edge_count: int = 0
     shared_component_count: int = 0
     shared_context_exact: bool = False
     shared_context_family: bool = False
@@ -131,7 +131,7 @@ class ContextRoleMatch:
     context_family: str = ""
     shared_components: tuple[int, ...] = ()
     shared_context: tuple[str, ...] = ()
-    shared_parents: tuple[int, ...] = ()
+    shared_source_edges: tuple[int, ...] = ()
     shared_uncertainty_signals: tuple[str, ...] = ()
     prior_roles: tuple[str, ...] = ()
     current_candidate_role: str = "best_available"
@@ -146,7 +146,7 @@ class ContextRoleIndex:
         self.roles: list[ContextRoleRecord] = []
         self._by_component: dict[int, set[str]] = defaultdict(set)
         self._by_var: dict[int, set[str]] = defaultdict(set)
-        self._by_parent: dict[int, set[str]] = defaultdict(set)
+        self._by_source_edge: dict[int, set[str]] = defaultdict(set)
         self._by_context: dict[str, list[ContextRoleRecord]] = defaultdict(list)
         self._roles_by_nethra: dict[str, list[ContextRoleRecord]] = defaultdict(list)
         self._last_role_key: dict[tuple[str, str, str], ContextRoleRecord] = {}
@@ -184,7 +184,7 @@ class ContextRoleIndex:
                 kind=node.kind if node.kind != "unknown" else existing.kind,
                 target_var=node.target_var if node.target_var is not None else existing.target_var,
                 components=tuple(sorted(set(existing.components) | set(node.components))),
-                learned_parents=tuple(sorted(set(existing.learned_parents) | set(node.learned_parents))),
+                learned_source_edges=tuple(sorted(set(existing.learned_source_edges) | set(node.learned_source_edges))),
                 learned_func=node.learned_func or existing.learned_func,
                 signature=node.signature or existing.signature,
                 first_seen_cycle=int(first_seen),
@@ -231,9 +231,9 @@ class ContextRoleIndex:
         self.index_queries += 1
         return tuple(self.nodes[nid] for nid in sorted(self._by_var.get(int(var), ())))
 
-    def query_by_parent(self, parent: int) -> tuple[NethraNode, ...]:
+    def query_by_source_edge(self, source_edge: int) -> tuple[NethraNode, ...]:
         self.index_queries += 1
-        return tuple(self.nodes[nid] for nid in sorted(self._by_parent.get(int(parent), ())))
+        return tuple(self.nodes[nid] for nid in sorted(self._by_source_edge.get(int(source_edge), ())))
 
     def query_for_uncertainty_cluster(
         self,
@@ -313,13 +313,13 @@ class ContextRoleIndex:
         """Return local graph/index matches for an uncertainty cluster.
 
         Generic signal overlap is insufficient. A match must have component or
-        parent locality, and context mismatch blocks weak single-node matches.
+        source_edge locality, and context mismatch blocks weak single-node matches.
         """
         self.index_queries += 1
         cluster_vars = {int(v) for v in getattr(cluster, "vars", ()) or ()}
-        cluster_parents = {int(v) for v in getattr(cluster, "shared_parents", ()) or ()}
+        cluster_source_edges = {int(v) for v in getattr(cluster, "shared_source_edges", ()) or ()}
         cluster_neighbors = {int(v) for v in getattr(cluster, "shared_graph_neighbors", ()) or ()}
-        cluster_components = cluster_vars | cluster_parents | cluster_neighbors
+        cluster_components = cluster_vars | cluster_source_edges | cluster_neighbors
         cluster_signals = {str(s) for s in getattr(cluster, "shared_signals", ()) or ()}
         cluster_context = _cluster_context_tokens(cluster)
         current_context = _cluster_context_key(cluster)
@@ -328,8 +328,8 @@ class ContextRoleIndex:
         candidate_ids: set[str] = set()
         for component in cluster_components:
             candidate_ids.update(self._by_component.get(int(component), ()))
-        for parent in cluster_parents:
-            candidate_ids.update(self._by_parent.get(int(parent), ()))
+        for source_edge in cluster_source_edges:
+            candidate_ids.update(self._by_source_edge.get(int(source_edge), ()))
         for var in cluster_vars:
             candidate_ids.update(self._by_var.get(int(var), ()))
 
@@ -340,10 +340,10 @@ class ContextRoleIndex:
                 if int(node.last_seen_cycle) >= int(current_cycle):
                     continue
             node_components = set(node.components)
-            node_parents = set(node.learned_parents)
+            node_source_edges = set(node.learned_source_edges)
             shared_components = tuple(sorted(cluster_components & node_components))
-            shared_parents = tuple(sorted(cluster_parents & node_parents))
-            if not shared_components and not shared_parents:
+            shared_source_edges = tuple(sorted(cluster_source_edges & node_source_edges))
+            if not shared_components and not shared_source_edges:
                 continue
             prior_roles = self._roles_by_nethra.get(node.nethra_id, ())
             role_context = set()
@@ -366,11 +366,11 @@ class ContextRoleIndex:
             shared_context = tuple(sorted(cluster_context & role_context))
             shared_signals = tuple(sorted(cluster_signals & role_signals))
             context_mismatch = bool(role_context) and not shared_context and not shared_signals
-            if context_mismatch and len(shared_components) < 2 and not shared_parents:
+            if context_mismatch and len(shared_components) < 2 and not shared_source_edges:
                 continue
             score = 0.0
             score += min(0.45, 0.18 * len(shared_components))
-            score += min(0.25, 0.15 * len(shared_parents))
+            score += min(0.25, 0.15 * len(shared_source_edges))
             score += min(0.20, 0.10 * len(shared_context))
             score += min(0.15, 0.08 * len(shared_signals))
             if witnessed:
@@ -382,8 +382,8 @@ class ContextRoleIndex:
             reasons = []
             if shared_components:
                 reasons.append("shared_components")
-            if shared_parents:
-                reasons.append("shared_parents")
+            if shared_source_edges:
+                reasons.append("shared_source_edges")
             if shared_context:
                 reasons.append("shared_context")
             if shared_signals:
@@ -399,14 +399,14 @@ class ContextRoleIndex:
             if role_transition:
                 reasons.append("prior_role_transition")
             if recent_distance is not None and recent_distance <= 5 and (
-                shared_components or shared_parents
+                shared_components or shared_source_edges
             ):
                 reasons.append("recent_neighborhood_role_change")
             reason = ",".join(dict.fromkeys(reasons)) or "local_overlap"
             quality = ContextRoleMatchQuality(
                 shared_var=shared_var,
                 shared_target_var=shared_target_var,
-                shared_parent_count=len(shared_parents),
+                shared_source_edge_count=len(shared_source_edges),
                 shared_component_count=len(shared_components),
                 shared_context_exact=shared_context_exact,
                 shared_context_family=shared_context_family,
@@ -427,7 +427,7 @@ class ContextRoleIndex:
                 context_family=current_family,
                 shared_components=shared_components,
                 shared_context=shared_context,
-                shared_parents=shared_parents,
+                shared_source_edges=shared_source_edges,
                 shared_uncertainty_signals=shared_signals,
                 prior_roles=tuple(r.role for r in prior_roles[-8:]),
             ))
@@ -554,26 +554,26 @@ class ContextRoleIndex:
             self._by_var[int(node.target_var)].add(node.nethra_id)
         for component in node.components:
             self._by_component[int(component)].add(node.nethra_id)
-        for parent in node.learned_parents:
-            self._by_parent[int(parent)].add(node.nethra_id)
+        for source_edge in node.learned_source_edges:
+            self._by_source_edge[int(source_edge)].add(node.nethra_id)
 
 
-def var_fit_id(var: int, parents: tuple[int, ...], func: str) -> str:
-    return f"var_fit:x{int(var)}:{func}({','.join(str(int(p)) for p in parents)})"
+def var_fit_id(var: int, source_edges: tuple[int, ...], func: str) -> str:
+    return f"var_fit:x{int(var)}:{func}({','.join(str(int(p)) for p in source_edges)})"
 
 
-def candidate_id(prefix: str, var: int, parents: tuple[int, ...], func: str) -> str:
-    return f"{prefix}:x{int(var)}:{func}({','.join(str(int(p)) for p in parents)})"
+def candidate_id(prefix: str, var: int, source_edges: tuple[int, ...], func: str) -> str:
+    return f"{prefix}:x{int(var)}:{func}({','.join(str(int(p)) for p in source_edges)})"
 
 
-def context_key(*, operation: str, var: int | None = None, visible: int | None = None, parents: tuple[int, ...] = ()) -> str:
+def context_key(*, operation: str, var: int | None = None, visible: int | None = None, source_edges: tuple[int, ...] = ()) -> str:
     bits = [operation]
     if var is not None:
         bits.append(f"x{int(var)}")
     if visible is not None:
         bits.append(f"vis={int(visible)}")
-    if parents:
-        bits.append("parents=" + ",".join(str(int(p)) for p in parents))
+    if source_edges:
+        bits.append("source_edges=" + ",".join(str(int(p)) for p in source_edges))
     return "|".join(bits)
 
 
@@ -584,7 +584,7 @@ def _context_tokens(value: str) -> set[str]:
 def _cluster_context_tokens(cluster: Any) -> set[str]:
     tokens = {"uncertainty_cluster"}
     tokens.update(f"x{int(v)}" for v in getattr(cluster, "vars", ()) or ())
-    tokens.update(f"p{int(v)}" for v in getattr(cluster, "shared_parents", ()) or ())
+    tokens.update(f"p{int(v)}" for v in getattr(cluster, "shared_source_edges", ()) or ())
     tokens.update(str(sig) for sig in getattr(cluster, "shared_signals", ()) or ())
     tokens.add(str(getattr(cluster, "proposed_handle_kind", "unknown")))
     return tokens
@@ -670,7 +670,7 @@ def _strict_anchor_holds(match: ContextRoleMatch, cluster: Any) -> bool:
         return True
     if (
         q.shared_context_family
-        and (q.shared_parent_count > 0 or q.shared_component_count > 0)
+        and (q.shared_source_edge_count > 0 or q.shared_component_count > 0)
     ):
         return True
     if q.shared_role_transition and q.shared_context_family:
@@ -681,7 +681,7 @@ def _strict_anchor_holds(match: ContextRoleMatch, cluster: Any) -> bool:
         q.shared_role_transition
         and q.recent_cycle_distance is not None
         and q.recent_cycle_distance <= 5
-        and (q.shared_parent_count > 0 or q.shared_component_count > 0)
+        and (q.shared_source_edge_count > 0 or q.shared_component_count > 0)
     ):
         return True
     return False

@@ -28,7 +28,7 @@ ProbeFamily = Literal[
     "separating_probe",
     "shared_sentinel_probe",
     "regime_probe",
-    "parent_disambiguation_probe",
+    "source_edge_disambiguation_probe",
     "no_probe_yet",
 ]
 
@@ -47,7 +47,7 @@ class UncertaintyCase:
     cycle: int
     action: str
     active_signals: tuple[str, ...] = ()
-    learned_parents: tuple[int, ...] = ()
+    learned_source_edges: tuple[int, ...] = ()
     near_tie_candidates: tuple[tuple[int, ...], ...] = ()
     tied_frontier_info: dict[str, Any] = field(default_factory=dict)
     novelty_state: str = "closed"
@@ -62,7 +62,7 @@ class UncertaintyCluster:
     cluster_id: str
     vars: tuple[int, ...]
     shared_signals: tuple[str, ...] = ()
-    shared_parents: tuple[int, ...] = ()
+    shared_source_edges: tuple[int, ...] = ()
     shared_near_tie_candidates: tuple[tuple[int, ...], ...] = ()
     shared_graph_neighbors: tuple[int, ...] = ()
     temporal_persistence: int = 0
@@ -71,7 +71,7 @@ class UncertaintyCluster:
     proposed_next_probe_family: ProbeFamily = "no_probe_yet"
     cluster_size: int = 0
     cluster_fraction_of_visible: float = 0.0
-    shared_parent_count: int = 0
+    shared_source_edge_count: int = 0
     shared_neighbor_count: int = 0
     shared_near_tie_count: int = 0
     shared_signal_specificity: float = 0.0
@@ -103,8 +103,8 @@ def _recent_churn(history: Iterable[dict[str, Any]]) -> bool:
     entries = list(history)
     if len(entries) < 2:
         return False
-    a = tuple(sorted(_as_int(v) for v in entries[-1].get("best_parents") or ()))
-    b = tuple(sorted(_as_int(v) for v in entries[-2].get("best_parents") or ()))
+    a = tuple(sorted(_as_int(v) for v in entries[-1].get("best_source_edges") or ()))
+    b = tuple(sorted(_as_int(v) for v in entries[-2].get("best_source_edges") or ()))
     return a != b
 
 
@@ -195,7 +195,7 @@ def extract_uncertainty_cases_from_agent(agent: Any, cycle: int) -> list[Uncerta
         recent_history = tuple(
             {
                 "cycle": int(fd.cycle),
-                "best_parents": tuple(int(p) for p in fd.best_parents),
+                "best_source_edges": tuple(int(p) for p in fd.best_source_edges),
                 "best_func": fd.best_func,
                 "margin": int(fd.margin),
                 "failure_class": fd.failure_class,
@@ -231,10 +231,10 @@ def extract_uncertainty_cases_from_agent(agent: Any, cycle: int) -> list[Uncerta
         near_tie_candidates: tuple[tuple[int, ...], ...] = ()
         if last_fit is not None:
             near_tie_candidates = tuple(
-                tuple(int(p) for p in parents)
-                for parents, _, _ in getattr(last_fit, "near_tie_candidates", ()) or ()
+                tuple(int(p) for p in source_edges)
+                for source_edges, _, _ in getattr(last_fit, "near_tie_candidates", ()) or ()
             )
-        graph_neighbors = set(int(p) for p in getattr(n, "parents", ()) or ())
+        graph_neighbors = set(int(p) for p in getattr(n, "source_edges", ()) or ())
         try:
             graph_neighbors.update(int(v) for v in ledger.variable_dependents(var))
         except Exception:
@@ -244,7 +244,7 @@ def extract_uncertainty_cases_from_agent(agent: Any, cycle: int) -> list[Uncerta
             cycle=int(cycle),
             action=_case_action(set(active)),
             active_signals=active,
-            learned_parents=tuple(sorted(int(p) for p in getattr(n, "parents", ()) or ())),
+            learned_source_edges=tuple(sorted(int(p) for p in getattr(n, "source_edges", ()) or ())),
             near_tie_candidates=tuple(sorted(set(near_tie_candidates))),
             tied_frontier_info={
                 "active": frontier is not None,
@@ -279,13 +279,13 @@ def extract_uncertainty_cases_from_rows(rows: Iterable[dict[str, Any]]) -> list[
             active = _active_from_row(item)
             if not active:
                 continue
-            learned = tuple(sorted(_as_int(v) for v in item.get("learned_parents") or ()))
+            learned = tuple(sorted(_as_int(v) for v in item.get("learned_source_edges") or ()))
             recent_history = tuple(
                 dict(h) for h in (item.get("recent_fit_history") or ())
                 if isinstance(h, dict)
             )
             near_from_history = tuple(
-                tuple(sorted(_as_int(v) for v in h.get("best_parents") or ()))
+                tuple(sorted(_as_int(v) for v in h.get("best_source_edges") or ()))
                 for h in recent_history
                 if _as_int(h.get("near_tie_count")) > 1
             )
@@ -294,7 +294,7 @@ def extract_uncertainty_cases_from_rows(rows: Iterable[dict[str, Any]]) -> list[
                 cycle=cycle,
                 action=_case_action(set(active)),
                 active_signals=active,
-                learned_parents=learned,
+                learned_source_edges=learned,
                 near_tie_candidates=tuple(sorted(set(near_from_history))),
                 tied_frontier_info=_frontier_info_from_row(item),
                 novelty_state="open" if "open_novelty" in active else "closed",
@@ -320,7 +320,7 @@ def _case_overlap_score(a: UncertaintyCase, b: UncertaintyCase) -> int:
         and abs(a.cycle - b.cycle) <= 5
     ):
         score += 1
-    if set(a.learned_parents) & set(b.learned_parents):
+    if set(a.learned_source_edges) & set(b.learned_source_edges):
         score += 2
     near_overlap = {
         cand for cand in (set(a.near_tie_candidates) & set(b.near_tie_candidates))
@@ -365,13 +365,13 @@ def _temporal_cofailure_count(cases: list[UncertaintyCase], *, recent_cycles: in
 
 def _signal_specificity(
     *,
-    shared_parent_count: int,
+    shared_source_edge_count: int,
     shared_neighbor_count: int,
     shared_near_tie_count: int,
     temporal_cofailure_count: int,
 ) -> float:
     anchors = (
-        int(shared_parent_count > 0)
+        int(shared_source_edge_count > 0)
         + int(shared_neighbor_count > 0)
         + int(shared_near_tie_count > 0)
         + int(temporal_cofailure_count > 0)
@@ -382,7 +382,7 @@ def _signal_specificity(
 def cluster_has_specific_local_anchor(cluster: UncertaintyCluster) -> bool:
     """Return whether a cluster has a visible local anchor for runtime assist."""
     return (
-        cluster.shared_parent_count > 0
+        cluster.shared_source_edge_count > 0
         or cluster.shared_near_tie_count > 0
         or cluster.shared_neighbor_count > 0
         or cluster.temporal_cofailure_count > 0
@@ -401,7 +401,7 @@ def _handle_kind(cases: list[UncertaintyCase]) -> ProposedHandleKind:
         signal_counts["near_tie_count"] or signal_counts["tie_count"]
     ):
         return "possible_missing_operator"
-    if any(len(c.learned_parents) >= 2 for c in cases) and _shared_tuple_sets(c.learned_parents for c in cases):
+    if any(len(c.learned_source_edges) >= 2 for c in cases) and _shared_tuple_sets(c.learned_source_edges for c in cases):
         return "dense_fanin_candidate"
     if signal_counts["repeated_fit_churn"] >= 2:
         return "proxy_confounding_candidate"
@@ -426,8 +426,8 @@ def _probe_family(cases: list[UncertaintyCase], kind: ProposedHandleKind) -> Pro
         return "regime_probe"
     if "near_tie_count" in signals or "tie_count" in signals:
         return "separating_probe"
-    if _shared_tuple_sets(c.learned_parents for c in cases):
-        return "parent_disambiguation_probe"
+    if _shared_tuple_sets(c.learned_source_edges for c in cases):
+        return "source_edge_disambiguation_probe"
     return "no_probe_yet"
 
 
@@ -442,18 +442,18 @@ def cluster_uncertainty_cases(
     if visible <= 0:
         visible = max((c.var for c in cases), default=-1) + 1
     visible = max(1, visible)
-    parent = list(range(len(cases)))
+    source_edge = list(range(len(cases)))
 
     def find(i: int) -> int:
-        while parent[i] != i:
-            parent[i] = parent[parent[i]]
-            i = parent[i]
+        while source_edge[i] != i:
+            source_edge[i] = source_edge[source_edge[i]]
+            i = source_edge[i]
         return i
 
     def union(a: int, b: int) -> None:
         ra, rb = find(a), find(b)
         if ra != rb:
-            parent[rb] = ra
+            source_edge[rb] = ra
 
     for i in range(len(cases)):
         for j in range(i + 1, len(cases)):
@@ -469,7 +469,7 @@ def cluster_uncertainty_cases(
         vars_ = tuple(sorted({c.var for c in group}))
         signal_sets = [tuple(_normalize_signal(sig) for sig in c.active_signals) for c in group]
         shared_signals = _shared_tuple_sets(signal_sets)
-        shared_parents = _shared_tuple_sets(c.learned_parents for c in group)
+        shared_source_edges = _shared_tuple_sets(c.learned_source_edges for c in group)
         shared_near = tuple(
             cand for cand in _shared_tuple_sets(c.near_tie_candidates for c in group)
             if cand
@@ -479,11 +479,11 @@ def cluster_uncertainty_cases(
         temporal_cofailure = _temporal_cofailure_count(group)
         cluster_size = len(vars_)
         cluster_fraction = cluster_size / visible
-        shared_parent_count = len(shared_parents)
+        shared_source_edge_count = len(shared_source_edges)
         shared_neighbor_count = len(shared_neighbors)
         shared_near_tie_count = len(shared_near)
         specificity = _signal_specificity(
-            shared_parent_count=shared_parent_count,
+            shared_source_edge_count=shared_source_edge_count,
             shared_neighbor_count=shared_neighbor_count,
             shared_near_tie_count=shared_near_tie_count,
             temporal_cofailure_count=temporal_cofailure,
@@ -493,8 +493,8 @@ def cluster_uncertainty_cases(
         evidence_bits: list[str] = []
         if shared_signals:
             evidence_bits.append("signals=" + ",".join(shared_signals))
-        if shared_parents:
-            evidence_bits.append("parents=" + ",".join(f"x{p}" for p in shared_parents))
+        if shared_source_edges:
+            evidence_bits.append("source_edges=" + ",".join(f"x{p}" for p in shared_source_edges))
         if shared_near:
             evidence_bits.append(f"shared_near_tie={len(shared_near)}")
         if shared_neighbors:
@@ -507,7 +507,7 @@ def cluster_uncertainty_cases(
             cluster_id=f"uc{ordinal}",
             vars=vars_,
             shared_signals=tuple(str(s) for s in shared_signals),
-            shared_parents=tuple(int(p) for p in shared_parents),
+            shared_source_edges=tuple(int(p) for p in shared_source_edges),
             shared_near_tie_candidates=tuple(shared_near),
             shared_graph_neighbors=tuple(int(p) for p in shared_neighbors),
             temporal_persistence=int(temporal),
@@ -516,7 +516,7 @@ def cluster_uncertainty_cases(
             proposed_next_probe_family=probe,
             cluster_size=cluster_size,
             cluster_fraction_of_visible=cluster_fraction,
-            shared_parent_count=shared_parent_count,
+            shared_source_edge_count=shared_source_edge_count,
             shared_neighbor_count=shared_neighbor_count,
             shared_near_tie_count=shared_near_tie_count,
             shared_signal_specificity=specificity,
@@ -551,7 +551,7 @@ def propose_consolidation_assists(clusters: list[UncertaintyCluster]) -> list[Co
                 reason="clustered ambiguity has visible alternatives",
             ))
         if (
-            cluster.proposed_next_probe_family in {"separating_probe", "parent_disambiguation_probe"}
+            cluster.proposed_next_probe_family in {"separating_probe", "source_edge_disambiguation_probe"}
             or "alternatives" in signals
             or bool(cluster.shared_near_tie_candidates)
         ):

@@ -34,17 +34,17 @@ def rows(tmp_path):
                 "schedule": "false_trass",
                 "n_vars": 999,
                 "cycles": 999,
-                "parent_ranker": "ignored",
+                "source_edge_ranker": "ignored",
                 "probe_proposer": "ignored",
                 "temporal_frontier_evals": 999,
-                "temporal_frontier_chosen_parent_hits": 999,
-                "temporal_frontier_chosen_parent_total": 999,
+                "temporal_frontier_chosen_source_edge_hits": 999,
+                "temporal_frontier_chosen_source_edge_total": 999,
             },
             {
                 "schedule": "false_trass",
                 "n_vars": 50,
                 "cycles": 3000,
-                "parent_ranker": "sensitivity",
+                "source_edge_ranker": "sensitivity",
                 "probe_proposer": "none",
                 "warmup_cycles": 1000,
                 "max_candidates": 20,
@@ -52,8 +52,8 @@ def rows(tmp_path):
                 "temporal_frontier_evals": 2,
                 "temporal_frontier_avg_visible_count": 50.0,
                 "temporal_frontier_avg_size": 10.0,
-                "temporal_frontier_chosen_parent_hits": 1,
-                "temporal_frontier_chosen_parent_total": 2,
+                "temporal_frontier_chosen_source_edge_hits": 1,
+                "temporal_frontier_chosen_source_edge_total": 2,
                 "temporal_frontier_revoked_hits": 0,
                 "temporal_frontier_revoked_total": 0,
                 "temporal_frontier_misses": 1,
@@ -62,7 +62,7 @@ def rows(tmp_path):
                 "schedule": "false_trass",
                 "n_vars": 50,
                 "cycles": 3000,
-                "parent_ranker": "sensitivity",
+                "source_edge_ranker": "sensitivity",
                 "probe_proposer": "none",
                 "warmup_cycles": 1000,
                 "max_candidates": 20,
@@ -70,8 +70,8 @@ def rows(tmp_path):
                 "temporal_frontier_evals": 3,
                 "temporal_frontier_avg_visible_count": 50.0,
                 "temporal_frontier_avg_size": 5.0,
-                "temporal_frontier_chosen_parent_hits": 2,
-                "temporal_frontier_chosen_parent_total": 3,
+                "temporal_frontier_chosen_source_edge_hits": 2,
+                "temporal_frontier_chosen_source_edge_total": 3,
                 "temporal_frontier_revoked_hits": 0,
                 "temporal_frontier_revoked_total": 0,
                 "temporal_frontier_misses": 1,
@@ -80,7 +80,7 @@ def rows(tmp_path):
                 "schedule": "false_trass",
                 "n_vars": 50,
                 "cycles": 7500,
-                "parent_ranker": "sensitivity",
+                "source_edge_ranker": "sensitivity",
                 "probe_proposer": "none",
                 "warmup_cycles": 2500,
                 "max_candidates": 10,
@@ -88,8 +88,8 @@ def rows(tmp_path):
                 "temporal_frontier_evals": 1,
                 "temporal_frontier_avg_visible_count": 50.0,
                 "temporal_frontier_avg_size": 5.0,
-                "temporal_frontier_chosen_parent_hits": 0,
-                "temporal_frontier_chosen_parent_total": 0,
+                "temporal_frontier_chosen_source_edge_hits": 0,
+                "temporal_frontier_chosen_source_edge_total": 0,
                 "temporal_frontier_revoked_hits": 0,
                 "temporal_frontier_revoked_total": 0,
                 "temporal_frontier_misses": 0,
@@ -98,7 +98,7 @@ def rows(tmp_path):
                 "schedule": "regime_switch",
                 "n_vars": 100,
                 "cycles": 3000,
-                "parent_ranker": "history_rescue",
+                "source_edge_ranker": "history_rescue",
                 "probe_proposer": "history_rescue",
                 "warmup_cycles": 1000,
                 "max_candidates": 20,
@@ -106,8 +106,8 @@ def rows(tmp_path):
                 "temporal_frontier_evals": 4,
                 "temporal_frontier_avg_visible_count": 100.0,
                 "temporal_frontier_avg_size": 25.0,
-                "temporal_frontier_chosen_parent_hits": 6,
-                "temporal_frontier_chosen_parent_total": 8,
+                "temporal_frontier_chosen_source_edge_hits": 6,
+                "temporal_frontier_chosen_source_edge_total": 8,
                 "temporal_frontier_revoked_hits": 1,
                 "temporal_frontier_revoked_total": 2,
                 "temporal_frontier_misses": 3,
@@ -147,9 +147,9 @@ def test_raw_denominators_are_aggregated(rows):
 
     assert summary.runs == 2
     assert summary.evals == 5
-    assert summary.chosen_parent_hits == 3
-    assert summary.chosen_parent_total == 5
-    assert summary.chosen_parent_recall == pytest.approx(3 / 5)
+    assert summary.chosen_source_edge_hits == 3
+    assert summary.chosen_source_edge_total == 5
+    assert summary.chosen_source_edge_recall == pytest.approx(3 / 5)
 
 
 def test_frontier_fraction_and_recall_lift_computed_from_denominators(rows):

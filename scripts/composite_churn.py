@@ -163,7 +163,7 @@ def main():
     # ── cert revoked_by="composite_failure" from ALL certs ─────────────────
     # Two sources of false_trass_contradiction → revoked_by="composite_failure":
     #   Path A: _check_composites — actual composite sentinel failed
-    #   Path B: _install_var line ~982 — trass var was picked as a parent
+    #   Path B: _install_var line ~982 — trass var was picked as a source_edge
     # These are conflated in the revoked_by counter. Separate them here.
     visible = [agent.ledger.vars[i] for i in range(world.visible_count)]
     cert_composite_failure = sum(
@@ -171,15 +171,15 @@ def main():
         for c in n.certificates.values()
         if getattr(c, "revoked_by", None) == "composite_failure"
     )
-    # Count event_log entries from the trass-parent path (distinct from REVOKED)
-    trass_parent_triggers = sum(
+    # Count event_log entries from the trass-source_edge path (distinct from REVOKED)
+    trass_source_edge_triggers = sum(
         1 for e in agent.ledger.event_log
         if "role re-test triggered" in e and "trass status" in e
     )
 
     print(f"\n  revoked_by='composite_failure' in certs (live vars): {cert_composite_failure}")
-    print(f"  event_log 'trass-parent re-test' triggers:          {trass_parent_triggers}")
-    print(f"  (the cert count includes both path A=composite-sentinel and path B=trass-parent)")
+    print(f"  event_log 'trass-source_edge re-test' triggers:          {trass_source_edge_triggers}")
+    print(f"  (the cert count includes both path A=composite-sentinel and path B=trass-source_edge)")
 
     print()
     events = parse_composite_events(agent.ledger.event_log)

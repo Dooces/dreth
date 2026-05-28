@@ -120,7 +120,7 @@ class RunAnalyzer:
         # Compression amortization
         eligible = [
             n for n in visible
-            if bool(n.parents) and n.role_for("skip") == "tareth"
+            if bool(n.source_edges) and n.role_for("skip") == "tareth"
             and n.status in ("certified", "proposed") and n.sentinels
         ]
         self.n_elig = len(eligible)
@@ -130,11 +130,11 @@ class RunAnalyzer:
             1 for n in visible
             if n.compression_hits_lifetime > 0 or n.compression_misses_lifetime > 0
         )
-        avg_parents = (
-            sum(len(n.parents) for n in eligible) // max(1, self.n_elig)
+        avg_source_edges = (
+            sum(len(n.source_edges) for n in eligible) // max(1, self.n_elig)
             if eligible else 1
         )
-        self.est_disc_total = total_disc_runs * est_disc_cost * max(1, avg_parents)
+        self.est_disc_total = total_disc_runs * est_disc_cost * max(1, avg_source_edges)
         self.hits_saved = self.comp_hits_lifetime * agent.sentinel_count
 
         # Regime
@@ -161,17 +161,17 @@ class RunAnalyzer:
         self.composite_unique_members: int = len(_member_degree)
 
         # Connected components of the live composite graph (vars = nodes, pairs = edges)
-        _parent: Dict[int, int] = {v: v for v in _member_degree}
+        _source_edge: Dict[int, int] = {v: v for v in _member_degree}
         def _find(x: int) -> int:
-            while _parent[x] != x:
-                _parent[x] = _parent[_parent[x]]
-                x = _parent[x]
+            while _source_edge[x] != x:
+                _source_edge[x] = _source_edge[_source_edge[x]]
+                x = _source_edge[x]
             return x
         for cn in live_composites:
             a_var, b_var = cn.members
             ra, rb = _find(a_var), _find(b_var)
             if ra != rb:
-                _parent[ra] = rb
+                _source_edge[ra] = rb
         self.composite_components: int = len({_find(v) for v in _member_degree}) if _member_degree else 0
 
         degrees = list(_member_degree.values())
@@ -253,36 +253,36 @@ class RunAnalyzer:
         self.hybrid_residual_predictor_calls: int = getattr(agent, "_hybrid_residual_predictor_calls", 0)
         self.hybrid_residual_ok: int = getattr(agent, "_hybrid_residual_ok", 0)
         self.hybrid_residual_stressed: int = getattr(agent, "_hybrid_residual_stressed", 0)
-        self.hybrid_parent_ranker_calls: int = getattr(agent, "_hybrid_parent_ranker_calls", 0)
+        self.hybrid_source_edge_ranker_calls: int = getattr(agent, "_hybrid_source_edge_ranker_calls", 0)
         self.hybrid_probe_proposer_calls: int = getattr(agent, "_hybrid_probe_proposer_calls", 0)
         self.hybrid_expert_router_calls: int = getattr(agent, "_hybrid_expert_router_calls", 0)
-        _parent_prop = getattr(agent, "_parent_proposal_diagnostics", None)
-        if _parent_prop is not None:
-            self.parent_proposal_calls = _parent_prop.calls
-            self.parent_proposal_hit_rate = _parent_prop.chosen_parent_hit_rate
-            self.parent_proposal_miss_count = _parent_prop.miss_chosen_parent_count
-            self.parent_proposal_rank_mean = _parent_prop.rank_of_chosen_parent_mean
-            self.parent_proposal_rank_max = _parent_prop.rank_of_chosen_parent_max
-            self.history_ranker_calls = _parent_prop.history_ranker_calls
-            self.sensitivity_rescue_calls = _parent_prop.sensitivity_rescue_calls
-            self.sensitivity_rescue_interventions = _parent_prop.sensitivity_rescue_interventions
-            self.rescue_candidates_added = _parent_prop.rescue_candidates_added
-            self.rescue_chosen_parent_hits = _parent_prop.rescue_chosen_parent_hits
-            self.chosen_parent_from_history = _parent_prop.chosen_parent_from_history
-            self.chosen_parent_from_rescue = _parent_prop.chosen_parent_from_rescue
+        _source_edge_prop = getattr(agent, "_source_edge_proposal_diagnostics", None)
+        if _source_edge_prop is not None:
+            self.source_edge_proposal_calls = _source_edge_prop.calls
+            self.source_edge_proposal_hit_rate = _source_edge_prop.chosen_source_edge_hit_rate
+            self.source_edge_proposal_miss_count = _source_edge_prop.miss_chosen_source_edge_count
+            self.source_edge_proposal_rank_mean = _source_edge_prop.rank_of_chosen_source_edge_mean
+            self.source_edge_proposal_rank_max = _source_edge_prop.rank_of_chosen_source_edge_max
+            self.history_ranker_calls = _source_edge_prop.history_ranker_calls
+            self.sensitivity_rescue_calls = _source_edge_prop.sensitivity_rescue_calls
+            self.sensitivity_rescue_interventions = _source_edge_prop.sensitivity_rescue_interventions
+            self.rescue_candidates_added = _source_edge_prop.rescue_candidates_added
+            self.rescue_chosen_source_edge_hits = _source_edge_prop.rescue_chosen_source_edge_hits
+            self.chosen_source_edge_from_history = _source_edge_prop.chosen_source_edge_from_history
+            self.chosen_source_edge_from_rescue = _source_edge_prop.chosen_source_edge_from_rescue
         else:
-            self.parent_proposal_calls = 0
-            self.parent_proposal_hit_rate = 0.0
-            self.parent_proposal_miss_count = 0
-            self.parent_proposal_rank_mean = 0.0
-            self.parent_proposal_rank_max = 0
+            self.source_edge_proposal_calls = 0
+            self.source_edge_proposal_hit_rate = 0.0
+            self.source_edge_proposal_miss_count = 0
+            self.source_edge_proposal_rank_mean = 0.0
+            self.source_edge_proposal_rank_max = 0
             self.history_ranker_calls = 0
             self.sensitivity_rescue_calls = 0
             self.sensitivity_rescue_interventions = 0
             self.rescue_candidates_added = 0
-            self.rescue_chosen_parent_hits = 0
-            self.chosen_parent_from_history = 0
-            self.chosen_parent_from_rescue = 0
+            self.rescue_chosen_source_edge_hits = 0
+            self.chosen_source_edge_from_history = 0
+            self.chosen_source_edge_from_rescue = 0
         _probe_prop = getattr(agent, "_probe_proposal_diagnostics", None)
         if _probe_prop is not None:
             self.provider_probes_proposed = _probe_prop.provider_probes_proposed
@@ -335,7 +335,7 @@ class RunAnalyzer:
         # Active when ANY provider was used this run; ensures wiring gaps are visible.
         self.hybrid_active: bool = (
             self.hybrid_residual_predictor_calls > 0
-            or self.hybrid_parent_ranker_calls > 0
+            or self.hybrid_source_edge_ranker_calls > 0
             or self.hybrid_probe_proposer_calls > 0
             or self.hybrid_expert_router_calls > 0
         )
@@ -418,7 +418,7 @@ class SummaryRenderer:
             )
 
         lines.append("\n── compression amortization ───────────────────────────")
-        lines.append(f"  eligible vars (tareth+committed+has-parents): {a.n_elig}/{a.n_var}")
+        lines.append(f"  eligible vars (tareth+committed+has-source_edges): {a.n_elig}/{a.n_var}")
         lines.append(f"  with compressions: {a.n_with_comps}/{a.n_elig}")
         lines.append(
             f"  hits lifetime: {a.comp_hits_lifetime} | misses lifetime: {a.comp_misses_lifetime}"
@@ -502,17 +502,17 @@ class SummaryRenderer:
                 f"  residual_predictor: calls={a.hybrid_residual_predictor_calls} "
                 f"ok={a.hybrid_residual_ok} stressed={a.hybrid_residual_stressed}"
             )
-            lines.append(f"  parent_ranker:      calls={a.hybrid_parent_ranker_calls}")
+            lines.append(f"  source_edge_ranker:      calls={a.hybrid_source_edge_ranker_calls}")
             lines.append(f"  probe_proposer:     calls={a.hybrid_probe_proposer_calls}")
             lines.append(f"  expert_router:      calls={a.hybrid_expert_router_calls}")
-            if a.parent_proposal_calls > 0:
-                lines.append("  parent_proposal:")
+            if a.source_edge_proposal_calls > 0:
+                lines.append("  source_edge_proposal:")
                 lines.append(
-                    f"    calls={a.parent_proposal_calls} "
-                    f"chosen_parent_hit_rate={a.parent_proposal_hit_rate:.3f} "
-                    f"miss_chosen_parent_count={a.parent_proposal_miss_count} "
-                    f"rank_mean={a.parent_proposal_rank_mean:.2f} "
-                    f"rank_max={a.parent_proposal_rank_max}"
+                    f"    calls={a.source_edge_proposal_calls} "
+                    f"chosen_source_edge_hit_rate={a.source_edge_proposal_hit_rate:.3f} "
+                    f"miss_chosen_source_edge_count={a.source_edge_proposal_miss_count} "
+                    f"rank_mean={a.source_edge_proposal_rank_mean:.2f} "
+                    f"rank_max={a.source_edge_proposal_rank_max}"
                 )
                 if a.sensitivity_rescue_calls > 0:
                     lines.append(
@@ -522,9 +522,9 @@ class SummaryRenderer:
                     )
                     lines.append(
                         f"    rescue_candidates_added={a.rescue_candidates_added} "
-                        f"rescue_chosen_parent_hits={a.rescue_chosen_parent_hits} "
-                        f"chosen_parent_from_history={a.chosen_parent_from_history} "
-                        f"chosen_parent_from_rescue={a.chosen_parent_from_rescue}"
+                        f"rescue_chosen_source_edge_hits={a.rescue_chosen_source_edge_hits} "
+                        f"chosen_source_edge_from_history={a.chosen_source_edge_from_history} "
+                        f"chosen_source_edge_from_rescue={a.chosen_source_edge_from_rescue}"
                     )
             if a.provider_probes_proposed > 0 or a.hybrid_probe_proposer_calls > 0:
                 lines.append("  probe_proposal:")

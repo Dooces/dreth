@@ -182,7 +182,7 @@ def test_invalidate_certs_sentinel_failure():
     # Manually install a tareth skip cert
     n.certificates["skip"] = NethraCertificate(
         operation="skip", role="tareth", authority="none",
-        context_parents=(1, 2), context_visible=5, context_cycle=10,
+        context_source_edges=(1, 2), context_visible=5, context_cycle=10,
         targets=(3, 4), substitutions_tested=("perturbation",),
         changes=3, trials=5,
         earned_by="manual_bootstrap",
@@ -202,7 +202,7 @@ def test_invalidate_certs_sentinel_failure():
     # Also check: structural_mutation clears everything
     n.certificates["skip"] = NethraCertificate(
         operation="skip", role="trass", authority="skip",
-        context_parents=(), context_visible=5, context_cycle=20,
+        context_source_edges=(), context_visible=5, context_cycle=20,
         targets=(), substitutions_tested=("perturbation",),
         changes=0, trials=5,
         earned_by="manual_bootstrap",

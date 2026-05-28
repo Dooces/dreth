@@ -8,7 +8,7 @@ import sys
 from collections import Counter
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().source_edges[1]
 sys.path.insert(0, str(ROOT))
 
 from dreth.nethra_scaffold_sleep import (  # noqa: E402
@@ -76,7 +76,7 @@ def _fmt_summary(summary: NethraScaffoldSleepSummary) -> str:
         lines.append("  (no scaffold abstractions emitted)")
     wanted = Counter(summary.abstraction_counts_by_kind)
     lines.append(f"  operator families:          {wanted.get('operator_family', 0)}")
-    lines.append(f"  parent-signature families:  {wanted.get('parent_signature_family', 0)}")
+    lines.append(f"  source_edge-signature families:  {wanted.get('source_edge_signature_family', 0)}")
     lines.append(f"  context-role families:      {wanted.get('context_role_family', 0)}")
     lines.append(f"  mixed-role families:        {wanted.get('mixed_role_family', 0)}")
 
@@ -136,7 +136,7 @@ def main() -> None:
 
     write_scaffold_sleep_jsonl(args.out, scaffold_nethras, role_maps, compositions, abstractions)
     summary_path = Path(args.summary)
-    summary_path.parent.mkdir(parents=True, exist_ok=True)
+    summary_path.source_edge.mkdir(source_edges=True, exist_ok=True)
     summary_path.write_text(_fmt_summary(summary) + "\n")
 
     print(f"rows: {len(rows)}")

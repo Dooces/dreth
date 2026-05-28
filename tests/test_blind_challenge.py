@@ -7,7 +7,7 @@ import random
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().source_edges[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 
@@ -104,11 +104,11 @@ def test_summarize_blind_challenge_reads_synthetic_jsonl(tmp_path: Path, capsys)
                     {
                         "var": 0,
                         "relation_type": "symbolic",
-                        "truth_parents": [],
-                        "truth_delayed_parents": [],
+                        "truth_source_edges": [],
+                        "truth_delayed_source_edges": [],
                         "agent_func_compatible": True,
-                        "learned_parents": [],
-                        "learned_parent_overlap": [],
+                        "learned_source_edges": [],
+                        "learned_source_edge_overlap": [],
                         "status": "certified",
                         "skip_role": "tareth",
                         "authoritative": True,
@@ -116,11 +116,11 @@ def test_summarize_blind_challenge_reads_synthetic_jsonl(tmp_path: Path, capsys)
                     {
                         "var": 1,
                         "relation_type": "delayed",
-                        "truth_parents": [0],
-                        "truth_delayed_parents": [0],
+                        "truth_source_edges": [0],
+                        "truth_delayed_source_edges": [0],
                         "agent_func_compatible": False,
-                        "learned_parents": [2],
-                        "learned_parent_overlap": [],
+                        "learned_source_edges": [2],
+                        "learned_source_edge_overlap": [],
                         "status": "certified",
                         "skip_role": "tareth",
                         "authoritative": True,

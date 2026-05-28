@@ -15,9 +15,9 @@ from pathlib import Path
 from typing import Any, Iterable
 
 HIDDEN_TRUTH_LIKE_FIELDS: frozenset[str] = frozenset({
-    "truth_parents",
+    "truth_source_edges",
     "truth_func",
-    "truth_delayed_parents",
+    "truth_delayed_source_edges",
     "truth_latents",
     "debug_blind_challenge_manifest",
 })
@@ -322,7 +322,7 @@ class NethraMemoryStore:
                 raise TypeError(f"unsupported memory record type: {type(record)!r}")
         if not rows:
             return 0
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.source_edge.mkdir(source_edges=True, exist_ok=True)
         with open(self.path, "a") as fh:
             for row in rows:
                 fh.write(json.dumps(row, sort_keys=True) + "\n")
@@ -339,7 +339,7 @@ class NethraMemoryStore:
                 raise TypeError(f"unsupported experience event type: {type(event)!r}")
         if not rows:
             return 0
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.source_edge.mkdir(source_edges=True, exist_ok=True)
         with open(self.path, "a") as fh:
             for row in rows:
                 fh.write(json.dumps(row, sort_keys=True) + "\n")
@@ -370,7 +370,7 @@ class NethraMemoryStore:
                 raise TypeError(f"unsupported sleep product type: {type(product)!r}")
         if not rows:
             return 0
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.source_edge.mkdir(source_edges=True, exist_ok=True)
         with open(self.path, "a") as fh:
             for row in rows:
                 fh.write(json.dumps(row, sort_keys=True) + "\n")
@@ -382,7 +382,7 @@ class NethraMemoryStore:
             "authority_allowed": False,
             **_sanitize_payload(summary),
         }
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.source_edge.mkdir(source_edges=True, exist_ok=True)
         with open(self.path, "a") as fh:
             fh.write(json.dumps(row, sort_keys=True) + "\n")
 
@@ -392,7 +392,7 @@ class NethraMemoryStore:
             "authority_allowed": False,
             **_sanitize_payload(result),
         }
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.source_edge.mkdir(source_edges=True, exist_ok=True)
         with open(self.path, "a") as fh:
             fh.write(json.dumps(row, sort_keys=True) + "\n")
 
@@ -466,7 +466,7 @@ class NethraMemoryStore:
         if max_records is not None:
             records = records[-max(0, int(max_records)):]
         tmp = self.path.with_suffix(self.path.suffix + ".tmp")
-        tmp.parent.mkdir(parents=True, exist_ok=True)
+        tmp.source_edge.mkdir(source_edges=True, exist_ok=True)
         with open(tmp, "w") as fh:
             for record in records:
                 fh.write(json.dumps(record.to_dict(), sort_keys=True) + "\n")
@@ -546,8 +546,8 @@ def records_from_batch_record(row: dict[str, Any]) -> list[NethraMemoryRecord]:
             nethra_id=nid,
             touched_atoms=[f"x{v}" for v in _vars_from_payload(payload)],
             touched_structure_refs=[
-                f"parents:{','.join(str(int(p)) for p in ps)}"
-                for ps in (payload.get("parent_sets") or [])
+                f"source_edges:{','.join(str(int(p)) for p in ps)}"
+                for ps in (payload.get("source_edge_sets") or [])
                 if isinstance(ps, list)
             ] + [str(sig) for sig in (payload.get("fit_signatures") or [])],
             member_nethras=[nid] if nid else [],
@@ -579,7 +579,7 @@ def records_from_batch_record(row: dict[str, Any]) -> list[NethraMemoryRecord]:
             nethra_id=nid,
             touched_atoms=[f"x{v}" for v in _vars_from_payload(payload)],
             touched_structure_refs=[
-                f"parents:{','.join(str(int(p)) for p in (payload.get('learned_parents') or []))}",
+                f"source_edges:{','.join(str(int(p)) for p in (payload.get('learned_source_edges') or []))}",
                 str(payload.get("signature", "")),
             ],
             member_nethras=[nid] if nid else [],

@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().source_edges[2]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 
@@ -28,13 +28,13 @@ def _case(var: int, **kwargs) -> UncertaintyCase:
         "cycle": 10,
         "action": "preserve_ambiguity",
         "active_signals": ("open_novelty", "near_tie_count"),
-        "learned_parents": (1, 2),
+        "learned_source_edges": (1, 2),
         "near_tie_candidates": ((1, 2),),
         "tied_frontier_info": {"active": True, "stable_count": 1},
         "novelty_state": "open",
         "recent_fit_history": (
-            {"best_parents": [1], "best_func": "FIRST"},
-            {"best_parents": [2], "best_func": "FIRST"},
+            {"best_source_edges": [1], "best_func": "FIRST"},
+            {"best_source_edges": [2], "best_func": "FIRST"},
         ),
         "sentinels": (),
         "consequence_tier": "skip_tareth",
@@ -52,11 +52,11 @@ def test_clustering_ignores_hidden_fields_in_rows() -> None:
                 "per_var": [
                     {
                         "var": 0,
-                        "learned_parents": [1, 2],
+                        "learned_source_edges": [1, 2],
                         "last_fit_margin": 0,
                         "last_fit_near_tie_count": 4,
                         "open_novelty": True,
-                        "recent_fit_history": [{"best_parents": [1, 2], "near_tie_count": 4}],
+                        "recent_fit_history": [{"best_source_edges": [1, 2], "near_tie_count": 4}],
                     }
                 ]
             }
@@ -65,9 +65,9 @@ def test_clustering_ignores_hidden_fields_in_rows() -> None:
     row_with_hidden = json.loads(json.dumps(row))
     item = row_with_hidden["evaluation"]["blind_challenge_behavior"]["per_var"][0]
     item.update({
-        "truth_parents": [99],
+        "truth_source_edges": [99],
         "truth_func": "HIDDEN",
-        "truth_delayed_parents": [98],
+        "truth_delayed_source_edges": [98],
         "truth_latents": [97],
     })
 
@@ -77,10 +77,10 @@ def test_clustering_ignores_hidden_fields_in_rows() -> None:
     assert clusters_a == clusters_b
 
 
-def test_cases_sharing_parents_and_signals_cluster_together() -> None:
+def test_cases_sharing_source_edges_and_signals_cluster_together() -> None:
     clusters = cluster_uncertainty_cases([
         _case(0),
-        _case(1, learned_parents=(1, 2), graph_neighbors=(1, 4)),
+        _case(1, learned_source_edges=(1, 2), graph_neighbors=(1, 4)),
     ])
 
     assert len(clusters) == 1
@@ -91,7 +91,7 @@ def test_unrelated_cases_remain_separate() -> None:
     clusters = cluster_uncertainty_cases([
         _case(
             0,
-            learned_parents=(1,),
+            learned_source_edges=(1,),
             graph_neighbors=(1,),
             active_signals=("low_margin",),
             near_tie_candidates=(),
@@ -101,7 +101,7 @@ def test_unrelated_cases_remain_separate() -> None:
         ),
         _case(
             9,
-            learned_parents=(7,),
+            learned_source_edges=(7,),
             graph_neighbors=(8,),
             active_signals=("sentinel_failures",),
             near_tie_candidates=(),
@@ -117,9 +117,9 @@ def test_unrelated_cases_remain_separate() -> None:
 
 def test_broad_open_novelty_can_consolidate_into_fewer_clusters() -> None:
     cases = [
-        _case(0, learned_parents=(2,), graph_neighbors=(2, 5)),
-        _case(1, learned_parents=(2,), graph_neighbors=(2, 6)),
-        _case(2, learned_parents=(2,), graph_neighbors=(2, 7)),
+        _case(0, learned_source_edges=(2,), graph_neighbors=(2, 5)),
+        _case(1, learned_source_edges=(2,), graph_neighbors=(2, 6)),
+        _case(2, learned_source_edges=(2,), graph_neighbors=(2, 7)),
     ]
     clusters = cluster_uncertainty_cases(cases)
 
@@ -151,7 +151,7 @@ def test_posthoc_relation_type_interpretation_is_separate(tmp_path: Path, capsys
                     {
                         "var": 0,
                         "relation_type": "delayed",
-                        "learned_parents": [1],
+                        "learned_source_edges": [1],
                         "open_novelty": True,
                         "last_fit_near_tie_count": 3,
                         "last_fit_margin": 0,
@@ -159,7 +159,7 @@ def test_posthoc_relation_type_interpretation_is_separate(tmp_path: Path, capsys
                     {
                         "var": 1,
                         "relation_type": "proxy_confounded",
-                        "learned_parents": [1],
+                        "learned_source_edges": [1],
                         "open_novelty": True,
                         "last_fit_near_tie_count": 2,
                         "last_fit_margin": 0,
@@ -194,7 +194,7 @@ def test_compare_script_detects_assist_worse_than_off(tmp_path: Path, capsys) ->
         "revoked_by_dist": {"sentinel": 1},
         "total_unique_failures": 2,
         "quality_cost": 1000,
-        "temporal_frontier_chosen_parent_recall": 0.5,
+        "temporal_frontier_chosen_source_edge_recall": 0.5,
         "temporal_frontier_recall_lift": 1.2,
         "dormant_total": 3,
         "vars_open_novelty": 1,

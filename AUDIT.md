@@ -180,7 +180,7 @@ hard_filter use_rights — stays.
 ### `context_role_index.py` — node explosion
 **What it does:** Tracks every hypothesis form ever seen (`var_fit`,
 `tied_frontier_candidate`, `dormant_alternative`, `composite`, etc.) as graph
-nodes, indexed by var, parent, component. Grows without bound until the
+nodes, indexed by var, source_edge, component. Grows without bound until the
 per-var cap added in the recent fix. Also stores `roles` (every role assignment
 ever made), `role_surfaces`, and `surface_transitions`.
 

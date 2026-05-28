@@ -7,7 +7,7 @@ self-contained HTML file you can open in any browser. Shows:
 
   - Agent's believed causal graph at each snapshot (click to navigate)
   - Status timeline: how each var's cert state evolves over cycles
-  - Per-var detail on click (parents, sentinels, cert age, collapse log)
+  - Per-var detail on click (source_edges, sentinels, cert age, collapse log)
   - Regime register summary
   - Key metrics: interventions, certified count, live/inert partition
 
@@ -47,7 +47,7 @@ def _capture_snapshot(agent: ChainedAgent, world: CausalWorld, cycle: int) -> Di
             "id":      v,
             "status":  n.status,
             "role":    role or "untested",
-            "parents": list(n.parents),
+            "source_edges": list(n.source_edges),
             "func":    n.func,
             "tier":    tier,
             "is_inert":  v in inert,
@@ -133,7 +133,7 @@ def run_simulation(cfg: argparse.Namespace) -> Tuple[List[Dict], Dict]:
 # ── layout ─────────────────────────────────────────────────────────────────────
 
 def _compute_layout(agent: ChainedAgent, world: CausalWorld) -> Dict:
-    """Compute DAG node positions from agent's final believed parent structure.
+    """Compute DAG node positions from agent's final believed source_edge structure.
 
     Non-inert vars: layered left-to-right by topological depth in agent's model.
     Inert vars:     separate row at bottom.
@@ -141,16 +141,16 @@ def _compute_layout(agent: ChainedAgent, world: CausalWorld) -> Dict:
     inert = agent._inert_vars if hasattr(agent, "_inert_vars") else set()
     n = world.visible_count
 
-    # Build depth map from agent's believed parents
+    # Build depth map from agent's believed source_edges
     depth: Dict[int, int] = {}
     def get_depth(v: int) -> int:
         if v in depth:
             return depth[v]
-        parents = list(agent.ledger.vars[v].parents)
-        if not parents:
+        source_edges = list(agent.ledger.vars[v].source_edges)
+        if not source_edges:
             depth[v] = 0
         else:
-            depth[v] = 1 + max(get_depth(p) for p in parents if p != v)
+            depth[v] = 1 + max(get_depth(p) for p in source_edges if p != v)
         return depth[v]
 
     for v in range(n):
@@ -438,7 +438,7 @@ function render(idx) {{
   snap.vars.forEach(v => {{ varById[v.id] = v; }});
 
   snap.vars.forEach(v => {{
-    v.parents.forEach(p => {{
+    v.source_edges.forEach(p => {{
       const src = posById[p]; const dst = posById[v.id];
       if (!src || !dst) return;
       const isCert = !v.is_inert && !varById[p]?.is_inert && v.status === 'certified';
@@ -510,7 +510,7 @@ function renderDetail(vid, snap) {{
     ['status',    v.status],
     ['role',      v.role],
     ['tier',      `T${{v.tier}}`],
-    ['parents',   v.parents.length ? v.parents.map(p=>`x${{p}}`).join(', ') : '(none)'],
+    ['source_edges',   v.source_edges.length ? v.source_edges.map(p=>`x${{p}}`).join(', ') : '(none)'],
     ['func',      v.func],
     ['sentinels', v.n_sentinels],
     ['audits',    v.full_audits],

@@ -26,13 +26,13 @@ from dreth.agent import ChainedAgent
 from dreth.ledger import CompositeNethra, NethraCertificate
 from dreth.quality import QualityWeights, compute_quality_cost
 from dreth.hybrid import (
-    SensitivityParentRanker,
-    HistoryParentRanker,
-    HistoryRescueParentRanker,
+    Sensitivitysource_edgeRanker,
+    Historysource_edgeRanker,
+    HistoryRescuesource_edgeRanker,
     DiscriminationProbeProposer,
     HistoryProbeProposer,
     HistoryRescueProbeProposer,
-    ParentProposalDiagnostics,
+    source_edgeProposalDiagnostics,
     ProbeProposal,
     FuncLibraryRouter,
     SymbolicResidualPredictor,
@@ -45,7 +45,7 @@ from scripts.batch_run import (
 
 
 # ── world: seed 3 ──────────────────────────────────────────────────────────────
-# parents: [[], [], [0,1], [0,1], [0,1]]
+# source_edges: [[], [], [0,1], [0,1], [0,1]]
 # funcs:   ['HIGH', 'LOW', 'MAX', 'FIRST', 'PROD']
 # After initialize():
 #   x0, x1 → tareth (roots whose output propagates to children)
@@ -297,15 +297,15 @@ def test_06_skip_path_breakdown_matches_cert_roles():
 # ── 07 ────────────────────────────────────────────────────────────────────────
 
 def test_07_variable_reveal_audits_new_var_with_trass_vars_as_candidates():
-    """When x5 is revealed and its true parent (x4) is currently trass-certified,
-    the agent must still find x4 as x5's parent. Trass-status vars are valid
-    parent candidates — only a route cert excludes a var from available_parents,
+    """When x5 is revealed and its true source_edge (x4) is currently trass-certified,
+    the agent must still find x4 as x5's source_edge. Trass-status vars are valid
+    source_edge candidates — only a route cert excludes a var from available_source_edges,
     and no route certs exist. Existing trass certs are NOT retested on reveal
     (filter ledger: no recert without failure).
 
-    Seed-3, 6-var world: x5's parent is x4 (parents=[4]). x4 is trass before
+    Seed-3, 6-var world: x5's source_edge is x4 (source_edges=[4]). x4 is trass before
     reveal. After reveal: x4 stays trass (its cert did not fail), x5 is certified,
-    and x5's learned parents include x4.
+    and x5's learned source_edges include x4.
     """
     rng_w = random.Random(_SEED_W)
     rng_a = random.Random(_SEED_A)
@@ -323,12 +323,12 @@ def test_07_variable_reveal_audits_new_var_with_trass_vars_as_candidates():
     assert agent.ledger.vars[4].role_for("skip") == "trass", \
         "x4 must be trass before x5 is revealed"
 
-    assert 4 in world.parents[5], \
+    assert 4 in world.source_edges[5], \
         "test requires x5 to depend on x4 in the hidden world structure"
 
     # In the seed-3, 6-var world x5's random function is TINY (constant 0.1),
     # which ignores all inputs. Replace it with FIRST so x4 is a genuine causal
-    # parent — perturbing x4 will move x5 and the screen will rank x4 highly.
+    # source_edge — perturbing x4 will move x5 and the screen will rank x4 highly.
     world.funcs[5] = "FIRST"
     world.state = list(world.state)
     world.state[5] = world.state[4]   # FIRST([x4]) = x4 = 0.0 at current world state
@@ -345,9 +345,9 @@ def test_07_variable_reveal_audits_new_var_with_trass_vars_as_candidates():
     assert agent.ledger.vars[4].role_for("skip") == "trass", \
         "x4 must remain trass after reveal (filter ledger: no recert without failure)"
 
-    # x5's learned parents must include x4 (trass-status is not a candidate barrier)
-    assert 4 in agent.ledger.vars[5].parents, \
-        "x5's learned parents must include x4 despite x4 being trass-certified"
+    # x5's learned source_edges must include x4 (trass-status is not a candidate barrier)
+    assert 4 in agent.ledger.vars[5].source_edges, \
+        "x5's learned source_edges must include x4 despite x4 being trass-certified"
 
 
 # ── 08 ────────────────────────────────────────────────────────────────────────
@@ -380,7 +380,7 @@ def test_08_cycle_records_account_for_all_vars():
 
     # x0's children that were trass-skipped in pass 1 then cascade-audited in pass 2
     # should appear in both lists — that's the expected dual-appearance
-    x0_children = [v for v in range(n_var) if v != 0 and 0 in world.parents[v]]
+    x0_children = [v for v in range(n_var) if v != 0 and 0 in world.source_edges[v]]
     for child in x0_children:
         if child in r.fully_audited_vars:
             # If cascaded into audit, it must have been skipped first (trass skip in pass 1)
@@ -432,7 +432,7 @@ def test_09_composite_nethra_install_skip_persist_revoke():
 
     # Modify world AFTER initialization: x0 now has PROD(x2,x3) hidden function.
     # Agent's cert for x0 is still based on the old HIGH hypothesis.
-    world.parents[0] = [2, 3]
+    world.source_edges[0] = [2, 3]
     world.funcs[0] = "PROD"
     world.state = list(world.state)
     world.state[2] = 0.01
@@ -488,7 +488,7 @@ def test_09_composite_nethra_install_skip_persist_revoke():
     # Break the interaction: restore x0 as a standalone root with HIGH function.
     # Now predict_under_joint_intervention({2:v, 3:v})[0] = HIGH([]) = 0.8 = R0[0].
     # |RAB - R0| = 0 < tol → composite sentinel fails → composite revoked.
-    world.parents[0] = []
+    world.source_edges[0] = []
     world.funcs[0] = "HIGH"
     world.state = list(world.state)
     world.state[0] = 0.8
@@ -527,7 +527,7 @@ def _make_hybrid_agent(**kwargs):
     world = CausalWorld(5, rng_w, noise_sigma=0.0)
     world.visible_count = 5
     residual_predictor = kwargs.pop("residual_predictor", SymbolicResidualPredictor())
-    parent_ranker = kwargs.pop("parent_ranker", SensitivityParentRanker(world))
+    source_edge_ranker = kwargs.pop("source_edge_ranker", Sensitivitysource_edgeRanker(world))
     probe_proposer = kwargs.pop("probe_proposer", DiscriminationProbeProposer())
     expert_router = kwargs.pop("expert_router", FuncLibraryRouter())
     agent = ChainedAgent(
@@ -538,7 +538,7 @@ def _make_hybrid_agent(**kwargs):
         priority_audit_budget=5,
         frontier_k=world.n_vars,
         residual_predictor=residual_predictor,
-        parent_ranker=parent_ranker,
+        source_edge_ranker=source_edge_ranker,
         probe_proposer=probe_proposer,
         expert_router=expert_router,
         **kwargs,
@@ -557,8 +557,8 @@ def test_10a_hybrid_provider_counters_increment():
 
     assert agent._hybrid_residual_predictor_calls > 0, \
         "residual_predictor must be called at least once"
-    assert agent._hybrid_parent_ranker_calls > 0, \
-        "parent_ranker must be called at least once (parent_screen_m > 0 triggers _screen_candidate_parents)"
+    assert agent._hybrid_source_edge_ranker_calls > 0, \
+        "source_edge_ranker must be called at least once (source_edge_screen_m > 0 triggers _screen_candidate_source_edges)"
     assert agent._hybrid_probe_proposer_calls > 0, \
         "probe_proposer must be called at least once (every full audit goes through _full_audit_var)"
     assert agent._hybrid_expert_router_calls > 0, \
@@ -650,7 +650,7 @@ def test_10d_off_vs_hybrid_compatible_skip_rate():
     """Hybrid symbolic providers must not degrade the skip rate by more than 20%.
 
     DiscriminationProbeProposer returns empty probes → no change to fit_var.
-    SensitivityParentRanker mirrors the inline screen → same candidates.
+    Sensitivitysource_edgeRanker mirrors the inline screen → same candidates.
     FuncLibraryRouter is diagnostic-only → no effect.
     SymbolicResidualPredictor mirrors the inline path → same passive decisions.
     So the skip rates should be within a small tolerance.
@@ -690,10 +690,10 @@ def test_10d_off_vs_hybrid_compatible_skip_rate():
     )
 
 
-def test_10e_history_parent_ranker_cannot_issue_certs():
+def test_10e_history_source_edge_ranker_cannot_issue_certs():
     """History ranking may alter proposal order, but certs still come from ledger paths."""
     agent, world = _make_hybrid_agent(
-        parent_ranker=HistoryParentRanker(),
+        source_edge_ranker=Historysource_edgeRanker(),
         probe_proposer=None,
     )
     agent.initialize()
@@ -711,34 +711,34 @@ def test_10e_history_parent_ranker_cannot_issue_certs():
             assert cert.earned_by != "provider"
 
 
-def test_10f_parent_proposal_diagnostics_increment_with_history_ranker():
+def test_10f_source_edge_proposal_diagnostics_increment_with_history_ranker():
     agent, _ = _make_hybrid_agent(
-        parent_ranker=HistoryParentRanker(),
+        source_edge_ranker=Historysource_edgeRanker(),
         probe_proposer=None,
     )
     agent.initialize()
     for c in range(1, 4):
         agent.run_cycle(c)
 
-    diag = agent._parent_proposal_diagnostics
+    diag = agent._source_edge_proposal_diagnostics
     assert diag.calls > 0
     assert diag.proposed_total > 0
 
 
-def test_10g_parent_ranking_comparison_counts_rank_zero_hit():
-    diag = ParentProposalDiagnostics()
+def test_10g_source_edge_ranking_comparison_counts_rank_zero_hit():
+    diag = source_edgeProposalDiagnostics()
     diag.record_call((2, 3, 4), (2, 3, 4))
     diag.record_fit((2, 3, 4), (2,))
 
     assert diag.proposed_in_final_fit == 1
-    assert diag.miss_chosen_parent_count == 0
-    assert diag.rank_of_chosen_parent_mean == 0.0
-    assert diag.rank_of_chosen_parent_max == 0
-    assert diag.chosen_parent_hit_rate == 1.0
+    assert diag.miss_chosen_source_edge_count == 0
+    assert diag.rank_of_chosen_source_edge_mean == 0.0
+    assert diag.rank_of_chosen_source_edge_max == 0
+    assert diag.chosen_source_edge_hit_rate == 1.0
 
 
 class _InvalidProbeProposer:
-    def propose_probes(self, var, available_parents, budget):
+    def propose_probes(self, var, available_source_edges, budget):
         return ProbeProposal(var=var, probes=((-1, 0.5), (0, 1.5)))
 
 
@@ -779,12 +779,12 @@ def test_10i_probe_proposer_has_no_direct_cert_authority():
             assert cert.earned_by != "provider"
 
 
-def test_10j_history_rescue_parent_ranker_preserves_authority_invariants():
+def test_10j_history_rescue_source_edge_ranker_preserves_authority_invariants():
     agent, world = _make_hybrid_agent(
-        parent_ranker=HistoryRescueParentRanker(CausalWorld(5, random.Random(_SEED_W), noise_sigma=0.0)),
+        source_edge_ranker=HistoryRescuesource_edgeRanker(CausalWorld(5, random.Random(_SEED_W), noise_sigma=0.0)),
         probe_proposer=HistoryRescueProbeProposer(max_probes=2),
     )
-    agent._parent_ranker._world = world
+    agent._source_edge_ranker._world = world
     agent.initialize()
     for c in range(1, 6):
         agent.run_cycle(c)
@@ -798,15 +798,15 @@ def test_10j_history_rescue_parent_ranker_preserves_authority_invariants():
 
 def test_10k_history_rescue_route_cert_exclusion_after_merge():
     agent, world = _make_hybrid_agent(
-        parent_ranker=HistoryRescueParentRanker(CausalWorld(5, random.Random(_SEED_W), noise_sigma=0.0)),
+        source_edge_ranker=HistoryRescuesource_edgeRanker(CausalWorld(5, random.Random(_SEED_W), noise_sigma=0.0)),
         probe_proposer=None,
     )
-    agent._parent_ranker._world = world
+    agent._source_edge_ranker._world = world
     target = 2
-    agent._parent_ranker.observe_fit_result(target, (0,), margin=5)
+    agent._source_edge_ranker.observe_fit_result(target, (0,), margin=5)
     agent.ledger.issue_route_cert(
         target, 0, "trass",
-        context_parents=(),
+        context_source_edges=(),
         context_visible=world.visible_count,
         context_cycle=0,
         targets=(),
@@ -816,30 +816,30 @@ def test_10k_history_rescue_route_cert_exclusion_after_merge():
         earned_by="counterfactual_fit",
     )
 
-    available = agent._screen_candidate_parents(target, 4)
+    available = agent._screen_candidate_source_edges(target, 4)
 
     assert 0 not in available
-    assert agent._parent_proposal_diagnostics.proposed_excluded_by_route_cert > 0
+    assert agent._source_edge_proposal_diagnostics.proposed_excluded_by_route_cert > 0
 
 
 def test_10l_history_rescue_sensitivity_cost_accounted_exactly():
     agent, world = _make_hybrid_agent(
-        parent_ranker=HistoryRescueParentRanker(CausalWorld(5, random.Random(_SEED_W), noise_sigma=0.0)),
+        source_edge_ranker=HistoryRescuesource_edgeRanker(CausalWorld(5, random.Random(_SEED_W), noise_sigma=0.0)),
         probe_proposer=None,
     )
-    agent._parent_ranker._world = world
+    agent._source_edge_ranker._world = world
     before = agent.total_interventions
 
-    agent._screen_candidate_parents(2, 4)
+    agent._screen_candidate_source_edges(2, 4)
 
-    diag = agent._parent_proposal_diagnostics
+    diag = agent._source_edge_proposal_diagnostics
     assert diag.sensitivity_rescue_calls == 1
     assert diag.sensitivity_rescue_interventions > 0
     assert agent.total_interventions - before == diag.sensitivity_rescue_interventions
 
 
-def test_10m_chosen_parent_source_history_and_rescue_recorded():
-    diag = ParentProposalDiagnostics()
+def test_10m_chosen_source_edge_source_history_and_rescue_recorded():
+    diag = source_edgeProposalDiagnostics()
     diag.record_call(
         (0, 1),
         (0, 1),
@@ -852,9 +852,9 @@ def test_10m_chosen_parent_source_history_and_rescue_recorded():
     )
     diag.record_fit((0, 1), (0, 1), {0: "history", 1: "rescue"})
 
-    assert diag.chosen_parent_from_history == 1
-    assert diag.chosen_parent_from_rescue == 1
-    assert diag.rescue_chosen_parent_hits == 1
+    assert diag.chosen_source_edge_from_history == 1
+    assert diag.chosen_source_edge_from_rescue == 1
+    assert diag.rescue_chosen_source_edge_hits == 1
     assert diag.sensitivity_rescue_interventions == 4
 
 
@@ -935,7 +935,7 @@ def test_11c_quality_summary_does_not_affect_run_behavior():
 
 def test_11d_provider_policy_comparison_block_prints_for_two_policies():
     def fake_run(policy, iv, audits):
-        parent, probe = policy
+        source_edge, probe = policy
         arch = SimpleNamespace(
             revoked_by_dist={},
             total_unique_failures=0,
@@ -947,7 +947,7 @@ def test_11d_provider_policy_comparison_block_prints_for_two_policies():
         )
         return SimpleNamespace(
             ok=True,
-            config=SimpleNamespace(parent_ranker=parent, probe_proposer=probe),
+            config=SimpleNamespace(source_edge_ranker=source_edge, probe_proposer=probe),
             interventions=iv,
             full_audits=audits,
             arch=arch,
@@ -976,7 +976,7 @@ def _fake_policy_report_run(
     n_vars=50,
     cycles=3000,
     seed=42,
-    parent="sensitivity",
+    source_edge="sensitivity",
     probe="none",
     quality_cost_extra=0,
     iv=100,
@@ -1005,7 +1005,7 @@ def _fake_policy_report_run(
             n_vars=n_vars,
             cycles=cycles,
             seed=seed,
-            parent_ranker=parent,
+            source_edge_ranker=source_edge,
             probe_proposer=probe,
         ),
         elapsed=elapsed,
@@ -1024,11 +1024,11 @@ def test_11e_policy_report_groups_by_schedule_scale_and_policy():
             _fake_policy_report_run(schedule="regime_switch", n_vars=50, cycles=3000, seed=99),
             _fake_policy_report_run(
                 schedule="regime_switch", n_vars=75, cycles=3000,
-                parent="history", probe="history",
+                source_edge="history", probe="history",
             ),
             _fake_policy_report_run(
                 schedule="false_trass", n_vars=50, cycles=3000,
-                parent="history", probe="history",
+                source_edge="history", probe="history",
             ),
         ],
         QualityWeights(),
@@ -1045,11 +1045,11 @@ def test_11f_policy_report_deltas_use_sensitivity_none_baseline():
     rows = _build_policy_report_rows(
         [
             _fake_policy_report_run(
-                parent="sensitivity", probe="none",
+                source_edge="sensitivity", probe="none",
                 iv=100, audits=10, revocations=1, unique_fails=2,
             ),
             _fake_policy_report_run(
-                parent="history", probe="history",
+                source_edge="history", probe="history",
                 iv=125, audits=13, revocations=4, unique_fails=7,
             ),
         ],
@@ -1068,11 +1068,11 @@ def test_11g_policy_report_pareto_marks_obviously_dominated_policy():
     rows = _build_policy_report_rows(
         [
             _fake_policy_report_run(
-                parent="sensitivity", probe="none",
+                source_edge="sensitivity", probe="none",
                 iv=100, audits=10, revocations=1, unique_fails=2,
             ),
             _fake_policy_report_run(
-                parent="history", probe="history",
+                source_edge="history", probe="history",
                 iv=110, audits=11, revocations=2, unique_fails=3,
             ),
         ],

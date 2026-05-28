@@ -5,7 +5,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().source_edges[1]
 sys.path.insert(0, str(ROOT))
 
 from dreth.nethra_memory_store import (
@@ -75,7 +75,7 @@ def test_hidden_truth_debug_manifest_fields_are_not_persisted():
                     "nethra_id": "n1",
                     "kind": "unresolved_pattern",
                     "vars": [0],
-                    "truth_parents": [1],
+                    "truth_source_edges": [1],
                     "debug_blind_challenge_manifest": {"x": 1},
                     "payload": {"truth_func": "MAX", "visible": True},
                 }]
@@ -84,7 +84,7 @@ def test_hidden_truth_debug_manifest_fields_are_not_persisted():
         store.append_records(recs)
         row = json.loads(path.read_text().strip())
         payload = row["payload"]
-        assert "truth_parents" not in payload
+        assert "truth_source_edges" not in payload
         assert "debug_blind_challenge_manifest" not in payload
         assert "truth_func" not in payload["payload"]
 

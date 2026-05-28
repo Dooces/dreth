@@ -5,7 +5,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().source_edges[2]
 sys.path.insert(0, str(ROOT))
 
 from dreth.learner.auto_sleep import AutoSleepConfig, AutoSleepScheduler
@@ -20,7 +20,7 @@ def _bg_record(run_id: str, seed: int) -> NethraMemoryRecord:
         "vars": [0],
         "context_keys": ["audit|x0|vis=2"],
         "fit_signatures": ["x0:MAX(1)"],
-        "parent_sets": [[1]],
+        "source_edge_sets": [[1]],
         "source_roles": ["unresolved"],
         "first_seen_cycle": 1,
         "last_seen_cycle": 10,
@@ -145,7 +145,7 @@ def test_broad_generic_debt_remains_telemetry_only():
             "vars": [0],
             "contexts": [],
             "common_signatures": [],
-            "common_parents": [],
+            "common_source_edges": [],
             "role_patterns": ["contested_best_available"],
             "recurring_signals": [],
             "confidence_as_familiarity": 0.4,

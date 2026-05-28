@@ -50,10 +50,10 @@ def load_jsonl(path: str) -> list[dict[str, Any]]:
 
 
 def policy_label(row: dict[str, Any]) -> str:
-    parent_ranker = row.get("parent_ranker")
+    source_edge_ranker = row.get("source_edge_ranker")
     probe_proposer = row.get("probe_proposer")
-    if parent_ranker is not None and probe_proposer is not None:
-        return f"{parent_ranker}/{probe_proposer}"
+    if source_edge_ranker is not None and probe_proposer is not None:
+        return f"{source_edge_ranker}/{probe_proposer}"
     return str(row.get("policy") or "unknown/unknown")
 
 
@@ -75,8 +75,8 @@ class FrontierSummary:
     evals: int = 0
     frontier_size_total: float = 0.0
     visible_count_total: float = 0.0
-    chosen_parent_hits: int = 0
-    chosen_parent_total: int = 0
+    chosen_source_edge_hits: int = 0
+    chosen_source_edge_total: int = 0
     revoked_hits: int = 0
     revoked_total: int = 0
     misses: int = 0
@@ -94,10 +94,10 @@ class FrontierSummary:
         return self.avg_frontier_size / self.avg_visible if self.avg_visible else 0.0
 
     @property
-    def chosen_parent_recall(self) -> float | None:
-        if not self.chosen_parent_total:
+    def chosen_source_edge_recall(self) -> float | None:
+        if not self.chosen_source_edge_total:
             return None
-        return self.chosen_parent_hits / self.chosen_parent_total
+        return self.chosen_source_edge_hits / self.chosen_source_edge_total
 
     @property
     def revoked_recall(self) -> float | None:
@@ -111,7 +111,7 @@ class FrontierSummary:
 
     @property
     def recall_lift(self) -> float | None:
-        recall = self.chosen_parent_recall
+        recall = self.chosen_source_edge_recall
         if recall is None:
             return None
         return recall / max(self.frontier_fraction, 1e-9)
@@ -155,11 +155,11 @@ def compute_frontier_summaries(
         summary.visible_count_total += (
             _as_float(row.get("temporal_frontier_avg_visible_count")) * evals
         )
-        summary.chosen_parent_hits += _as_int(
-            row.get("temporal_frontier_chosen_parent_hits")
+        summary.chosen_source_edge_hits += _as_int(
+            row.get("temporal_frontier_chosen_source_edge_hits")
         )
-        summary.chosen_parent_total += _as_int(
-            row.get("temporal_frontier_chosen_parent_total")
+        summary.chosen_source_edge_total += _as_int(
+            row.get("temporal_frontier_chosen_source_edge_total")
         )
         summary.revoked_hits += _as_int(row.get("temporal_frontier_revoked_hits"))
         summary.revoked_total += _as_int(row.get("temporal_frontier_revoked_total"))
@@ -178,7 +178,7 @@ def compute_frontier_summaries(
 @dataclass(frozen=True)
 class CurveSummary:
     label: int
-    chosen_parent_recall: float | None
+    chosen_source_edge_recall: float | None
     recall_lift: float | None
     frontier_fraction: float
 
@@ -200,8 +200,8 @@ def _combine_summaries(summaries: Iterable[FrontierSummary]) -> FrontierSummary:
         combined.evals += summary.evals
         combined.frontier_size_total += summary.frontier_size_total
         combined.visible_count_total += summary.visible_count_total
-        combined.chosen_parent_hits += summary.chosen_parent_hits
-        combined.chosen_parent_total += summary.chosen_parent_total
+        combined.chosen_source_edge_hits += summary.chosen_source_edge_hits
+        combined.chosen_source_edge_total += summary.chosen_source_edge_total
         combined.revoked_hits += summary.revoked_hits
         combined.revoked_total += summary.revoked_total
         combined.misses += summary.misses
@@ -222,7 +222,7 @@ def compute_warmup_curve(
             warmup_cycles,
             CurveSummary(
                 label=warmup_cycles,
-                chosen_parent_recall=combined.chosen_parent_recall,
+                chosen_source_edge_recall=combined.chosen_source_edge_recall,
                 recall_lift=combined.recall_lift,
                 frontier_fraction=combined.frontier_fraction,
             ),
@@ -239,7 +239,7 @@ def compute_scale_curve(summaries: Iterable[FrontierSummary]) -> list[CurveSumma
         combined = _combine_summaries(group)
         rows.append(CurveSummary(
             label=n_vars,
-            chosen_parent_recall=combined.chosen_parent_recall,
+            chosen_source_edge_recall=combined.chosen_source_edge_recall,
             recall_lift=combined.recall_lift,
             frontier_fraction=combined.frontier_fraction,
         ))
@@ -258,7 +258,7 @@ def _print_scaling_table(summaries: list[FrontierSummary], out: TextIO) -> None:
         f"  {'schedule':<16} {'policy':<32} {'n_vars':>6} {'cycles':>7} "
         f"{'warmup':>7} {'cap':>4} {'depth':>5} {'runs':>4} {'evals':>6} "
         f"{'avg_visible':>11} {'avg_frontier_size':>17} "
-        f"{'frontier_fraction':>17} {'chosen_parent_recall':>22} "
+        f"{'frontier_fraction':>17} {'chosen_source_edge_recall':>22} "
         f"{'random_recall_baseline':>23} {'recall_lift':>11} "
         f"{'candidate_reduction_vs_visible':>30} {'misses':>7}",
         file=out,
@@ -272,7 +272,7 @@ def _print_scaling_table(summaries: list[FrontierSummary], out: TextIO) -> None:
             f"{summary.runs:>4} {summary.evals:>6} "
             f"{summary.avg_visible:>11.2f} {summary.avg_frontier_size:>17.2f} "
             f"{summary.frontier_fraction:>17.3f} "
-            f"{_fmt_float(summary.chosen_parent_recall):>22} "
+            f"{_fmt_float(summary.chosen_source_edge_recall):>22} "
             f"{summary.random_recall_baseline:>23.3f} "
             f"{_fmt_float(summary.recall_lift):>11} "
             f"{summary.candidate_reduction_vs_visible:>30.3f} "
@@ -287,7 +287,7 @@ def _print_warmup_curve(summaries: list[FrontierSummary], out: TextIO) -> None:
     print("\nB. Warmup/scaffold curve:", file=out)
     print(
         f"  {'cycles':>7} {'warmup_cycles':>13} "
-        f"{'chosen_parent_recall':>22} {'recall_lift':>11} "
+        f"{'chosen_source_edge_recall':>22} {'recall_lift':>11} "
         f"{'frontier_fraction':>17}",
         file=out,
     )
@@ -295,7 +295,7 @@ def _print_warmup_curve(summaries: list[FrontierSummary], out: TextIO) -> None:
     for cycles, warmup_cycles, row in rows:
         print(
             f"  {cycles:>7} {warmup_cycles:>13} "
-            f"{_fmt_float(row.chosen_parent_recall):>22} "
+            f"{_fmt_float(row.chosen_source_edge_recall):>22} "
             f"{_fmt_float(row.recall_lift):>11} "
             f"{row.frontier_fraction:>17.3f}",
             file=out,
@@ -307,14 +307,14 @@ def _print_warmup_curve(summaries: list[FrontierSummary], out: TextIO) -> None:
 def _print_scale_curve(summaries: list[FrontierSummary], out: TextIO) -> None:
     print("\nC. Scale curve:", file=out)
     print(
-        f"  {'n_vars':>6} {'chosen_parent_recall':>22} "
+        f"  {'n_vars':>6} {'chosen_source_edge_recall':>22} "
         f"{'recall_lift':>11} {'frontier_fraction':>17}",
         file=out,
     )
     rows = compute_scale_curve(summaries)
     for row in rows:
         print(
-            f"  {row.label:>6} {_fmt_float(row.chosen_parent_recall):>22} "
+            f"  {row.label:>6} {_fmt_float(row.chosen_source_edge_recall):>22} "
             f"{_fmt_float(row.recall_lift):>11} {row.frontier_fraction:>17.3f}",
             file=out,
         )

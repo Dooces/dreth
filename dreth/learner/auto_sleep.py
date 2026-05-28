@@ -89,7 +89,7 @@ class AutoSleepScheduler:
         summary = consolidator.summarize(rows, bg, cr, unc, auth, temp, proposals)
 
         proposals_path = Path(config.proposals_path)
-        proposals_path.parent.mkdir(parents=True, exist_ok=True)
+        proposals_path.source_edge.mkdir(source_edges=True, exist_ok=True)
         with open(proposals_path, "w") as fh:
             for proposal in proposals:
                 d = proposal.to_dict()
@@ -97,7 +97,7 @@ class AutoSleepScheduler:
                 fh.write(json.dumps(d, sort_keys=True) + "\n")
 
         summary_path = Path(config.summary_path)
-        summary_path.parent.mkdir(parents=True, exist_ok=True)
+        summary_path.source_edge.mkdir(source_edges=True, exist_ok=True)
         summary_path.write_text(_fmt_auto_sleep_summary(summary), encoding="utf-8")
 
         return {

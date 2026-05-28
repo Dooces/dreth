@@ -42,8 +42,8 @@ class ResidualPrediction:
 
 
 @dataclasses.dataclass
-class ParentRanking:
-    """Output from a ParentRanker for one target variable.
+class source_edgeRanking:
+    """Output from a source_edgeRanker for one target variable.
     Ranked list only — does NOT exclude candidates via cert logic.
     """
     target: int
@@ -67,7 +67,7 @@ class ExpertPrediction:
     """Output from an Expert for one hypothesis evaluation.
     Confidence is diagnostic only — NEVER treated as cert authority.
     """
-    parents: Tuple[int, ...]
+    source_edges: Tuple[int, ...]
     func: str
     score: float        # predicted score (not authoritative)
     confidence: float   # self-reported confidence [0, 1]; diagnostic only
@@ -79,30 +79,30 @@ class RepairEvent:
     """Diagnostic record of one provider call during a repair cycle."""
     cycle: int
     var: int
-    provider: str    # "residual_predictor" | "parent_ranker" | "probe_proposer" | "expert_router"
+    provider: str    # "residual_predictor" | "source_edge_ranker" | "probe_proposer" | "expert_router"
     call_count: int
     outcome: str     # "ok" | "stressed" | "proposal_issued" | "ranked" | "routed"
 
 
 @dataclasses.dataclass
-class ParentProposalDiagnostics:
-    """Diagnostic-only quality counters for ParentRanker proposals."""
+class source_edgeProposalDiagnostics:
+    """Diagnostic-only quality counters for source_edgeRanker proposals."""
     calls: int = 0
     proposed_total: int = 0
     proposed_in_final_fit: int = 0
     proposed_excluded_by_route_cert: int = 0
     proposed_not_used: int = 0
-    miss_chosen_parent_count: int = 0
+    miss_chosen_source_edge_count: int = 0
     _rank_sum: int = 0
     _rank_count: int = 0
-    rank_of_chosen_parent_max: int = 0
+    rank_of_chosen_source_edge_max: int = 0
     history_ranker_calls: int = 0
     sensitivity_rescue_calls: int = 0
     sensitivity_rescue_interventions: int = 0
     rescue_candidates_added: int = 0
-    rescue_chosen_parent_hits: int = 0
-    chosen_parent_from_history: int = 0
-    chosen_parent_from_rescue: int = 0
+    rescue_chosen_source_edge_hits: int = 0
+    chosen_source_edge_from_history: int = 0
+    chosen_source_edge_from_rescue: int = 0
 
     def record_call(
         self,
@@ -124,35 +124,35 @@ class ParentProposalDiagnostics:
     def record_fit(
         self,
         ranked_post_route: Tuple[int, ...],
-        chosen_parents: Tuple[int, ...],
+        chosen_source_edges: Tuple[int, ...],
         source_by_candidate: Optional[Dict[int, str]] = None,
     ) -> None:
         rank_index = {p: i for i, p in enumerate(ranked_post_route)}
-        chosen = set(chosen_parents)
-        for parent in chosen_parents:
-            rank = rank_index.get(parent)
+        chosen = set(chosen_source_edges)
+        for source_edge in chosen_source_edges:
+            rank = rank_index.get(source_edge)
             if rank is None:
-                self.miss_chosen_parent_count += 1
+                self.miss_chosen_source_edge_count += 1
                 continue
             self.proposed_in_final_fit += 1
-            source = (source_by_candidate or {}).get(parent, "")
+            source = (source_by_candidate or {}).get(source_edge, "")
             if "history" in source:
-                self.chosen_parent_from_history += 1
+                self.chosen_source_edge_from_history += 1
             if "rescue" in source:
-                self.chosen_parent_from_rescue += 1
-                self.rescue_chosen_parent_hits += 1
+                self.chosen_source_edge_from_rescue += 1
+                self.rescue_chosen_source_edge_hits += 1
             self._rank_sum += rank
             self._rank_count += 1
-            self.rank_of_chosen_parent_max = max(self.rank_of_chosen_parent_max, rank)
+            self.rank_of_chosen_source_edge_max = max(self.rank_of_chosen_source_edge_max, rank)
         self.proposed_not_used += sum(1 for p in ranked_post_route if p not in chosen)
 
     @property
-    def rank_of_chosen_parent_mean(self) -> float:
+    def rank_of_chosen_source_edge_mean(self) -> float:
         return self._rank_sum / self._rank_count if self._rank_count else 0.0
 
     @property
-    def chosen_parent_hit_rate(self) -> float:
-        denom = self.proposed_in_final_fit + self.miss_chosen_parent_count
+    def chosen_source_edge_hit_rate(self) -> float:
+        denom = self.proposed_in_final_fit + self.miss_chosen_source_edge_count
         return self.proposed_in_final_fit / denom if denom else 0.0
 
 
@@ -201,9 +201,9 @@ class ResidualPredictor(Protocol):
     def predict_residual(
         self,
         var: int,
-        parents: Tuple[int, ...],
+        source_edges: Tuple[int, ...],
         func: str,
-        parent_vals: List[float],
+        source_edge_vals: List[float],
         actual: float,
         tolerance: float,
     ) -> ResidualPrediction:
@@ -211,19 +211,19 @@ class ResidualPredictor(Protocol):
 
 
 @runtime_checkable
-class ParentRanker(Protocol):
-    """Ranks candidate parent variables for a target.
+class source_edgeRanker(Protocol):
+    """Ranks candidate source_edge variables for a target.
 
     CONTRACT: Must NOT certify any variable or exclude candidates via cert logic.
     Cert-based exclusion (route certs) is applied by ChainedAgent AFTER ranking.
     """
 
-    def rank_parents(
+    def rank_source_edges(
         self,
         target: int,
         candidates: Set[int],
         top_m: int,
-    ) -> ParentRanking:
+    ) -> source_edgeRanking:
         ...
 
 
@@ -239,7 +239,7 @@ class ProbeProposer(Protocol):
     def propose_probes(
         self,
         var: int,
-        available_parents: Set[int],
+        available_source_edges: Set[int],
         budget: int,
     ) -> ProbeProposal:
         ...
@@ -247,7 +247,7 @@ class ProbeProposer(Protocol):
 
 @runtime_checkable
 class Expert(Protocol):
-    """Evaluates hypothesis quality for (var, parents, func).
+    """Evaluates hypothesis quality for (var, source_edges, func).
 
     CONTRACT: Must NOT issue certs or alter ledger state.
     Confidence values are diagnostic only.
@@ -256,7 +256,7 @@ class Expert(Protocol):
     def evaluate(
         self,
         var: int,
-        parents: Tuple[int, ...],
+        source_edges: Tuple[int, ...],
         func: str,
         context: Dict,
     ) -> ExpertPrediction:
@@ -274,7 +274,7 @@ class ExpertRouter(Protocol):
     def route(
         self,
         var: int,
-        available_parents: Set[int],
+        available_source_edges: Set[int],
         context: Dict,
     ) -> Tuple["Expert", Dict]:   # (expert, route_metadata)
         ...
@@ -284,7 +284,7 @@ class ExpertRouter(Protocol):
 
 class SymbolicResidualPredictor:
     """Default ResidualPredictor: reproduces the passive residual logic using
-    currently authoritative parents + FUNC_LIBRARY.
+    currently authoritative source_edges + FUNC_LIBRARY.
 
     Extracts the current agent behavior as a provider. May NOT issue certs —
     it only computes and returns the residual signal for the agent to act on.
@@ -302,9 +302,9 @@ class SymbolicResidualPredictor:
     def predict_residual(
         self,
         var: int,
-        parents: Tuple[int, ...],
+        source_edges: Tuple[int, ...],
         func: str,
-        parent_vals: List[float],
+        source_edge_vals: List[float],
         actual: float,
         tolerance: float,
     ) -> ResidualPrediction:
@@ -317,7 +317,7 @@ class SymbolicResidualPredictor:
                 var=var, ok=False, stressed=True,
                 residual=float("inf"), predicted=float("nan"), actual=actual,
             )
-        predicted = _f(list(parent_vals))
+        predicted = _f(list(source_edge_vals))
         residual = abs(actual - predicted)
         ok = residual <= tolerance
         if ok:
@@ -330,13 +330,13 @@ class SymbolicResidualPredictor:
         )
 
 
-class SensitivityParentRanker:
-    """Default ParentRanker: wraps the current per-target sensitivity screen.
+class Sensitivitysource_edgeRanker:
+    """Default source_edgeRanker: wraps the current per-target sensitivity screen.
 
     For each candidate var, perturbs it to 0.05 / 0.95 and measures |Δtarget|.
     Returns candidates ranked by movement without certifying anything.
 
-    This is an adapter over ChainedAgent._screen_candidate_parents logic.
+    This is an adapter over ChainedAgent._screen_candidate_source_edges logic.
     Cert-based exclusion (route_certs / trass role) is applied by ChainedAgent
     AFTER ranking returns; this class never touches certs.
     """
@@ -345,12 +345,12 @@ class SensitivityParentRanker:
         self._world = world
         self.call_count: int = 0
 
-    def rank_parents(
+    def rank_source_edges(
         self,
         target: int,
         candidates: Set[int],
         top_m: int,
-    ) -> ParentRanking:
+    ) -> source_edgeRanking:
         self.call_count += 1
         eligible = [c for c in candidates if c != target]
         scores: Dict[int, float] = {}
@@ -359,11 +359,11 @@ class SensitivityParentRanker:
             hi = self._world.predict_var_under_intervention(target, cand, 0.95)
             scores[cand] = abs(hi - lo)
         ranked = tuple(sorted(scores, key=lambda c: scores[c], reverse=True)[:top_m])
-        return ParentRanking(target=target, ranked=ranked, scores=scores)
+        return source_edgeRanking(target=target, ranked=ranked, scores=scores)
 
 
-class HistoryParentRanker:
-    """ParentRanker using only agent-visible audit and residual history.
+class Historysource_edgeRanker:
+    """source_edgeRanker using only agent-visible audit and residual history.
 
     It learns from prior Dreth fit results and residual co-stress observations
     supplied by ChainedAgent. It returns ranked candidates only; route-cert
@@ -372,7 +372,7 @@ class HistoryParentRanker:
 
     def __init__(self) -> None:
         self.call_count: int = 0
-        self._fit_parent_counts: Dict[Tuple[int, int], int] = defaultdict(int)
+        self._fit_source_edge_counts: Dict[Tuple[int, int], int] = defaultdict(int)
         self._co_stress_counts: Dict[Tuple[int, int], int] = defaultdict(int)
         self._route_exclusion_counts: Dict[Tuple[int, int], int] = defaultdict(int)
         self._cycle: Optional[int] = None
@@ -393,21 +393,21 @@ class HistoryParentRanker:
         self._stressed_this_cycle.add(var)
         self._recent_stressed.append(var)
 
-    def observe_fit_result(self, target: int, parents: Tuple[int, ...], margin: int = 0) -> None:
+    def observe_fit_result(self, target: int, source_edges: Tuple[int, ...], margin: int = 0) -> None:
         weight = 2 if margin > 0 else 1
-        for parent in parents:
-            self._fit_parent_counts[(target, parent)] += weight
+        for source_edge in source_edges:
+            self._fit_source_edge_counts[(target, source_edge)] += weight
 
     def observe_route_exclusions(self, target: int, excluded: Tuple[int, ...]) -> None:
-        for parent in excluded:
-            self._route_exclusion_counts[(target, parent)] += 1
+        for source_edge in excluded:
+            self._route_exclusion_counts[(target, source_edge)] += 1
 
-    def rank_parents(
+    def rank_source_edges(
         self,
         target: int,
         candidates: Set[int],
         top_m: int,
-    ) -> ParentRanking:
+    ) -> source_edgeRanking:
         self.call_count += 1
         eligible = [c for c in candidates if c != target]
         recent_counts: Dict[int, int] = defaultdict(int)
@@ -415,7 +415,7 @@ class HistoryParentRanker:
             recent_counts[v] += 1
         scores: Dict[int, float] = {}
         for cand in eligible:
-            fit_score = 10.0 * self._fit_parent_counts[(target, cand)]
+            fit_score = 10.0 * self._fit_source_edge_counts[(target, cand)]
             co_stress = 2.0 * self._co_stress_counts[(target, cand)]
             recent = 0.25 * recent_counts[cand]
             route_penalty = 4.0 * self._route_exclusion_counts[(target, cand)]
@@ -423,14 +423,14 @@ class HistoryParentRanker:
         ranked = tuple(
             sorted(eligible, key=lambda c: (-scores[c], c))[:top_m]
         )
-        return ParentRanking(target=target, ranked=ranked, scores=scores)
+        return source_edgeRanking(target=target, ranked=ranked, scores=scores)
 
 
-class HistoryRescueParentRanker(HistoryParentRanker):
+class HistoryRescuesource_edgeRanker(Historysource_edgeRanker):
     """History ranker with a small sensitivity rescue pool.
 
     History proposes the first tranche. Sensitivity probes only a bounded pool
-    built from visible agent-side history: recent stress, prior chosen parents,
+    built from visible agent-side history: recent stress, prior chosen source_edges,
     and round-robin visible candidates. The provider returns candidates only.
     ChainedAgent still applies route-cert exclusion and owns all authority.
     """
@@ -444,7 +444,7 @@ class HistoryRescueParentRanker(HistoryParentRanker):
         self.rescue_candidates_added: int = 0
         self._rr_cursor: Dict[int, int] = defaultdict(int)
         self._recent_rescue_tested: Dict[int, deque] = defaultdict(lambda: deque(maxlen=64))
-        self._last_rescue_parent_by_target: Dict[int, Optional[int]] = {}
+        self._last_rescue_source_edge_by_target: Dict[int, Optional[int]] = {}
 
     def _history_scores(self, target: int, candidates: Set[int]) -> Dict[int, float]:
         recent_counts: Dict[int, int] = defaultdict(int)
@@ -454,7 +454,7 @@ class HistoryRescueParentRanker(HistoryParentRanker):
         for cand in candidates:
             if cand == target:
                 continue
-            fit_score = 10.0 * self._fit_parent_counts[(target, cand)]
+            fit_score = 10.0 * self._fit_source_edge_counts[(target, cand)]
             co_stress = 2.0 * self._co_stress_counts[(target, cand)]
             recent = 0.25 * recent_counts[cand]
             route_penalty = 4.0 * self._route_exclusion_counts[(target, cand)]
@@ -491,17 +491,17 @@ class HistoryRescueParentRanker(HistoryParentRanker):
         self._rr_cursor[target] = (start + max(1, len(out))) % len(eligible)
         return out
 
-    def rank_parents(
+    def rank_source_edges(
         self,
         target: int,
         candidates: Set[int],
         top_m: int,
-    ) -> ParentRanking:
+    ) -> source_edgeRanking:
         self.call_count += 1
         self.history_ranker_calls += 1
         eligible = [c for c in sorted(candidates) if c != target]
         if top_m <= 0 or not eligible:
-            return ParentRanking(
+            return source_edgeRanking(
                 target=target, ranked=(), scores={},
                 diagnostics={"history_ranker_calls": 1},
             )
@@ -529,8 +529,8 @@ class HistoryRescueParentRanker(HistoryParentRanker):
         ]
         prior_fit_pool = [
             c for c, _ in sorted(
-                ((c, self._fit_parent_counts[(target, c)]) for c in eligible
-                 if c not in selected and self._fit_parent_counts[(target, c)] > 0),
+                ((c, self._fit_source_edge_counts[(target, c)]) for c in eligible
+                 if c not in selected and self._fit_source_edge_counts[(target, c)] > 0),
                 key=lambda item: (-item[1], item[0]),
             )[:rescue_r]
         ]
@@ -555,7 +555,7 @@ class HistoryRescueParentRanker(HistoryParentRanker):
         rescue_ranked = tuple(
             sorted(rescue_scores, key=lambda c: (-rescue_scores[c], c))[:rescue_r]
         )
-        self._last_rescue_parent_by_target[target] = rescue_ranked[0] if rescue_ranked else None
+        self._last_rescue_source_edge_by_target[target] = rescue_ranked[0] if rescue_ranked else None
 
         ranked: List[int] = []
         source_by_candidate: Dict[int, str] = {}
@@ -574,7 +574,7 @@ class HistoryRescueParentRanker(HistoryParentRanker):
         self.rescue_candidates_added += added_from_rescue
         scores = dict(history_scores)
         scores.update(rescue_scores)
-        return ParentRanking(
+        return source_edgeRanking(
             target=target,
             ranked=tuple(ranked[:top_m]),
             scores=scores,
@@ -605,7 +605,7 @@ class DiscriminationProbeProposer:
     def propose_probes(
         self,
         var: int,
-        available_parents: Set[int],
+        available_source_edges: Set[int],
         budget: int,
     ) -> ProbeProposal:
         self.call_count += 1
@@ -621,7 +621,7 @@ class HistoryProbeProposer:
         self.call_count: int = 0
         self.max_probes = max(0, max_probes)
         self._frontier_probes: Dict[int, Tuple[Tuple[int, float], ...]] = {}
-        self._parent_rankings: Dict[int, Tuple[int, ...]] = {}
+        self._source_edge_rankings: Dict[int, Tuple[int, ...]] = {}
         self._cycle: Optional[int] = None
         self._stressed_this_cycle: Set[int] = set()
         self._recent_stressed = deque(maxlen=128)
@@ -630,16 +630,16 @@ class HistoryProbeProposer:
         if probes:
             self._frontier_probes[var] = probes
 
-    def observe_parent_ranking(self, var: int, ranked: Tuple[int, ...]) -> None:
-        self._parent_rankings[var] = ranked
+    def observe_source_edge_ranking(self, var: int, ranked: Tuple[int, ...]) -> None:
+        self._source_edge_rankings[var] = ranked
 
-    def observe_parent_ranking_metadata(
+    def observe_source_edge_ranking_metadata(
         self,
         var: int,
         ranked: Tuple[int, ...],
         source_by_candidate: Dict[int, str],
     ) -> None:
-        self.observe_parent_ranking(var, ranked)
+        self.observe_source_edge_ranking(var, ranked)
 
     def observe_residual_event(self, var: int, cycle: int, stressed: bool) -> None:
         if self._cycle != cycle:
@@ -652,7 +652,7 @@ class HistoryProbeProposer:
     def propose_probes(
         self,
         var: int,
-        available_parents: Set[int],
+        available_source_edges: Set[int],
         budget: int,
     ) -> ProbeProposal:
         self.call_count += 1
@@ -666,33 +666,33 @@ class HistoryProbeProposer:
         for probe in self._frontier_probes.get(var, ()):
             add(probe)
         values = (0.1, 0.9)
-        for i, parent in enumerate(self._parent_rankings.get(var, ())):
-            if parent in available_parents:
-                add((parent, values[i % len(values)]))
+        for i, source_edge in enumerate(self._source_edge_rankings.get(var, ())):
+            if source_edge in available_source_edges:
+                add((source_edge, values[i % len(values)]))
         for i, stressed_var in enumerate(reversed(self._recent_stressed)):
-            if stressed_var in available_parents:
+            if stressed_var in available_source_edges:
                 add((stressed_var, values[(i + 1) % len(values)]))
 
         return ProbeProposal(var=var, probes=tuple(out))
 
 
-class NeuralHistoryParentRanker:
-    """ParentRanker with online-learned per-variable embeddings over observation/intervention history.
+class NeuralHistorysource_edgeRanker:
+    """source_edgeRanker with online-learned per-variable embeddings over observation/intervention history.
 
     Learns from three sources supplied by ChainedAgent:
       - interventional probe results (observe_probe_results): direct causal evidence
         from Dreth audits — the spread of target actuals when each candidate was probed
-      - completed Dreth fit results (observe_fit_result): confirmed parent structure
+      - completed Dreth fit results (observe_fit_result): confirmed source_edge structure
       - residual co-stress events (observe_residual_event): correlated instability
 
     Score(target, candidate) =
         w_embed  * W[target] · W[candidate]           (learned embedding similarity)
-      + w_fit    * fit_count(target, candidate)        (confirmed-parent frequency)
+      + w_fit    * fit_count(target, candidate)        (confirmed-source_edge frequency)
       + w_iv     * spread(actuals | iv_var=candidate)  (interventional response range)
       + w_co     * co_stress_count(target, candidate)  (co-stress co-occurrence)
 
-    Embeddings W are updated online from fit results: confirmed parents are pulled toward
-    the target embedding; non-parents in the candidate set are lightly repelled.
+    Embeddings W are updated online from fit results: confirmed source_edges are pulled toward
+    the target embedding; non-source_edges in the candidate set are lightly repelled.
 
     CONTRACT: no certs, no ledger mutations, no hidden-truth access.
     All inputs come from agent-visible surfaces only.
@@ -702,7 +702,7 @@ class NeuralHistoryParentRanker:
     _W_FIT   = 10.0
     _W_IV    = 8.0
     _W_CO    = 2.0
-    _NEG_FACTOR = 0.05   # repulsion weight for non-parents (kept small to avoid thrash)
+    _NEG_FACTOR = 0.05   # repulsion weight for non-source_edges (kept small to avoid thrash)
 
     def __init__(self, n_vars: int, embed_dim: int = 16, lr: float = 0.05) -> None:
         import numpy as _np
@@ -714,7 +714,7 @@ class NeuralHistoryParentRanker:
         self.W = rng.normal(0.0, 1.0 / embed_dim ** 0.5, (n_vars, embed_dim)).astype(_np.float32)
         norms = _np.linalg.norm(self.W, axis=1, keepdims=True)
         self.W /= _np.where(norms > 1e-9, norms, 1.0)
-        # Fit counts: (target, candidate) -> weighted count of confirmed parent observations
+        # Fit counts: (target, candidate) -> weighted count of confirmed source_edge observations
         self._fit_counts: Dict[Tuple[int, int], int] = defaultdict(int)
         # Probe actuals: (target, iv_var) -> deque of observed target values when iv_var was probed
         self._probe_actuals: Dict[Tuple[int, int], "deque[float]"] = {}
@@ -728,23 +728,23 @@ class NeuralHistoryParentRanker:
         self.fit_observations: int = 0
         self.probe_observations: int = 0
 
-    def observe_fit_result(self, target: int, parents: Tuple[int, ...], margin: int = 0) -> None:
+    def observe_fit_result(self, target: int, source_edges: Tuple[int, ...], margin: int = 0) -> None:
         """Update from a completed Dreth fit (called by ChainedAgent after _install_var)."""
         self.fit_observations += 1
         weight = max(1, margin)
-        for parent in parents:
-            self._fit_counts[(target, parent)] += weight
-        if not parents or target >= self.n_vars:
+        for source_edge in source_edges:
+            self._fit_counts[(target, source_edge)] += weight
+        if not source_edges or target >= self.n_vars:
             return
         np = self._np
         t_emb = self.W[target].copy()
-        for parent in parents:
-            if parent >= self.n_vars:
+        for source_edge in source_edges:
+            if source_edge >= self.n_vars:
                 continue
-            self.W[parent] += self.lr * (t_emb - self.W[parent])
-            n = float(np.linalg.norm(self.W[parent]))
+            self.W[source_edge] += self.lr * (t_emb - self.W[source_edge])
+            n = float(np.linalg.norm(self.W[source_edge]))
             if n > 1e-9:
-                self.W[parent] /= n
+                self.W[source_edge] /= n
 
     def observe_probe_results(
         self,
@@ -785,11 +785,11 @@ class NeuralHistoryParentRanker:
     def observe_route_exclusions(self, target: int, excluded: Tuple[int, ...]) -> None:
         pass  # route exclusion belongs to Dreth; no action here
 
-    def rank_parents(self, target: int, candidates: Set[int], top_m: int) -> ParentRanking:
+    def rank_source_edges(self, target: int, candidates: Set[int], top_m: int) -> source_edgeRanking:
         self.call_count += 1
         eligible = [c for c in candidates if c != target and c < self.n_vars]
         if not eligible or top_m <= 0:
-            return ParentRanking(
+            return source_edgeRanking(
                 target=target,
                 ranked=(),
                 scores={},
@@ -818,7 +818,7 @@ class NeuralHistoryParentRanker:
                 + self._W_CO   * co
             )
         ranked = tuple(sorted(eligible, key=lambda c: (-scores[c], c))[:top_m])
-        return ParentRanking(
+        return source_edgeRanking(
             target=target,
             ranked=ranked,
             scores=scores,
@@ -828,46 +828,46 @@ class NeuralHistoryParentRanker:
 
 
 class HistoryRescueProbeProposer(HistoryProbeProposer):
-    """History probe proposer that appends one probe from a rescue parent."""
+    """History probe proposer that appends one probe from a rescue source_edge."""
 
     def __init__(self, max_probes: int = 4) -> None:
         super().__init__(max_probes=max_probes)
-        self._rescue_parent_by_target: Dict[int, int] = {}
+        self._rescue_source_edge_by_target: Dict[int, int] = {}
 
-    def observe_parent_ranking_metadata(
+    def observe_source_edge_ranking_metadata(
         self,
         var: int,
         ranked: Tuple[int, ...],
         source_by_candidate: Dict[int, str],
     ) -> None:
-        super().observe_parent_ranking_metadata(var, ranked, source_by_candidate)
+        super().observe_source_edge_ranking_metadata(var, ranked, source_by_candidate)
         for cand in ranked:
             if "rescue" in source_by_candidate.get(cand, ""):
-                self._rescue_parent_by_target[var] = cand
+                self._rescue_source_edge_by_target[var] = cand
                 break
 
     def propose_probes(
         self,
         var: int,
-        available_parents: Set[int],
+        available_source_edges: Set[int],
         budget: int,
     ) -> ProbeProposal:
-        base = super().propose_probes(var, available_parents, budget)
+        base = super().propose_probes(var, available_source_edges, budget)
         out = list(base.probes)
-        rescue_parent = self._rescue_parent_by_target.get(var)
+        rescue_source_edge = self._rescue_source_edge_by_target.get(var)
         if (
-            rescue_parent is not None
-            and rescue_parent in available_parents
+            rescue_source_edge is not None
+            and rescue_source_edge in available_source_edges
             and len(out) < min(self.max_probes, max(0, budget))
         ):
-            probe = (rescue_parent, 0.9)
+            probe = (rescue_source_edge, 0.9)
             if probe not in out:
                 out.append(probe)
         return ProbeProposal(var=var, probes=tuple(out))
 
 
 class FuncLibraryExpert:
-    """Default Expert: evaluates (parents, func) pairs using FUNC_LIBRARY.
+    """Default Expert: evaluates (source_edges, func) pairs using FUNC_LIBRARY.
 
     Wraps the existing hypothesis evaluation logic without accessing hidden world
     structure.  Does NOT issue certs or alter ledger state.
@@ -882,20 +882,20 @@ class FuncLibraryExpert:
     def evaluate(
         self,
         var: int,
-        parents: Tuple[int, ...],
+        source_edges: Tuple[int, ...],
         func: str,
         context: Dict,
     ) -> ExpertPrediction:
-        parent_vals = context.get("parent_vals", [])
+        source_edge_vals = context.get("source_edge_vals", [])
         _f = self._func_lib.get(func)
         score = 0.0
-        if _f is not None and parent_vals:
+        if _f is not None and source_edge_vals:
             try:
-                score = float(_f(list(parent_vals)))
+                score = float(_f(list(source_edge_vals)))
             except Exception:
                 score = 0.0
         return ExpertPrediction(
-            parents=parents, func=func,
+            source_edges=source_edges, func=func,
             score=score, confidence=1.0,
             route_key=self.KEY,
         )
@@ -915,7 +915,7 @@ class FuncLibraryRouter:
     def route(
         self,
         var: int,
-        available_parents: Set[int],
+        available_source_edges: Set[int],
         context: Dict,
     ) -> Tuple[FuncLibraryExpert, Dict]:
         self.call_count += 1
