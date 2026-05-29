@@ -3258,11 +3258,21 @@ class ChainedAgent:
             if isinstance(self._source_edge_ranker, Sensitivitysource_edgeRanker):
                 self.total_interventions += 2 * len(candidates)
             # Route-cert exclusion: providers must not apply cert logic; ChainedAgent does it here.
-            post_route = tuple(
+            _cert_excl: Set[int] = {
                 x for x in ranking.ranked
-                if n.route_certs.get(x) is None or n.route_certs[x].role != "trass"
-            )
+                if n.route_certs.get(x) is not None and n.route_certs[x].role == "trass"
+            }
+            provider_filtered = tuple(x for x in ranking.ranked if x not in _cert_excl)
             if self._nethra_memory_index is not None:
+                # Expand the pool beyond the provider's top-m so memory hints can promote
+                # any visible candidate into the final top-m cut.  Provider-ranked candidates
+                # come first (they carry sensitivity signal); the remainder fills the tail.
+                _seen = set(provider_filtered) | _cert_excl
+                _remainder = tuple(
+                    x for x in range(self.world.visible_count)
+                    if x != target and x not in _seen
+                )
+                _full_pool = provider_filtered + _remainder
                 post_route = tuple(
                     self._nethra_memory_index.rank_candidates(
                         var=target,
@@ -3271,12 +3281,16 @@ class ChainedAgent:
                             var=target,
                             visible=self.world.visible_count,
                         ),
-                        candidates=post_route,
+                        candidates=_full_pool,
                         hook="source_edge_candidates",
                         cycle=getattr(self, "_current_cycle_for_memory", 0),
                     )
-                )
-            excluded = tuple(x for x in ranking.ranked if x not in post_route)
+                )[:m]
+            else:
+                post_route = provider_filtered[:m]
+            # Only cert-excluded candidates go to observe_route_exclusions.
+            # Candidates the memory demoted out of the top-m are not exclusions.
+            excluded = tuple(_cert_excl)
             source_by_candidate = getattr(ranking, "source_by_candidate", {})
             post_route_sources = {
                 x: source_by_candidate.get(x, "")
@@ -3411,6 +3425,8 @@ class ChainedAgent:
         for var in first_pass_order:
             source_edges, func, score, second, fd = self._full_audit_var(var, 0)
             self._install_var(var, source_edges, func, score, second, 0, fd)
+            if self._nethra_memory_index is not None:
+                self._nethra_memory_index.record_fit_outcome(var, source_edges, 0)
         self._live_set = set(frontier)
 
     def on_variable_revealed(self, new_var: int, cycle: int) -> None:
@@ -3425,6 +3441,8 @@ class ChainedAgent:
             self._live_set.add(new_var)
         source_edges, func, score, second, fd = self._full_audit_var(new_var, cycle)
         self._install_var(new_var, source_edges, func, score, second, cycle, fd)
+        if self._nethra_memory_index is not None:
+            self._nethra_memory_index.record_fit_outcome(new_var, source_edges, cycle)
         self.ledger.event_log.append(
             f"c{cycle}: x{new_var} REVEALED — first audit complete; "
             f"available source_edges at reveal time: "
@@ -4047,6 +4065,8 @@ class ChainedAgent:
                 )
             source_edges, func, score, second, fd = self._full_audit_var(var, cycle)
             sig_changed = self._install_var(var, source_edges, func, score, second, cycle, fd)
+            if self._nethra_memory_index is not None:
+                self._nethra_memory_index.record_fit_outcome(var, source_edges, cycle)
             # Expression assist attribution: record outcome for any pending assist event
             # so the index knows whether its ranking hint improved the result.
             if (self._nethra_expression_index is not None

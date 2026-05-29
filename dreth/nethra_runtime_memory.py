@@ -83,6 +83,9 @@ class PersistentNethraIndex:
         self._projection: ProjectionIndex = ProjectionIndex()
         self.metrics = RuntimeMemoryMetrics()
         self.events: deque[ExperienceEvent] = deque(maxlen=_MAX_EXPERIENCE_EVENTS)
+        # Pending hint per target: set when rank_candidates fires a reorder, cleared
+        # by record_fit_outcome so the fit result can confirm or discard the hint.
+        self._pending_candidate_hints: dict[int, dict] = {}
 
     def load_path(self, path: str | Path) -> int:
         loaded = 0
@@ -175,6 +178,16 @@ class PersistentNethraIndex:
                     self.metrics.candidate_reorders += 1
                     if any(r.source == "sleep" for r in ranking_handles):
                         self.metrics.sleep_products_used += 1
+                    # Save pending hint so record_fit_outcome can close the feedback loop:
+                    # if a memory-promoted candidate is confirmed as the fitted source_edge,
+                    # emit a success experience event for sleep to compound on.
+                    self._pending_candidate_hints[int(var)] = {
+                        "cycle": cycle,
+                        "context_key": context_key,
+                        "active_nethras": [r.nethra_id for r, _ in usable],
+                        "evidence_refs": [r.record_id for r, _ in usable],
+                        "promoted": frozenset(preferred),
+                    }
 
         self._record_event(
             cycle=cycle,
@@ -380,6 +393,33 @@ class PersistentNethraIndex:
                 payload=row,
             )
         return None
+
+    def record_fit_outcome(self, var: int, source_edges: tuple, cycle: int) -> None:
+        """Close the feedback loop: if a memory-promoted candidate was installed as the
+        fitted source_edge, emit a success experience event.  Sleep consolidation reads
+        success=True to distinguish confirmed hints from mere reorders, which lets it
+        compound ranking_hint products across generations rather than plateauing."""
+        hint = self._pending_candidate_hints.pop(var, None)
+        if hint is None or hint["cycle"] != cycle:
+            return
+        promoted: frozenset[int] = hint["promoted"]
+        if not promoted:
+            return
+        fitted = {int(se) for se in source_edges if _intlike(se)}
+        confirmed = promoted & fitted
+        if not confirmed:
+            return
+        self._record_event(
+            cycle=cycle,
+            context_key=hint["context_key"],
+            active_atoms=[f"x{se}" for se in sorted(confirmed)],
+            active_nethras=hint["active_nethras"],
+            hook="source_edge_candidates",
+            use_right="ranking_hint",
+            behavior_effect=1,
+            success=True,
+            evidence_refs=hint["evidence_refs"],
+        )
 
     def _record_event(self, **kwargs: Any) -> None:
         if self.mode == "off":

@@ -565,9 +565,9 @@ class MemorySleepConsolidator:
                     source_edge_vars: list[int] = []
                     for ref in (rec.get("touched_structure_refs") or []):
                         ref_s = str(ref)
-                        if ref_s.startswith("source_edges:") and ref_s[8:].strip():
+                        if ref_s.startswith("source_edges:") and ref_s[13:].strip():
                             try:
-                                source_edge_vars = [int(p) for p in ref_s[8:].split(",") if p.strip()]
+                                source_edge_vars = [int(p) for p in ref_s[13:].split(",") if p.strip()]
                             except ValueError:
                                 pass
                             break

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 # ── THIS FILE ────────────────────────────────────────────────────────────────
 # Hybrid control interface layer: Protocol definitions and default symbolic
 # implementations.
@@ -686,23 +688,28 @@ class NeuralHistorysource_edgeRanker:
       - residual co-stress events (observe_residual_event): correlated instability
 
     Score(target, candidate) =
-        w_embed  * W[target] · W[candidate]           (learned embedding similarity)
-      + w_fit    * fit_count(target, candidate)        (confirmed-source_edge frequency)
-      + w_iv     * spread(actuals | iv_var=candidate)  (interventional response range)
-      + w_co     * co_stress_count(target, candidate)  (co-stress co-occurrence)
+        w_embed   * W[target] · W[candidate]           (learned embedding similarity)
+      + w_fit     * log1p(fit_count(target, cand))     (log-scale confirmed-fit frequency)
+      + w_iv      * spread(actuals | iv_var=cand)      (interventional response range)
+      + w_co      * co_stress_count(target, cand)      (co-stress co-occurrence)
+      - w_stress  * recent_stress_count(cand)          (recent residual stress on cand)
+      - w_exclude * exclusion_count(target, cand)      (dreth route_cert exclusions)
 
-    Embeddings W are updated online from fit results: confirmed source_edges are pulled toward
-    the target embedding; non-source_edges in the candidate set are lightly repelled.
+    Fit count is log-scaled (log1p) to cap inertia: unlimited linear accumulation caused
+    slow recovery after world changes. Route exclusions decay fit counts and repel embeddings
+    since route_certs are authoritative dreth exclusion boundaries, not soft suggestions.
 
     CONTRACT: no certs, no ledger mutations, no hidden-truth access.
     All inputs come from agent-visible surfaces only.
     """
 
-    _W_EMBED = 5.0
-    _W_FIT   = 10.0
-    _W_IV    = 8.0
-    _W_CO    = 2.0
-    _NEG_FACTOR = 0.05   # repulsion weight for non-source_edges (kept small to avoid thrash)
+    _W_EMBED   = 5.0
+    _W_FIT     = 10.0
+    _W_IV      = 8.0
+    _W_CO      = 2.0
+    _W_STRESS  = 1.5    # penalty per recent stressed cycle for candidate
+    _W_EXCLUDE = 5.0    # penalty per route exclusion for (target, cand)
+    _NEG_FACTOR = 0.05  # repulsion step on embedding when route-excluded
 
     def __init__(self, n_vars: int, embed_dim: int = 16, lr: float = 0.05) -> None:
         import numpy as _np
@@ -723,6 +730,8 @@ class NeuralHistorysource_edgeRanker:
         self._stressed_this_cycle: Set[int] = set()
         self._current_cycle: Optional[int] = None
         self._recent_stressed: "deque[int]" = deque(maxlen=128)
+        # Route exclusion counts: dreth route_certs are authoritative exclusion boundaries
+        self._exclusion_counts: Dict[Tuple[int, int], int] = defaultdict(int)
         # Diagnostics
         self.call_count: int = 0
         self.fit_observations: int = 0
@@ -783,7 +792,23 @@ class NeuralHistorysource_edgeRanker:
         self._recent_stressed.append(var)
 
     def observe_route_exclusions(self, target: int, excluded: Tuple[int, ...]) -> None:
-        pass  # route exclusion belongs to Dreth; no action here
+        # Route_certs are authoritative exclusion boundaries from dreth. When a candidate
+        # is cert-excluded, decay its accumulated fit history (halve counts) and repel
+        # its embedding from the target. This prevents inertia from overriding the
+        # cert signal that the old source_edge relationship no longer holds.
+        np = self._np
+        t_emb = self.W[target] if target < self.n_vars else None
+        for cand in excluded:
+            self._exclusion_counts[(target, cand)] += 1
+            key = (target, cand)
+            if key in self._fit_counts and self._fit_counts[key] > 0:
+                self._fit_counts[key] = self._fit_counts[key] // 2
+            if t_emb is not None and cand < self.n_vars:
+                # Repel: move embedding away from target direction
+                self.W[cand] -= self._NEG_FACTOR * self.lr * (t_emb - self.W[cand])
+                n = float(np.linalg.norm(self.W[cand]))
+                if n > 1e-9:
+                    self.W[cand] /= n
 
     def rank_source_edges(self, target: int, candidates: Set[int], top_m: int) -> source_edgeRanking:
         self.call_count += 1
@@ -798,6 +823,10 @@ class NeuralHistorysource_edgeRanker:
             )
         np = self._np
         t_emb = self.W[target] if target < self.n_vars else np.zeros(self.embed_dim, dtype=np.float32)
+        # Recent stress counts per variable (candidate as a target recently stressed)
+        recent_stress: Dict[int, int] = defaultdict(int)
+        for v in self._recent_stressed:
+            recent_stress[v] += 1
         scores: Dict[int, float] = {}
         for cand in eligible:
             embed_sim = float(np.dot(t_emb, self.W[cand]))
@@ -806,16 +835,22 @@ class NeuralHistorysource_edgeRanker:
             if iv_hist and len(iv_hist) >= 2:
                 arr = list(iv_hist)
                 iv_spread = float(max(arr) - min(arr))
-            elif iv_hist:
-                iv_spread = float(iv_hist[0])
             else:
+                # Single observation gives no spread signal; using the raw value
+                # as spread (prior bug) inflated scores for candidates seen once.
                 iv_spread = 0.0
             co = float(self._co_stress.get((target, cand), 0))
+            exclusions = float(self._exclusion_counts.get((target, cand), 0))
+            # log1p(fit_freq) instead of fit_freq: reduces inertia from accumulated
+            # history. With 50 fits the old score was 500; now it is ~39. With 1 fit
+            # old was 10, new is ~7. Preserves direction of signal, kills unbounded bias.
             scores[cand] = (
-                self._W_EMBED * embed_sim
-                + self._W_FIT  * fit_freq
+                self._W_EMBED  * embed_sim
+                + self._W_FIT  * math.log1p(fit_freq)
                 + self._W_IV   * iv_spread
                 + self._W_CO   * co
+                - self._W_STRESS  * recent_stress[cand]
+                - self._W_EXCLUDE * exclusions
             )
         ranked = tuple(sorted(eligible, key=lambda c: (-scores[c], c))[:top_m])
         return source_edgeRanking(
