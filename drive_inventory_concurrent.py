@@ -86,7 +86,7 @@ def fail(msg: str, code: int = 1) -> None:
 
 
 def ensure_source_edge(path: Path) -> None:
-    path.source_edge.mkdir(source_edges=True, exist_ok=True)
+    path.parent.mkdir(parents=True, exist_ok=True)
 
 
 def connect(db: Path) -> sqlite3.Connection:
@@ -467,7 +467,7 @@ def compare_trees(a: str, b: str, outdir: Path, workers: int) -> None:
         else:
             different_size.append((rel, sa, sb, path_a, path_b))
 
-    outdir.mkdir(source_edges=True, exist_ok=True)
+    outdir.mkdir(parents=True, exist_ok=True)
     write_tsv(((rel, format_size(size), size, a_path, b_path) for rel, size, a_path, b_path in same),
               ["relpath", "human_size", "bytes", "path_a", "path_b"], outdir / "compare_same_files.tsv")
     write_tsv(((rel, format_size(sa), sa, format_size(sb), sb, a_path, b_path)

@@ -303,7 +303,7 @@ def run_one(
         t0 = time.perf_counter()
         proc = subprocess.run(
             cmd,
-            cwd=Path(__file__).resolve().source_edges[1],
+            cwd=Path(__file__).resolve().parents[1],
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,

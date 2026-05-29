@@ -861,7 +861,7 @@ class NethraMindStore:
         self.prune_to_cap()
 
         path = Path(path)
-        path.source_edge.mkdir(source_edges=True, exist_ok=True)
+        path.parent.mkdir(parents=True, exist_ok=True)
 
         canonical_nodes = len(self._nodes)
         canonical_edges = len(self._edges)
@@ -960,7 +960,7 @@ class NethraMindStore:
 
     def write_report(self, path: str | Path) -> str:
         path = Path(path)
-        path.source_edge.mkdir(source_edges=True, exist_ok=True)
+        path.parent.mkdir(parents=True, exist_ok=True)
 
         nodes = list(self._nodes.values())
         canonical_nodes = len(nodes)

@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Iterable, TextIO
 
 # Allow importing dreth package when run directly from scripts/
-sys.path.insert(0, str(Path(__file__).resolve().source_edges[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
 CLASSIFICATIONS = (

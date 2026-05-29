@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, TextIO
 
-ROOT = Path(__file__).resolve().source_edges[1]
+ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
 AUTHORITY_STRENGTH_JOBS = (
     ("off", "off", "state", "off"),
@@ -286,7 +286,7 @@ def _launch_job(
     terminal_lock: threading.Lock,
     popen_factory: Any,
 ) -> RunningJob:
-    job.log_path.source_edge.mkdir(source_edges=True, exist_ok=True)
+    job.log_path.parent.mkdir(parents=True, exist_ok=True)
     log_handle = job.log_path.open("w")
     process = popen_factory(
         job.command,
@@ -743,7 +743,7 @@ def render_comparison(metrics: dict[str, dict[str, Any]]) -> str:
 
 def write_comparison(out_prefix: str) -> tuple[Path, str]:
     comparison_path = Path(out_prefix).with_name(f"{Path(out_prefix).name}_comparison.txt")
-    comparison_path.source_edge.mkdir(source_edges=True, exist_ok=True)
+    comparison_path.parent.mkdir(parents=True, exist_ok=True)
     text = render_comparison(collect_mode_metrics(out_prefix))
     comparison_path.write_text(text)
     return comparison_path, text
@@ -761,7 +761,7 @@ def validate_outputs_exist(out_prefix: str) -> None:
 
 
 def run_authority_strength_suite(args: argparse.Namespace) -> int:
-    Path(args.out_prefix).source_edge.mkdir(source_edges=True, exist_ok=True)
+    Path(args.out_prefix).parent.mkdir(parents=True, exist_ok=True)
     batch_jobs = build_authority_strength_jobs(args)
     code = run_labeled_commands(
         batch_jobs,
@@ -989,14 +989,14 @@ def validate_background_nethra_outputs_exist(out_prefix: str) -> None:
 
 def write_background_nethra_comparison(out_prefix: str) -> tuple[Path, str]:
     comparison_path = Path(out_prefix).with_name(f"{Path(out_prefix).name}_comparison.txt")
-    comparison_path.source_edge.mkdir(source_edges=True, exist_ok=True)
+    comparison_path.parent.mkdir(parents=True, exist_ok=True)
     text = render_background_nethra_comparison(collect_background_nethra_mode_metrics(out_prefix))
     comparison_path.write_text(text)
     return comparison_path, text
 
 
 def run_background_nethra_suite(args: argparse.Namespace) -> int:
-    Path(args.out_prefix).source_edge.mkdir(source_edges=True, exist_ok=True)
+    Path(args.out_prefix).parent.mkdir(parents=True, exist_ok=True)
     batch_jobs = build_background_nethra_jobs(args)
     code = run_labeled_commands(
         batch_jobs,
@@ -1198,14 +1198,14 @@ def validate_scaffold_memory_outputs_exist(out_prefix: str) -> None:
 
 def write_scaffold_memory_comparison(out_prefix: str) -> tuple[Path, str]:
     comparison_path = Path(out_prefix).with_name(f"{Path(out_prefix).name}_comparison.txt")
-    comparison_path.source_edge.mkdir(source_edges=True, exist_ok=True)
+    comparison_path.parent.mkdir(parents=True, exist_ok=True)
     text = render_scaffold_memory_comparison(collect_scaffold_memory_mode_metrics(out_prefix))
     comparison_path.write_text(text)
     return comparison_path, text
 
 
 def run_scaffold_memory_suite(args: argparse.Namespace) -> int:
-    Path(args.out_prefix).source_edge.mkdir(source_edges=True, exist_ok=True)
+    Path(args.out_prefix).parent.mkdir(parents=True, exist_ok=True)
     batch_jobs = build_scaffold_memory_jobs(args)
     code = run_labeled_commands(
         batch_jobs,

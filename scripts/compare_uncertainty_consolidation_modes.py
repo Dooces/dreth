@@ -11,7 +11,7 @@ from pathlib import Path
 from statistics import mean
 from typing import Any, Iterable, TextIO
 
-ROOT = Path(__file__).resolve().source_edges[1]
+ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from dreth.learner.uncertainty_consolidation import (

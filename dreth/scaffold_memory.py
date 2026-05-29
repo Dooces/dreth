@@ -1,18 +1,22 @@
 from __future__ import annotations
 
-"""ScaffoldMemoryIndex: loads offline sleep proposals.
+"""ScaffoldMemoryIndex: loads offline sleep proposals and mines nethra expressions.
 
 Hard invariants:
   - authority_allowed=False on every loaded proposal
   - No authority issuance, revocation, skip suppression, or behavior effects
   - No hidden truth/debug manifest reads or use
+  - Mined expressions start at feature_only; runtime evidence must upgrade use-rights
 """
 
 import json
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .nethra_expression import NethraExpression
 
 
 HIDDEN_TRUTH_LIKE_FIELDS: frozenset[str] = frozenset({
@@ -221,6 +225,48 @@ class ScaffoldMemoryIndex:
             "scaffold_memory_no_runtime_hook_available": self._no_runtime_hook_available,
             "scaffold_memory_feature_examples": list(self._feature_examples),
         }
+
+    def mine_nethra_expressions(self, *, cycle: int = 0) -> list["NethraExpression"]:
+        """Mine NethraExpression objects from loaded proposals.
+
+        Produces overlap/subset/gated/coactivation expressions from the flat
+        proposal groups. This is the path from offline sleep products toward the
+        richer overlap/subset/gated-expression sleep model described in the design.
+
+        All mined expressions start at feature_only use-right. They cannot change
+        runtime behavior until they earn ranking_hint through positive outcome
+        attribution. The authority_allowed=False invariant on proposals is preserved:
+        mining produces proposal expressions, not authority records.
+
+        Returns an empty list if no proposals are loaded.
+        """
+        if not self._proposals:
+            return []
+        from .nethra_expression import mine_expressions_from_proposals
+        return mine_expressions_from_proposals(self._proposals, cycle=cycle)
+
+    def load_into_expression_index(
+        self,
+        index: Any,  # NethraExpressionIndex — avoid circular import
+        *,
+        cycle: int = 0,
+    ) -> int:
+        """Mine expressions from loaded proposals and add them to an expression index.
+
+        This is the bridge that lets scaffold sleep products change runtime behavior:
+        mined expressions enter the NethraExpressionIndex, which compiles ActiveSlice
+        objects that can drive ranking hints once evidence earns that use-right.
+
+        Returns the number of new expressions added to the index.
+        """
+        exprs = self.mine_nethra_expressions(cycle=cycle)
+        added = 0
+        for expr in exprs:
+            before = len(index.expressions)
+            index.add_expression(expr)
+            if len(index.expressions) > before:
+                added += 1
+        return added
 
 
 def compute_run_scaffold_metrics(

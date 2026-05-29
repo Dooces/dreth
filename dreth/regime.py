@@ -9,10 +9,11 @@ from __future__ import annotations
 # pattern is similar enough, regardless of what the underlying world state is.
 #
 # Objects:
-#   CertEvent      — one cert's stress/fail/repair at a specific cycle
-#   RegimeSignature — a confirmed recurring co-failure pattern with authority
-#   RegimeRegister  — collects CertEvents per cycle, matches against known
-#                     patterns, promotes candidate patterns to confirmed regimes
+#   CertEvent        — one cert's stress/fail/repair at a specific cycle
+#   ExpressionBasin  — regime as a stable coactive expression over nethras, not a label
+#   RegimeSignature  — a confirmed recurring co-failure pattern with authority
+#   RegimeRegister   — collects CertEvents per cycle, matches against known
+#                      patterns, promotes candidate patterns to confirmed regimes
 #
 # Matching: weighted Jaccard over (var, cert_key, event_type) triples.
 # Weight = cert maturity (full_audits / 10, capped at 1.0) so established
@@ -25,10 +26,21 @@ from __future__ import annotations
 # Observable fingerprint (value distributions, delta stats) is stored with
 # each confirmed regime as supporting evidence, but is NOT used for matching.
 # The cert behavior pattern is primary; world state is secondary.
+#
+# ExpressionBasin: the design requires that regime emergence be understood as
+# "stable expression basins," not predeclared world labels. When a regime is
+# confirmed, form_expression_basin() builds an ExpressionBasin representing the
+# regime as a coactive expression over its member nethra handles. The basin:
+#   - starts at feature_only use-right (no authority until evidence earns it)
+#   - earns ranking_hint once the regime's active_sentinel passes _BASIN_SENTINEL_THRESHOLD
+#   - is not a label: it records which nethra handles co-activate and survive together
 # ─────────────────────────────────────────────────────────────────────────────
 
 import dataclasses
 from typing import Dict, List, Optional, Set, Tuple
+
+# Sentinel passes before a regime ExpressionBasin earns ranking_hint use-right.
+_BASIN_SENTINEL_THRESHOLD = 4
 
 
 @dataclasses.dataclass
@@ -61,6 +73,46 @@ class CertEvent:
 
 
 @dataclasses.dataclass
+class ExpressionBasin:
+    """A regime expressed as a stable coactive basin over nethra handles.
+
+    This is the design-correct representation of an emergent regime. Instead of
+    a world label ("world A" → "world B"), a regime is a set of co-active nethra
+    handles whose joint predictive coverage has proven stable across multiple
+    occurrences.
+
+    basin_id: unique string identifier (e.g. "basin:R0")
+    operand_nethra_ids: var_fit signature strings of the member vars
+    touched_vars: union of vars covered by all member handles
+    formation_cycle: cycle when this basin was formed (regime first confirmed)
+    stability_count: how many regime sentinel passes have occurred (measure of earned trust)
+    use_right: starts feature_only; earns ranking_hint at _BASIN_SENTINEL_THRESHOLD passes
+    evidence_summary: human-readable description of formation evidence
+
+    A basin is not a label. It does not assert that the world changed from state X to Y.
+    It asserts that these particular handle co-activations have been repeatedly useful
+    together. Old nethras remain available as hints even while the basin is active.
+    """
+    basin_id: str
+    operand_nethra_ids: Tuple[str, ...]
+    touched_vars: frozenset
+    formation_cycle: int
+    stability_count: int
+    use_right: str  # "feature_only" | "ranking_hint" — earns up from evidence
+    evidence_summary: str
+
+    def record_sentinel_pass(self) -> "ExpressionBasin":
+        """Return updated basin after one sentinel pass, potentially upgrading use_right."""
+        new_count = self.stability_count + 1
+        new_right = self.use_right
+        if new_count >= _BASIN_SENTINEL_THRESHOLD and self.use_right == "feature_only":
+            new_right = "ranking_hint"
+        return dataclasses.replace(
+            self, stability_count=new_count, use_right=new_right
+        )
+
+
+@dataclasses.dataclass
 class RegimeSignature:
     """A confirmed recurring co-failure pattern.
 
@@ -85,6 +137,7 @@ class RegimeSignature:
     events: List[CertEvent]
     observable_fingerprint: Dict[str, float]
     active_sentinel: Optional[Tuple] = None
+    expression_basin: Optional[ExpressionBasin] = None
 
 
 class RegimeRegister:
@@ -186,6 +239,52 @@ class RegimeRegister:
         self._candidates.append((cycle, list(events)))
         return None, False
 
+    def form_expression_basin(
+        self,
+        regime_id: int,
+        *,
+        cycle: int,
+        nethra_id_map: Optional[Dict[int, str]] = None,
+    ) -> Optional[ExpressionBasin]:
+        """Form an ExpressionBasin for a confirmed regime.
+
+        The basin represents the regime as a stable coactive expression over
+        the nethra handles of its member vars, not as a world label.
+
+        nethra_id_map: optional {var: nethra_id} from the agent's ledger,
+          used to name the operand handles. Falls back to "var_fit:xN" strings.
+
+        The basin starts at feature_only. It earns ranking_hint once its regime's
+        active sentinel accumulates _BASIN_SENTINEL_THRESHOLD passes.
+
+        Returns None if the regime does not exist or has fewer than 2 member vars.
+        """
+        sig = next((s for s in self._confirmed if s.regime_id == regime_id), None)
+        if sig is None:
+            return None
+        member_vars = sorted({e.var for e in sig.events})
+        if len(member_vars) < 2:
+            return None
+
+        operand_ids = tuple(
+            (nethra_id_map or {}).get(v, f"var_fit:x{v}")
+            for v in member_vars
+        )
+        basin = ExpressionBasin(
+            basin_id=f"basin:R{regime_id}",
+            operand_nethra_ids=operand_ids,
+            touched_vars=frozenset(member_vars),
+            formation_cycle=cycle,
+            stability_count=0,
+            use_right="feature_only",
+            evidence_summary=(
+                f"regime R{regime_id} confirmed at c{cycle}, "
+                f"authority={sig.authority}, members={member_vars[:8]}"
+            ),
+        )
+        sig.expression_basin = basin
+        return basin
+
     def install_sentinel(
         self,
         regime_id: int,
@@ -248,6 +347,8 @@ class RegimeRegister:
             if responsive >= 2:
                 passes += 1
                 covered.update(member_vars)
+                if sig.expression_basin is not None:
+                    sig.expression_basin = sig.expression_basin.record_sentinel_pass()
             else:
                 fails += 1
                 failed_members.update(member_vars)

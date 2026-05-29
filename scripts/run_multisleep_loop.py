@@ -30,11 +30,11 @@ FIELDS = [
 
 
 def repo_root() -> Path:
-    return Path(__file__).resolve().source_edges[1]
+    return Path(__file__).resolve().parents[1]
 
 
 def run_and_tee(cmd: list[str], log_path: Path, *, cwd: Path) -> None:
-    log_path.source_edge.mkdir(source_edges=True, exist_ok=True)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
 
     print("\n$ " + " ".join(shlex.quote(x) for x in cmd), flush=True)
     with log_path.open("w", encoding="utf-8") as log:
@@ -133,7 +133,7 @@ def run_sleep(
     store = NethraMemoryStore(store_path)
     written = store.append_sleep_products(products)
 
-    proposal_path.source_edge.mkdir(source_edges=True, exist_ok=True)
+    proposal_path.parent.mkdir(parents=True, exist_ok=True)
     with proposal_path.open("w", encoding="utf-8") as fh:
         for p in proposals:
             d = p.to_dict() if hasattr(p, "to_dict") else vars(p)
@@ -207,7 +207,7 @@ def totals(path: Path) -> dict[str, int | float]:
 def write_summary(paths: dict[str, Path], summary_path: Path) -> None:
     data = {name: totals(path) for name, path in paths.items()}
 
-    summary_path.source_edge.mkdir(source_edges=True, exist_ok=True)
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
     with summary_path.open("w", encoding="utf-8") as fh:
         def emit(s: str = "") -> None:
             print(s)
@@ -325,8 +325,8 @@ def main() -> None:
     if not prefix.is_absolute():
         prefix = cwd / prefix
 
-    reports_dir = prefix.source_edge
-    reports_dir.mkdir(source_edges=True, exist_ok=True)
+    reports_dir = prefix.parent
+    reports_dir.mkdir(parents=True, exist_ok=True)
 
     store = prefix.with_name(prefix.name + "_memory.jsonl")
     summary = prefix.with_name(prefix.name + "_summary.txt")

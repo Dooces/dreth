@@ -322,7 +322,7 @@ class NethraMemoryStore:
                 raise TypeError(f"unsupported memory record type: {type(record)!r}")
         if not rows:
             return 0
-        self.path.source_edge.mkdir(source_edges=True, exist_ok=True)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
         with open(self.path, "a") as fh:
             for row in rows:
                 fh.write(json.dumps(row, sort_keys=True) + "\n")
@@ -339,7 +339,7 @@ class NethraMemoryStore:
                 raise TypeError(f"unsupported experience event type: {type(event)!r}")
         if not rows:
             return 0
-        self.path.source_edge.mkdir(source_edges=True, exist_ok=True)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
         with open(self.path, "a") as fh:
             for row in rows:
                 fh.write(json.dumps(row, sort_keys=True) + "\n")
@@ -370,7 +370,7 @@ class NethraMemoryStore:
                 raise TypeError(f"unsupported sleep product type: {type(product)!r}")
         if not rows:
             return 0
-        self.path.source_edge.mkdir(source_edges=True, exist_ok=True)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
         with open(self.path, "a") as fh:
             for row in rows:
                 fh.write(json.dumps(row, sort_keys=True) + "\n")
@@ -382,7 +382,7 @@ class NethraMemoryStore:
             "authority_allowed": False,
             **_sanitize_payload(summary),
         }
-        self.path.source_edge.mkdir(source_edges=True, exist_ok=True)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
         with open(self.path, "a") as fh:
             fh.write(json.dumps(row, sort_keys=True) + "\n")
 
@@ -392,7 +392,7 @@ class NethraMemoryStore:
             "authority_allowed": False,
             **_sanitize_payload(result),
         }
-        self.path.source_edge.mkdir(source_edges=True, exist_ok=True)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
         with open(self.path, "a") as fh:
             fh.write(json.dumps(row, sort_keys=True) + "\n")
 
@@ -466,7 +466,7 @@ class NethraMemoryStore:
         if max_records is not None:
             records = records[-max(0, int(max_records)):]
         tmp = self.path.with_suffix(self.path.suffix + ".tmp")
-        tmp.source_edge.mkdir(source_edges=True, exist_ok=True)
+        tmp.parent.mkdir(parents=True, exist_ok=True)
         with open(tmp, "w") as fh:
             for record in records:
                 fh.write(json.dumps(record.to_dict(), sort_keys=True) + "\n")

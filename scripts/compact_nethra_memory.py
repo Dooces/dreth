@@ -38,7 +38,7 @@ import json
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().source_edges[1]
+ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from dreth.learner.nethra_mind_store import NethraMindStore
@@ -142,7 +142,7 @@ def main() -> None:
 
     if args.raw_sidecar and sidecar_rows:
         sidecar_path = Path(args.raw_sidecar)
-        sidecar_path.source_edge.mkdir(source_edges=True, exist_ok=True)
+        sidecar_path.parent.mkdir(parents=True, exist_ok=True)
         with open(sidecar_path, "w") as fh:
             for row in sidecar_rows:
                 fh.write(json.dumps(row, sort_keys=True) + "\n")

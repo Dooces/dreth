@@ -5,7 +5,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().source_edges[1]
+ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import run_comparison_suite as suite
@@ -154,7 +154,7 @@ def test_summaries_are_invoked_after_runs(tmp_path: Path, monkeypatch) -> None:
         if jobs and jobs[0].label in set(suite.AUTHORITY_STRENGTH_MODES):
             phases.append("batch")
             for mode_paths in suite.suite_paths(args.out_prefix).values():
-                mode_paths["jsonl"].source_edge.mkdir(source_edges=True, exist_ok=True)
+                mode_paths["jsonl"].parent.mkdir(parents=True, exist_ok=True)
                 mode_paths["jsonl"].write_text("")
                 mode_paths["log"].write_text("")
         else:
@@ -398,7 +398,7 @@ def test_final_comparison_waits_for_all_summaries(tmp_path: Path, monkeypatch) -
     def fake_run(jobs, *, max_workers, sequential=False, terminal=None, popen_factory=None):
         if jobs and jobs[0].label in set(suite.AUTHORITY_STRENGTH_MODES):
             for mode_paths in suite.suite_paths(args.out_prefix).values():
-                mode_paths["jsonl"].source_edge.mkdir(source_edges=True, exist_ok=True)
+                mode_paths["jsonl"].parent.mkdir(parents=True, exist_ok=True)
                 mode_paths["jsonl"].write_text("")
                 mode_paths["log"].write_text("")
         else:
@@ -556,7 +556,7 @@ def test_background_nethra_summaries_run_after_batch(tmp_path: Path, monkeypatch
         if jobs and jobs[0].label in set(suite.BACKGROUND_NETHRA_MODES):
             phases.append("batch")
             for mode_paths in suite.background_nethra_suite_paths(args.out_prefix).values():
-                mode_paths["jsonl"].source_edge.mkdir(source_edges=True, exist_ok=True)
+                mode_paths["jsonl"].parent.mkdir(parents=True, exist_ok=True)
                 mode_paths["jsonl"].write_text("")
                 mode_paths["log"].write_text("")
         else:

@@ -106,6 +106,11 @@ from .authority_strength import (
 )
 from .scaffold_memory import ScaffoldMemoryIndex
 from .nethra_runtime_memory import PersistentNethraIndex
+from .nethra_expression import (
+    NethraExpressionIndex,
+    RecognitionCollapseDetector,
+    ActiveSlice,
+)
 
 # ── Trass authority thresholds ────────────────────────────────────────────────
 # A trass cert suppresses future sentinel monitoring — the strongest operational
@@ -241,6 +246,9 @@ class ChainedAgent:
         scaffold_memory_index: Optional[ScaffoldMemoryIndex] = None,
         nethra_memory_mode: str = "off",
         nethra_memory_index: Optional[PersistentNethraIndex] = None,
+        recognition_collapse_mode: str = "off",
+        nethra_expression_mode: str = "off",
+        nethra_expression_index: Optional[NethraExpressionIndex] = None,
     ):
         """Construct agent. Initializes empty ledger, zero counters, and
         applies any provided per-var cost weight overrides."""
@@ -541,6 +549,39 @@ class ChainedAgent:
             nethra_memory_index if nethra_memory_mode != "off" else None
         )
 
+        if recognition_collapse_mode not in {"off", "record"}:
+            raise ValueError("recognition_collapse_mode must be off or record")
+        self._recognition_collapse_mode = recognition_collapse_mode
+        self._recognition_collapse_detector: Optional[RecognitionCollapseDetector] = (
+            RecognitionCollapseDetector() if recognition_collapse_mode != "off" else None
+        )
+
+        if nethra_expression_mode not in {"off", "record", "assist_feature"}:
+            raise ValueError(
+                "nethra_expression_mode must be off, record, or assist_feature"
+            )
+        self._nethra_expression_mode = nethra_expression_mode
+        if nethra_expression_mode == "off":
+            self._nethra_expression_index: Optional[NethraExpressionIndex] = None
+        elif nethra_expression_index is not None:
+            self._nethra_expression_index = nethra_expression_index
+        else:
+            self._nethra_expression_index = NethraExpressionIndex()
+        # When both scaffold memory and expression index are active, load mined
+        # expressions from any already-loaded scaffold proposals. This is the
+        # pathway that allows scaffold sleep products to change runtime behavior:
+        # proposals → expression mining → NethraExpressionIndex → ActiveSlice →
+        # ranking hints (once expressions earn ranking_hint use-right).
+        if (self._nethra_expression_index is not None
+                and self._scaffold_memory_index is not None
+                and self._scaffold_memory_index.loaded_proposals_count > 0):
+            self._scaffold_memory_index.load_into_expression_index(
+                self._nethra_expression_index, cycle=0
+            )
+        # Per-var expression assist tracking: last assist event per var for
+        # retroactive outcome recording after the audit returns its score.
+        self._pending_expression_assists: Dict[int, Any] = {}
+
     def scaffold_memory_metrics(self) -> Dict[str, Any]:
         if self._scaffold_memory_index is None:
             return {
@@ -579,6 +620,64 @@ class ChainedAgent:
         if self._nethra_memory_index is None:
             return []
         return self._nethra_memory_index.export_experience_events()
+
+    def recognition_collapse_metrics(self) -> Dict[str, Any]:
+        """Return current recognition-collapse detector state.
+
+        recognition_collapse_total: total collapse events (transitions from stable to collapsed)
+        recognition_collapse_currently_active: True if currently in a collapse state
+        recognition_collapse_mean_coverage: rolling mean certified-var fraction
+        recognition_collapse_mean_sentinel_fail_rate: rolling mean sentinel fail fraction
+        recognition_collapse_events: last 10 collapse events with cause and signals
+        """
+        if self._recognition_collapse_detector is None:
+            return {
+                "recognition_collapse_mode": self._recognition_collapse_mode,
+                "recognition_collapse_total": 0,
+                "recognition_collapse_currently_active": False,
+                "recognition_collapse_start_cycle": None,
+                "recognition_collapse_mean_coverage": 1.0,
+                "recognition_collapse_mean_sentinel_fail_rate": 0.0,
+                "recognition_collapse_events": [],
+                "recognition_collapse_window": 0,
+            }
+        d = self._recognition_collapse_detector.summary()
+        d["recognition_collapse_mode"] = self._recognition_collapse_mode
+        return d
+
+    def nethra_expression_metrics(self) -> Dict[str, Any]:
+        """Return current nethra expression index state.
+
+        Reports mined expressions by op/use-right, assist events, and attribution counts.
+        When expression index is off, returns zero stubs.
+        """
+        if self._nethra_expression_index is None:
+            return {
+                "nethra_expression_mode": self._nethra_expression_mode,
+                "expression_index_total": 0,
+                "expression_index_mined_total": 0,
+                "expression_index_by_op": {},
+                "expression_index_by_use_right": {},
+                "expression_assist_events": 0,
+                "expression_assist_positive_outcomes": 0,
+                "expression_assist_negative_outcomes": 0,
+                "expression_ranking_applications": 0,
+                "expression_filter_applications": 0,
+                "expression_probe_hint_applications": 0,
+                "expression_attribution_records": 0,
+            }
+        d = self._nethra_expression_index.summary()
+        d["nethra_expression_mode"] = self._nethra_expression_mode
+        return d
+
+    def nethra_expression_export(self, limit: int = 100) -> Dict[str, Any]:
+        """Export mined expressions and attribution records for offline analysis."""
+        if self._nethra_expression_index is None:
+            return {"expressions": [], "attribution": []}
+        return {
+            "expressions": self._nethra_expression_index.export_expressions(limit),
+            "attribution": self._nethra_expression_index.export_attribution(limit=50),
+        }
 
     def _context_role_index_enabled(self) -> bool:
         return self._context_role_index is not None
@@ -1175,6 +1274,52 @@ class ChainedAgent:
         _merged_probes: Optional[Tuple[Tuple[int, float], ...]] = None
         if _provider_probes or _frontier_probes:
             _merged_probes = _provider_probes + _frontier_probes
+
+        # Expression index: compile active slice from scaffold proposals touching this var
+        # and prepend rank_hint vars as forced probes. This is the pathway that lets
+        # offline sleep expression products influence runtime search ordering.
+        # Only applies in assist_feature mode; record mode annotates only.
+        if (self._nethra_expression_index is not None
+                and self._nethra_expression_mode == "assist_feature"):
+            _active_proposal_ids: set[str] = set()
+            if self._scaffold_memory_index is not None:
+                for _sp in self._scaffold_memory_index._proposals:
+                    if var in _sp.vars:
+                        _active_proposal_ids.add(_sp.proposal_id)
+            if _active_proposal_ids:
+                _expr_slice = self._nethra_expression_index.compile_active_slice(
+                    _active_proposal_ids, cycle
+                )
+                if _expr_slice.rank_hints:
+                    _hint_probes: Tuple[Tuple[int, float], ...] = tuple(
+                        (h, 0.5) for h in _expr_slice.rank_hints
+                        if 0 <= h < self.world.visible_count and h != var
+                    )
+                    if _hint_probes:
+                        _merged_probes = (
+                            _hint_probes + (_merged_probes or ())
+                        ) or None
+                        # Record pending assist event; outcome filled after audit returns
+                        if _expr_slice.expression_ids:
+                            _first_eid = _expr_slice.expression_ids[0]
+                            _first_expr = self._nethra_expression_index.expressions.get(
+                                _first_eid
+                            )
+                            from .nethra_expression import ExpressionAssistEvent
+                            _evt = ExpressionAssistEvent(
+                                cycle=cycle,
+                                var=var,
+                                expr_id=_first_eid,
+                                op=_first_expr.op if _first_expr else "unknown",
+                                use_right="ranking_hint",
+                                changed_ordering=False,
+                                changed_probes=True,
+                                changed_filters=False,
+                                n_candidates_before=len(available),
+                                n_candidates_after=len(available),
+                            )
+                            self._pending_expression_assists[var] = (_evt, n.full_audits)
+
         if (
             self._nethra_memory_index is not None
             and _merged_probes
@@ -3892,6 +4037,16 @@ class ChainedAgent:
                 )
             source_edges, func, score, second, fd = self._full_audit_var(var, cycle)
             sig_changed = self._install_var(var, source_edges, func, score, second, cycle, fd)
+            # Expression assist attribution: record outcome for any pending assist event
+            # so the index knows whether its ranking hint improved the result.
+            if (self._nethra_expression_index is not None
+                    and var in self._pending_expression_assists):
+                _pending_evt, _ = self._pending_expression_assists.pop(var)
+                self._nethra_expression_index.record_assist_outcome(
+                    _pending_evt,
+                    score_after=int(fd.best_score),
+                    score_before=int(fd.second_score),
+                )
             if self._diagnostic_audit_observer is not None:
                 self._diagnostic_audit_observer.after_audit(
                     self,
@@ -4107,6 +4262,17 @@ class ChainedAgent:
             )
             if _newly_confirmed and _regime_id is not None:
                 self._commission_regime_sentinel(_regime_id)
+                # Form an ExpressionBasin for the confirmed regime so it is
+                # represented as a stable coactive expression, not a world label.
+                _basin_id_map = {
+                    v: var_fit_id(v, tuple(self.ledger.vars[v].source_edges),
+                                  self.ledger.vars[v].func)
+                    for v in range(self.world.visible_count)
+                    if self.ledger.vars[v].source_edges or self.ledger.vars[v].func
+                }
+                self.regime_register.form_expression_basin(
+                    _regime_id, cycle=cycle, nethra_id_map=_basin_id_map
+                )
                 if self._context_role_index is not None:
                     members = tuple(sorted({int(e.var) for e in _cert_events}))
                     nid = f"regime:R{_regime_id}:{','.join(map(str, members))}"
@@ -4153,6 +4319,29 @@ class ChainedAgent:
                 {"passive_stress": float(len(_passive_stressed_vars))},
                 seed_only=True,
             )
+
+        # Recognition-collapse detection: compute coverage and sentinel fail rate,
+        # feed into the detector. Collapse signal opens a regime-boundary candidate;
+        # it does not itself authorize any action or revoke authority.
+        if self._recognition_collapse_detector is not None:
+            _n_vis = self.world.visible_count
+            _certified_count = sum(
+                1 for _cv in range(_n_vis)
+                if (self.ledger.vars[_cv].role_for("skip") in {"tareth", "trass"}
+                    or self.ledger.vars[_cv].status == "certified")
+            )
+            _coverage = _certified_count / max(1, _n_vis)
+            _sentinel_fail_rate = len(_sentinel_failed_vars) / max(1, _n_vis)
+            _collapsed = self._recognition_collapse_detector.record_cycle(
+                coverage=_coverage,
+                sentinel_fail_rate=_sentinel_fail_rate,
+                cycle=cycle,
+            )
+            if _collapsed and self._recognition_collapse_detector.total_collapses == 1:
+                self.ledger.event_log.append(
+                    f"c{cycle}: recognition_collapse DETECTED "
+                    f"(coverage={_coverage:.2f}, sentinel_fail_rate={_sentinel_fail_rate:.2f})"
+                )
 
         self.records.append(CycleRecord(
             cycle=cycle,

@@ -30,7 +30,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-ROOT = Path(__file__).resolve().source_edges[1]
+ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from dreth.memory_sleep import MemorySleepConsolidator, MemorySleepSummary, ScaffoldProposal
@@ -233,7 +233,7 @@ def main() -> None:
 
     # Write proposals JSONL
     out_path = Path(args.out)
-    out_path.source_edge.mkdir(source_edges=True, exist_ok=True)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     with open(out_path, 'w') as fh:
         for prop in proposals:
             fh.write(json.dumps(prop.to_dict()) + "\n")
@@ -246,7 +246,7 @@ def main() -> None:
 
     # Write summary TXT
     summary_path = Path(args.summary)
-    summary_path.source_edge.mkdir(source_edges=True, exist_ok=True)
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
     summary_text = _fmt_summary(summary, posthoc=args.posthoc_relation_type_report)
     with open(summary_path, 'w') as fh:
         fh.write(summary_text + "\n")

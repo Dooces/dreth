@@ -968,7 +968,7 @@ def write_scaffold_sleep_jsonl(
     abstractions: list[ScaffoldAbstraction],
 ) -> None:
     out = Path(path)
-    out.source_edge.mkdir(source_edges=True, exist_ok=True)
+    out.parent.mkdir(parents=True, exist_ok=True)
     with open(out, "w") as fh:
         for item in scaffold_nethras:
             fh.write(json.dumps(item.to_dict(), sort_keys=True) + "\n")

@@ -42,11 +42,11 @@ FIELDS = [
 
 
 def repo_root() -> Path:
-    return Path(__file__).resolve().source_edges[1]
+    return Path(__file__).resolve().parents[1]
 
 
 def run_and_tee(cmd: list[str], log_path: Path, *, cwd: Path) -> None:
-    log_path.source_edge.mkdir(source_edges=True, exist_ok=True)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
     print("\n$ " + " ".join(shlex.quote(x) for x in cmd), flush=True)
 
     with log_path.open("w", encoding="utf-8") as log:
@@ -200,7 +200,7 @@ def build_run_sleep_delta(
     # Append sleep products and promoted proposals to delta.
     # Run memory records were already written to delta by NethraMemoryStore during
     # the batch run (via --nethra-delta-path). We only add the derived sleep outputs.
-    delta_path.source_edge.mkdir(source_edges=True, exist_ok=True)
+    delta_path.parent.mkdir(parents=True, exist_ok=True)
     with delta_path.open("a", encoding="utf-8") as fh:
         for p in products:
             d = p.to_dict() if hasattr(p, "to_dict") else vars(p)
@@ -495,8 +495,8 @@ def main() -> None:
     if not prefix.is_absolute():
         prefix = cwd / prefix
 
-    reports_dir = prefix.source_edge
-    reports_dir.mkdir(source_edges=True, exist_ok=True)
+    reports_dir = prefix.parent
+    reports_dir.mkdir(parents=True, exist_ok=True)
 
     summary = prefix.with_name(prefix.name + "_summary.txt")
     archive_store: Path | None = None
