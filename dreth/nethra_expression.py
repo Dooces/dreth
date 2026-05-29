@@ -642,8 +642,10 @@ class NethraExpressionIndex:
                 back.append(cand)
 
         reordered = front + back
-        if reordered == candidates or not active_slice.expression_ids:
-            return candidates, None
+        ordering_changed = reordered != candidates
+
+        if not active_slice.expression_ids:
+            return reordered, None
 
         first_eid = active_slice.expression_ids[0]
         first_expr = self.expressions.get(first_eid)
@@ -653,7 +655,7 @@ class NethraExpressionIndex:
             expr_id=first_eid,
             op=first_expr.op if first_expr else "unknown",
             use_right="ranking_hint",
-            changed_ordering=True,
+            changed_ordering=ordering_changed,
             changed_probes=False,
             changed_filters=False,
             n_candidates_before=len(candidates),

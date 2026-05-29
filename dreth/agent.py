@@ -1276,9 +1276,15 @@ class ChainedAgent:
             _merged_probes = _provider_probes + _frontier_probes
 
         # Expression index: compile active slice from scaffold proposals touching this var
-        # and prepend rank_hint vars as forced probes. This is the pathway that lets
-        # offline sleep expression products influence runtime search ordering.
+        # and apply it to the search space before fit_var runs.
         # Only applies in assist_feature mode; record mode annotates only.
+        #
+        # Three effects, each gated by the expression's earned use_right:
+        #   hard_filters / blockers → removed from available (exclude from hypothesis space)
+        #   soft_filters            → counted; cannot enforce ordering within fit_var's set
+        #   ranking_hint            → apply_ranking_hints() called for attribution + counter,
+        #                             AND rank_hint vars prepended as forced probes so fit_var
+        #                             gives them more intervention budget
         if (self._nethra_expression_index is not None
                 and self._nethra_expression_mode == "assist_feature"):
             _active_proposal_ids: set[str] = set()
@@ -1290,35 +1296,39 @@ class ChainedAgent:
                 _expr_slice = self._nethra_expression_index.compile_active_slice(
                     _active_proposal_ids, cycle
                 )
+
+                # hard_filters + blockers: remove from the source-edge search space.
+                # Fallback invariant: only exclude if at least 1 candidate remains after.
+                _to_exclude = (_expr_slice.hard_filters | _expr_slice.blockers) & available
+                if _to_exclude and len(available) - len(_to_exclude) >= 1:
+                    available = available - _to_exclude
+                    self._nethra_expression_index.filter_applications += 1
+
+                # soft_filters: cannot enforce priority ordering inside fit_var's set
+                # enumeration, but count the event so it is visible in metrics.
+                if _expr_slice.soft_filters & available:
+                    self._nethra_expression_index.filter_applications += 1
+
+                # ranking_hint: call apply_ranking_hints() so attribution and the
+                # ranking_applications counter are properly updated, then also inject
+                # the hinted vars as forced probes so fit_var allocates more
+                # intervention budget to them.
                 if _expr_slice.rank_hints:
+                    _synth_cands: list[tuple] = [
+                        (frozenset({v}),) for v in sorted(available)
+                    ]
+                    _, _rank_evt = self._nethra_expression_index.apply_ranking_hints(
+                        _synth_cands, _expr_slice, var=var, cycle=cycle
+                    )
+                    if _rank_evt is not None:
+                        self._pending_expression_assists[var] = (_rank_evt, n.full_audits)
+
                     _hint_probes: Tuple[Tuple[int, float], ...] = tuple(
                         (h, 0.5) for h in _expr_slice.rank_hints
-                        if 0 <= h < self.world.visible_count and h != var
+                        if 0 <= h < self.world.visible_count and h != var and h in available
                     )
                     if _hint_probes:
-                        _merged_probes = (
-                            _hint_probes + (_merged_probes or ())
-                        ) or None
-                        # Record pending assist event; outcome filled after audit returns
-                        if _expr_slice.expression_ids:
-                            _first_eid = _expr_slice.expression_ids[0]
-                            _first_expr = self._nethra_expression_index.expressions.get(
-                                _first_eid
-                            )
-                            from .nethra_expression import ExpressionAssistEvent
-                            _evt = ExpressionAssistEvent(
-                                cycle=cycle,
-                                var=var,
-                                expr_id=_first_eid,
-                                op=_first_expr.op if _first_expr else "unknown",
-                                use_right="ranking_hint",
-                                changed_ordering=False,
-                                changed_probes=True,
-                                changed_filters=False,
-                                n_candidates_before=len(available),
-                                n_candidates_after=len(available),
-                            )
-                            self._pending_expression_assists[var] = (_evt, n.full_audits)
+                        _merged_probes = _hint_probes + (_merged_probes or ())
 
         if (
             self._nethra_memory_index is not None
