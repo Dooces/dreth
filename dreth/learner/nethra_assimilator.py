@@ -472,21 +472,17 @@ class NethraAssimilator:
             return self._emit(Disposition.CONTRADICTION, best_id, best_score, evidence_ref,
                               internal_disp=InternalDisposition.CONTRADICTION_TO_ACCOUNT)
 
-        # Split candidate: incompatible context.
-        # Triggers when the hook prefix differs (e.g. source_edge_candidates vs probe_hint),
-        # OR when the same hook is used for a different specific target variable
-        # (e.g. source_edge_candidates|x7 vs source_edge_candidates|x2).
-        # Without the second clause, atom-only Jaccard would silently collapse
-        # target-specific contexts that share atoms but serve different variables.
+        # Split candidate: incompatible hook.
+        # Triggers only when the hook prefix differs (e.g. source_edge_candidates
+        # vs probe_hint).  Same-hook products that share atoms but serve different
+        # target variables are allowed to assimilate — the query-time context_scope
+        # filter already prevents cross-variable misfires at runtime, and blocking
+        # same-hook assimilation forces split_candidate → new node → immediate prune
+        # at cap, which defeats the compactor's purpose.
         _ctx_split = (
-            (row_ctx_prefix and node_ctx_prefix and row_ctx_prefix != node_ctx_prefix)
-            or (
-                row_context
-                and node_ctx_full
-                and row_context != node_ctx_full
-                and "|" in row_context
-                and "|" in node_ctx_full
-            )
+            row_ctx_prefix
+            and node_ctx_prefix
+            and row_ctx_prefix != node_ctx_prefix
         )
         if best_score >= _ASSIMILATION_THRESHOLD and _ctx_split:
             return self._emit(Disposition.SPLIT_CANDIDATE, best_id, best_score, evidence_ref,

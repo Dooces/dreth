@@ -162,6 +162,7 @@ _COMPONENT_PROMOTE_INTERVAL = 100 # how often to scan for promotable components
 # Repair-authority escalation: if a sentinel fires and re-audit returns the same
 # fit _REPAIR_FAILURE_ESCALATION_THRESHOLD times, the var's audit budget is
 # multiplied by _BUDGET_ESCALATION_FACTOR (capped at _BUDGET_ESCALATION_CAP).
+_MEMORY_SCREEN_EXPANSION             = 4  # extra screened candidates offered to memory rank_candidates
 _REPAIR_FAILURE_ESCALATION_THRESHOLD = 3
 _BUDGET_ESCALATION_FACTOR            = 4
 _BUDGET_ESCALATION_CAP               = 400
@@ -3249,7 +3250,11 @@ class ChainedAgent:
         n = self.ledger.vars[target]
         if self._source_edge_ranker is not None:
             candidates: Set[int] = {x for x in range(self.world.visible_count) if x != target}
-            ranking = self._source_edge_ranker.rank_source_edges(target, candidates, m)
+            # When memory assist is active, ask the provider for m + expansion extra candidates
+            # so memory can promote any of the extras into the final top-m cut.  All candidates
+            # remain within the provider's quality gate (sensitivity-screened or history-ranked).
+            _mem_expansion = _MEMORY_SCREEN_EXPANSION if self._nethra_memory_index is not None else 0
+            ranking = self._source_edge_ranker.rank_source_edges(target, candidates, m + _mem_expansion)
             self._hybrid_source_edge_ranker_calls += 1
             _ranking_diag = getattr(ranking, "diagnostics", {})
             self.total_interventions += int(_ranking_diag.get("sensitivity_rescue_interventions", 0))
@@ -3264,15 +3269,9 @@ class ChainedAgent:
             }
             provider_filtered = tuple(x for x in ranking.ranked if x not in _cert_excl)
             if self._nethra_memory_index is not None:
-                # Expand the pool beyond the provider's top-m so memory hints can promote
-                # any visible candidate into the final top-m cut.  Provider-ranked candidates
-                # come first (they carry sensitivity signal); the remainder fills the tail.
-                _seen = set(provider_filtered) | _cert_excl
-                _remainder = tuple(
-                    x for x in range(self.world.visible_count)
-                    if x != target and x not in _seen
-                )
-                _full_pool = provider_filtered + _remainder
+                # Pass the provider's screened pool (already at m + expansion budget)
+                # so memory can promote any of those candidates into the top-m cut
+                # without injecting unscreened candidates that bypass the sensitivity gate.
                 post_route = tuple(
                     self._nethra_memory_index.rank_candidates(
                         var=target,
@@ -3281,7 +3280,7 @@ class ChainedAgent:
                             var=target,
                             visible=self.world.visible_count,
                         ),
-                        candidates=_full_pool,
+                        candidates=provider_filtered,
                         hook="source_edge_candidates",
                         cycle=getattr(self, "_current_cycle_for_memory", 0),
                     )

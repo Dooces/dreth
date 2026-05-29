@@ -32,7 +32,7 @@ _USE_RIGHT_RANK: dict[str, int] = {
 
 # Active-mind caps
 _MAX_NODES = 500
-_MAX_EDGES = 2000
+_MAX_EDGES = _MAX_NODES * 10   # 10 edges/node ceiling; old fixed 2000 hit at half node fill
 _MAX_SAMPLE_REFS = 4
 _MAX_TEMPORAL_SPANS = 16
 _MAX_LIFT_HISTORY = 8
@@ -560,6 +560,18 @@ class NethraMindStore:
             elif disp == Disposition.ASSIMILATED:
                 self._assimilation_folds += 1
                 nethra_id = result.explained_by  # type: ignore[assignment]
+                # Cross-context assimilation: same hook prefix, different target variable.
+                # Widen the merged node to a wildcard (empty context_scope) so it responds
+                # to any target querying the same atoms, not just the original target.
+                # The runtime context_scope filter and record_fit_outcome feedback handle misfires.
+                _existing = self._nodes.get(str(nethra_id))
+                if (
+                    _existing is not None
+                    and proposed_context_scope
+                    and _existing.contexts
+                    and _existing.contexts[0] != proposed_context_scope
+                ):
+                    _existing.contexts = []
             elif disp == Disposition.CONTRADICTION:
                 if result.explained_by and result.explained_by in self._nodes:
                     node = self._nodes[result.explained_by]
@@ -590,7 +602,11 @@ class NethraMindStore:
             is_sleep_product=True,
         )
 
-        for member_id in member_nethras:
+        # Cap member edges to prevent edge saturation.  Full member_nethras
+        # lists (13+ items per product) blow the 2000-edge cap and force
+        # aggressive pruning that discards useful structural associations.
+        _MEMBER_EDGE_LIMIT = 5
+        for member_id in member_nethras[:_MEMBER_EDGE_LIMIT]:
             if member_id and member_id != nethra_id:
                 self.upsert_edge(
                     src=nethra_id,
@@ -601,7 +617,86 @@ class NethraMindStore:
                     evidence_ref=nethra_id,
                 )
 
+        # Structural abstraction: derive an anonymous structural node from the
+        # normalized (variable-agnostic) form of this product.  When two products
+        # share the same function types under the same hook, they fold into the
+        # same structural node → structural_folds increments, proving the mind
+        # is learning abstract patterns, not just caching specific instances.
+        _snorm_atoms, _sfunc_pats, _shook = _normalize_sleep_for_structure(
+            touched_atoms, member_nethras, proposed_context_scope
+        )
+        self._ingest_sleep_structure_derivative(
+            norm_atoms=_snorm_atoms,
+            func_patterns=_sfunc_pats,
+            hook=_shook,
+            use_right=proposed_use_right,
+            specific_node_id=nethra_id,
+            line_no=line_no,
+            generation=generation,
+        )
+
         return nethra_id
+
+    def _ingest_sleep_structure_derivative(
+        self,
+        *,
+        norm_atoms: list[str],
+        func_patterns: list[str],
+        hook: str,
+        use_right: str,
+        specific_node_id: str,
+        line_no: int,
+        generation: int,
+    ) -> None:
+        """Fold this product's abstract structure into the structural layer.
+
+        The structural node has normalized atoms (xT, xS0, ...) and function-type
+        labels as member_nethras.  Products with identical structure — same hook,
+        same atom shape, same function types — share one structural node.  The
+        second ingestion increments structural_folds; subsequent ones add evidence.
+        """
+        if not norm_atoms and not func_patterns:
+            return
+        struct_id = _structural_id(
+            "sleep_structural",
+            norm_atoms,
+            [],
+            func_patterns,
+            hook,
+            use_right,
+        )
+        if struct_id in self._nodes:
+            self._structural_folds += 1
+            self._nodes[struct_id].evidence_count += 1
+        else:
+            self.upsert_node(
+                struct_id,
+                kind="sleep_structural",
+                touched_atoms=norm_atoms,
+                touched_structure_refs=[],
+                member_nethras=func_patterns,
+                contexts=[hook],
+                use_right=use_right,
+                source="sleep",
+                evidence_ref=struct_id,
+                cycle_start=0,
+                cycle_end=0,
+                line_no=line_no,
+                generation=generation,
+                salience=0.5,
+                invalidators=[],
+                is_sleep_product=False,
+            )
+        # Edge from specific node to its abstract structural form
+        if specific_node_id and specific_node_id != struct_id:
+            self.upsert_edge(
+                src=specific_node_id,
+                dst=struct_id,
+                relation="abstracted_as",
+                context=hook,
+                cycle=0,
+                evidence_ref=specific_node_id,
+            )
 
     def upsert_node(
         self,
@@ -1070,6 +1165,56 @@ def effective_use_right(use_rights_seen: list[str]) -> str:
         if _USE_RIGHT_RANK.get(right, -1) > _USE_RIGHT_RANK.get(best, -1):
             best = right
     return best
+
+
+def _normalize_sleep_for_structure(
+    touched_atoms: list[str],
+    member_nethras: list[str],
+    context_scope: str,
+) -> tuple[list[str], list[str], str]:
+    """Normalize a sleep product into a variable-agnostic structural signature.
+
+    Returns (norm_atoms, func_patterns, hook):
+    - norm_atoms  : abstract atom labels — xT (target), xS0/xS1/... (sources)
+    - func_patterns: function types extracted from var_fit member_nethras,
+                     e.g. ["FIRST/1", "MEAN/2"]
+    - hook        : the hook prefix from context_scope, e.g. "source_edge_candidates"
+
+    Two sleep products are structurally equivalent when they share the same hook,
+    norm_atoms shape, and func_patterns — regardless of which specific variables
+    fill those roles.  This drives structural_folds in the compactor.
+    """
+    ctx_parts = context_scope.split("|")
+    hook = ctx_parts[0] if ctx_parts else context_scope
+
+    # Extract target from "source_edge_candidates|x18|vis=24" → "x18"
+    target_atom = ""
+    if len(ctx_parts) >= 2 and ctx_parts[1].startswith("x") and ctx_parts[1][1:].isdigit():
+        target_atom = ctx_parts[1]
+
+    source_atoms = sorted(
+        a for a in touched_atoms
+        if a.startswith("x") and a[1:].isdigit() and a != target_atom
+    )
+    norm_atoms = (["xT"] if target_atom else []) + [f"xS{i}" for i in range(len(source_atoms))]
+
+    # "var_fit:x18:FIRST(21)" → "FIRST/1"; skip non-var_fit entries
+    func_patterns: list[str] = []
+    for m in member_nethras:
+        if not m.startswith("var_fit:"):
+            continue
+        parts = m.split(":")
+        if len(parts) < 3:
+            continue
+        func_spec = parts[2]
+        func_name = func_spec.split("(")[0]
+        args_str = func_spec[len(func_name) + 1:].rstrip(")") if "(" in func_spec else ""
+        n_args = len([a for a in args_str.split(",") if a.strip()]) if args_str.strip() else 0
+        pat = f"{func_name}/{n_args}"
+        if pat not in func_patterns:
+            func_patterns.append(pat)
+
+    return norm_atoms, sorted(func_patterns), hook
 
 
 def _structural_id(

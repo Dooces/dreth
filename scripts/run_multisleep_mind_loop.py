@@ -200,11 +200,15 @@ def build_run_sleep_delta(
     # Append sleep products and promoted proposals to delta.
     # Run memory records were already written to delta by NethraMemoryStore during
     # the batch run (via --nethra-delta-path). We only add the derived sleep outputs.
+    # Only behavioral use_rights go into the delta: feature_only products don't affect
+    # runtime but inflate the mind, saturate the node cap, and cause aggressive pruning.
+    _DELTA_USE_RIGHTS = frozenset({"ranking_hint", "probe_hint"})
     delta_path.parent.mkdir(parents=True, exist_ok=True)
     with delta_path.open("a", encoding="utf-8") as fh:
         for p in products:
             d = p.to_dict() if hasattr(p, "to_dict") else vars(p)
-            fh.write(json.dumps(d, sort_keys=True) + "\n")
+            if d.get("proposed_use_right") in _DELTA_USE_RIGHTS:
+                fh.write(json.dumps(d, sort_keys=True) + "\n")
         for d in delta_proposals:
             fh.write(json.dumps(d, sort_keys=True) + "\n")
 

@@ -407,19 +407,39 @@ class PersistentNethraIndex:
             return
         fitted = {int(se) for se in source_edges if _intlike(se)}
         confirmed = promoted & fitted
-        if not confirmed:
-            return
-        self._record_event(
-            cycle=cycle,
-            context_key=hint["context_key"],
-            active_atoms=[f"x{se}" for se in sorted(confirmed)],
-            active_nethras=hint["active_nethras"],
-            hook="source_edge_candidates",
-            use_right="ranking_hint",
-            behavior_effect=1,
-            success=True,
-            evidence_refs=hint["evidence_refs"],
-        )
+        if confirmed:
+            # At least one promoted candidate was installed: confirmed hint.
+            # candidate_reduction_delta = +1: the hint correctly identified a
+            # source_edge, reducing the effective search space.
+            self._record_event(
+                cycle=cycle,
+                context_key=hint["context_key"],
+                active_atoms=[f"x{se}" for se in sorted(confirmed)],
+                active_nethras=hint["active_nethras"],
+                hook="source_edge_candidates",
+                use_right="ranking_hint",
+                behavior_effect=1,
+                candidate_reduction_delta=1,
+                success=True,
+                evidence_refs=hint["evidence_refs"],
+            )
+        else:
+            # Promoted candidates were not among the fitted source_edges: bad hint.
+            # candidate_reduction_delta = -1: the hint wasted a top-m slot on a
+            # wrong candidate.  Emit a failure event so sleep can demote this pair.
+            self._record_event(
+                cycle=cycle,
+                context_key=hint["context_key"],
+                active_atoms=[f"x{p}" for p in sorted(promoted)],
+                active_nethras=hint["active_nethras"],
+                hook="source_edge_candidates",
+                use_right="ranking_hint",
+                behavior_effect=1,
+                candidate_reduction_delta=-1,
+                success=False,
+                failure_reason="promoted_candidate_not_fitted",
+                evidence_refs=hint["evidence_refs"],
+            )
 
     def _record_event(self, **kwargs: Any) -> None:
         if self.mode == "off":

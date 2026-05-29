@@ -90,10 +90,13 @@ def test_repeated_sleep_products_fold_into_one_node():
     n = 7
     for i in range(n):
         store.ingest_sleep_product(_sleep_product("sp1"), line_no=i + 1, generation=0)
-    assert len(store._nodes) == 1
+    # One specific node + one structural-abstraction node (normalized, anonymous).
+    assert len(store._nodes) == 2
     node = store._nodes["sp1"]
     assert node.sleep_product_count == n
     assert node.evidence_count == n
+    # The structural node absorbs n-1 folds (first ingestion creates it, rest fold in).
+    assert store._structural_folds == n - 1
 
 
 def test_temporal_provenance_preserves_first_last_cycle_and_sample_lines():
@@ -305,7 +308,7 @@ def test_compacted_file_much_smaller_than_raw_repeated_jsonl():
         compact_size = out.stat().st_size
 
     assert compact_size < raw_size
-    assert len(store._nodes) == 1
+    assert len(store._nodes) == 2  # specific node + structural-abstraction node
     node = store._nodes["sp_dup"]
     assert node.sleep_product_count == n
 
@@ -322,12 +325,12 @@ def test_write_compact_and_load_roundtrip():
     with tempfile.TemporaryDirectory() as td:
         out = Path(td) / "mind.jsonl"
         summary = store.write_compact(out)
-        assert summary["canonical_nodes"] == 2
+        assert summary["canonical_nodes"] == 3  # record + sleep product + structural node
         assert summary["canonical_edges"] >= 2
 
         store2 = NethraMindStore()
         loaded = store2.load(out)
-        assert loaded >= 2
+        assert loaded >= 3
         assert "nid_a" in store2._nodes
         assert "sp_b" in store2._nodes
 
@@ -377,9 +380,10 @@ def test_structural_id_stable_across_repeated_ingestion():
     prod2 = dict(prod1)
     store.ingest_sleep_product(prod1, line_no=1, generation=0)
     store.ingest_sleep_product(prod2, line_no=2, generation=0)
-    assert len(store._nodes) == 1
-    node = list(store._nodes.values())[0]
-    assert node.sleep_product_count == 2
+    # Specific node + structural-abstraction node (even for anonymous/structural_id products)
+    assert len(store._nodes) == 2
+    specific = next(n for n in store._nodes.values() if n.kind == "sleep_product")
+    assert specific.sleep_product_count == 2
 
 
 def test_experience_events_update_existing_nodes_only():
@@ -456,10 +460,12 @@ def test_same_sleep_product_1000_times_single_node():
     store = NethraMindStore()
     for i in range(1000):
         store.ingest_sleep_product(_sleep_product("sp_rep"), line_no=i + 1, generation=0)
-    assert len(store._nodes) == 1
+    # Specific node + one structural-abstraction node shared by all 1000 ingestions
+    assert len(store._nodes) == 2
     node = store._nodes["sp_rep"]
     assert node.sleep_product_count == 1000
     assert node.evidence_count == 1000
+    assert store._structural_folds == 999  # 1 creates structural node, 999 fold into it
 
 
 def test_compacting_previous_mind_plus_no_delta_no_growth():
@@ -535,9 +541,10 @@ def test_proposal_id_record_id_cycle_differ_no_new_node():
         row = dict(base)
         row["some_extra_cycle"] = i  # doesn't affect structural identity
         store.ingest_sleep_product(row, line_no=i + 1, generation=i)
-    assert len(store._nodes) == 1
+    assert len(store._nodes) == 2  # specific node + structural-abstraction node
     assert store._nodes["sp_stable"].sleep_product_count == 5
-    assert store._exact_folds == 4  # first creates, 4 subsequent fold
+    assert store._exact_folds == 4   # first creates specific node, 4 subsequent fold
+    assert store._structural_folds == 4  # first creates structural node, 4 fold into it
 
 
 def test_max_node_cap_prunes_low_salience_nodes():
@@ -603,7 +610,7 @@ def test_active_mind_100x_smaller_than_raw_duplicate_input():
     assert compact_bytes * 100 < raw_bytes, (
         f"compact({compact_bytes}B) should be 100x smaller than raw({raw_bytes}B)"
     )
-    assert len(store._nodes) == 1
+    assert len(store._nodes) == 2  # specific node + structural-abstraction node
     assert store._nodes["sp_dup"].sleep_product_count == n
 
 
