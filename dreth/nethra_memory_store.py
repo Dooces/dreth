@@ -186,6 +186,11 @@ class ExperienceEvent:
     success: bool = False
     failure_reason: str = ""
     evidence_refs: list[str] = field(default_factory=list)
+    active_routes: list[str] = field(default_factory=list)
+    saved_search_count: int = 0
+    wasted_search_count: int = 0
+    miss_count: int = 0
+    residual_bucket_key: str = ""
     hidden_truth_used: bool = False
 
     def __post_init__(self) -> None:
@@ -195,6 +200,11 @@ class ExperienceEvent:
         self.active_atoms = [str(a) for a in (self.active_atoms or [])]
         self.active_nethras = [str(n) for n in (self.active_nethras or [])]
         self.evidence_refs = [str(e) for e in (self.evidence_refs or [])]
+        self.active_routes = [str(r) for r in (self.active_routes or [])]
+        self.saved_search_count = int(self.saved_search_count or 0)
+        self.wasted_search_count = int(self.wasted_search_count or 0)
+        self.miss_count = int(self.miss_count or 0)
+        self.residual_bucket_key = str(self.residual_bucket_key or "")
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
@@ -228,6 +238,11 @@ class ExperienceEvent:
             success=bool(d.get("success", False)),
             failure_reason=str(d.get("failure_reason", "")),
             evidence_refs=[str(e) for e in (d.get("evidence_refs") or [])],
+            active_routes=[str(r) for r in (d.get("active_routes") or [])],
+            saved_search_count=int(d.get("saved_search_count", 0) or 0),
+            wasted_search_count=int(d.get("wasted_search_count", 0) or 0),
+            miss_count=int(d.get("miss_count", 0) or 0),
+            residual_bucket_key=str(d.get("residual_bucket_key", "")),
             hidden_truth_used=False,
         )
 

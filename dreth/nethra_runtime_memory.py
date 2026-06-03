@@ -15,6 +15,7 @@ from typing import Any, Iterable
 
 from .nethra_memory_store import ExperienceEvent, HIDDEN_TRUTH_LIKE_FIELDS, NethraMemoryRecord, USE_RIGHTS
 from dreth.learner.nethra_projection import ProjectionIndex
+from dreth.learner.nethra_route_index import NethraRouteIndex, SearchRoute
 
 
 _MAX_EXPERIENCE_EVENTS = 200
@@ -47,6 +48,15 @@ class RuntimeMemoryMetrics:
     block_events: int = 0
     lookups: int = 0
     matches: int = 0
+    routes_loaded: int = 0
+    route_matches: int = 0
+    route_behavior_effects: int = 0
+    route_saved_search_count: int = 0
+    route_wasted_search_count: int = 0
+    route_miss_count: int = 0
+    residual_bucket_charges: int = 0
+    projection_fallbacks: int = 0
+    atom_fallbacks: int = 0
     use_right_counts: Counter[str] = field(default_factory=Counter)
     examples: list[dict[str, Any]] = field(default_factory=list)
 
@@ -65,6 +75,15 @@ class RuntimeMemoryMetrics:
             "nethra_memory_block_events": self.block_events,
             "nethra_memory_lookups": self.lookups,
             "nethra_memory_matches": self.matches,
+            "nethra_memory_routes_loaded": self.routes_loaded,
+            "nethra_memory_route_matches": self.route_matches,
+            "nethra_memory_route_behavior_effects": self.route_behavior_effects,
+            "nethra_memory_route_saved_search_count": self.route_saved_search_count,
+            "nethra_memory_route_wasted_search_count": self.route_wasted_search_count,
+            "nethra_memory_route_miss_count": self.route_miss_count,
+            "nethra_memory_residual_bucket_charges": self.residual_bucket_charges,
+            "nethra_memory_projection_fallbacks": self.projection_fallbacks,
+            "nethra_memory_atom_fallbacks": self.atom_fallbacks,
             "nethra_memory_use_right_counts": dict(self.use_right_counts),
             "nethra_memory_examples": list(self.examples),
         }
@@ -80,7 +99,9 @@ class PersistentNethraIndex:
         self.records: list[NethraMemoryRecord] = []
         self._by_atom: dict[str, list[NethraMemoryRecord]] = defaultdict(list)
         self._by_id: dict[str, NethraMemoryRecord] = {}
+        self._by_nethra_id: dict[str, NethraMemoryRecord] = {}
         self._projection: ProjectionIndex = ProjectionIndex()
+        self._routes: NethraRouteIndex = NethraRouteIndex()
         self.metrics = RuntimeMemoryMetrics()
         self.events: deque[ExperienceEvent] = deque(maxlen=_MAX_EXPERIENCE_EVENTS)
         # Pending hint per target: set when rank_candidates fires a reorder, cleared
@@ -102,6 +123,11 @@ class PersistentNethraIndex:
                 except json.JSONDecodeError:
                     continue
                 if not isinstance(row, dict) or _has_hidden_truth(row):
+                    continue
+                if str(row.get("entry_kind", "")) == "nethra_search_route":
+                    if self._routes.index_row(row):
+                        loaded += 1
+                        self.metrics.routes_loaded = self._routes.size()
                     continue
                 record = self._record_from_row(row)
                 if record is None:
@@ -142,7 +168,13 @@ class PersistentNethraIndex:
         if self.mode == "off":
             return candidates
         active_atoms = [f"x{int(var)}", *(f"x{int(c)}" for c in original if _intlike(c))]
-        scored_handles = self.query(active_atoms, context_key, cycle=cycle)
+        scored_handles = self._runtime_lookup(
+            target_anchor=f"x{int(var)}",
+            context_key=context_key,
+            hook=hook,
+            active_atoms=active_atoms,
+            cycle=cycle,
+        )
         usable = [
             (record, explanation)
             for record, explanation in scored_handles
@@ -157,15 +189,13 @@ class PersistentNethraIndex:
             # produce a preferred set covering all vars → no reordering.
             ranking_handles = [
                 r for r, _ in usable
-                if r.use_right == "ranking_hint"
+                if r.use_right in {"ranking_hint", "soft_filter"}
                 and (not r.context_scope or r.context_scope == context_key)
             ]
             if ranking_handles:
                 preferred: set[int] = set()
                 for r in ranking_handles:
-                    for atom in r.touched_atoms:
-                        if atom.startswith("x") and atom[1:].isdigit():
-                            preferred.add(int(atom[1:]))
+                    preferred.update(_preferred_candidate_ints(r, var=int(var)))
                 # Remove the target var itself from preferred (it's not a candidate)
                 preferred.discard(int(var))
                 reordered = sorted(
@@ -176,6 +206,9 @@ class PersistentNethraIndex:
                     behavior_effect = 1
                     self.metrics.behavior_effects += 1
                     self.metrics.candidate_reorders += 1
+                    if any(_is_route_record(r) for r in ranking_handles):
+                        self.metrics.route_behavior_effects += 1
+                        self.metrics.route_saved_search_count += 1
                     if any(r.source == "sleep" for r in ranking_handles):
                         self.metrics.sleep_products_used += 1
                     # Save pending hint so record_fit_outcome can close the feedback loop:
@@ -185,6 +218,7 @@ class PersistentNethraIndex:
                         "cycle": cycle,
                         "context_key": context_key,
                         "active_nethras": [r.nethra_id for r, _ in usable],
+                        "active_routes": _record_route_ids([r for r, _ in usable]),
                         "evidence_refs": [r.record_id for r, _ in usable],
                         "promoted": frozenset(preferred),
                     }
@@ -200,6 +234,8 @@ class PersistentNethraIndex:
             candidates_after=reordered,
             behavior_effect=behavior_effect,
             evidence_refs=[r.record_id for r, _ in usable],
+            active_routes=_record_route_ids([r for r, _ in usable]),
+            saved_search_count=1 if behavior_effect and any(_is_route_record(r) for r, _ in usable) else 0,
         )
         if behavior_effect:
             return type(candidates)(reordered) if isinstance(candidates, (list, tuple, set)) else reordered
@@ -217,7 +253,13 @@ class PersistentNethraIndex:
         if self.mode == "off":
             return original
         active_atoms = [f"x{int(var)}", *(f"x{int(p[0])}" for p in original)]
-        scored_all = self.query(active_atoms, context_key, cycle=cycle)
+        scored_all = self._runtime_lookup(
+            target_anchor=f"x{int(var)}",
+            context_key=context_key,
+            hook="probe_hint",
+            active_atoms=active_atoms,
+            cycle=cycle,
+        )
         usable = [
             (record, explanation)
             for record, explanation in scored_all
@@ -229,15 +271,13 @@ class PersistentNethraIndex:
         if self.mode == "assist":
             probe_handles = [
                 r for r, _ in usable
-                if r.use_right == "probe_hint"
+                if r.use_right in {"probe_hint", "soft_filter"}
                 and (not r.context_scope or r.context_scope == context_key)
             ]
             if probe_handles:
                 preferred: set[int] = set()
                 for r in probe_handles:
-                    for atom in r.touched_atoms:
-                        if atom.startswith("x") and atom[1:].isdigit():
-                            preferred.add(int(atom[1:]))
+                    preferred.update(_preferred_probe_ints(r, var=int(var)))
                 reordered = tuple(sorted(
                     original,
                     key=lambda p: (0 if p[0] in preferred else 1),
@@ -246,6 +286,9 @@ class PersistentNethraIndex:
                     behavior_effect = 1
                     self.metrics.behavior_effects += 1
                     self.metrics.probe_reorders += 1
+                    if any(_is_route_record(r) for r in probe_handles):
+                        self.metrics.route_behavior_effects += 1
+                        self.metrics.route_saved_search_count += 1
                     if any(r.source == "sleep" for r in probe_handles):
                         self.metrics.sleep_products_used += 1
 
@@ -259,6 +302,8 @@ class PersistentNethraIndex:
             probes_before=list(original),
             probes_after=list(reordered),
             evidence_refs=[r.record_id for r, _ in usable],
+            active_routes=_record_route_ids([r for r, _ in usable]),
+            saved_search_count=1 if behavior_effect and any(_is_route_record(r) for r, _ in usable) else 0,
         )
         return reordered
 
@@ -279,6 +324,8 @@ class PersistentNethraIndex:
             self._by_atom[str(atom)].append(record)
         if record.record_id:
             self._by_id[record.record_id] = record
+        if record.nethra_id:
+            self._by_nethra_id[record.nethra_id] = record
         # Index mind nodes into the projection for fast context/hook filtering
         if isinstance(record.payload, dict) and str(record.payload.get("entry_kind", "")) == "nethra_mind_node":
             self._projection.index_node_from_row(record.payload)
@@ -394,6 +441,56 @@ class PersistentNethraIndex:
             )
         return None
 
+    def _runtime_lookup(
+        self,
+        *,
+        target_anchor: str,
+        context_key: str,
+        hook: str,
+        active_atoms: Iterable[str],
+        cycle: int,
+    ) -> list[tuple[NethraMemoryRecord, SalienceExplanation]]:
+        self.metrics.lookups += 1
+        routes = self._routes.query(target_anchor, context_key, hook)
+        if routes:
+            self.metrics.route_matches += len(routes)
+            out = [
+                (_record_from_route(route), SalienceExplanation(score=0.0, components={"route": 1.0}))
+                for route in routes
+            ]
+            self.metrics.matches += len(out)
+            return out
+
+        projection_entries = self._projection.query(target_anchor, context_key, hook)
+        if projection_entries:
+            self.metrics.projection_fallbacks += 1
+            out: list[tuple[NethraMemoryRecord, SalienceExplanation]] = []
+            for entry in projection_entries:
+                record = self._by_nethra_id.get(entry.nethra_id) or self._by_id.get(entry.nethra_id)
+                if record is None:
+                    record = _record_from_projection_entry(entry, target_anchor, hook, context_key)
+                out.append((record, SalienceExplanation(score=entry.salience, components={"projection": 1.0})))
+            self.metrics.matches += len(out)
+            return out
+
+        self.metrics.atom_fallbacks += 1
+        # query() records its own lookup/match counters; this lookup already
+        # counted the decision point, so call the internal atom scan directly.
+        out = self._atom_query(active_atoms)
+        self.metrics.matches += len(out)
+        return out
+
+    def _atom_query(self, active_atoms: Iterable[str]) -> list[tuple[NethraMemoryRecord, SalienceExplanation]]:
+        atoms = {str(a) for a in active_atoms}
+        seen: set[str] = set()
+        out: list[tuple[NethraMemoryRecord, SalienceExplanation]] = []
+        for atom in atoms:
+            for record in self._by_atom.get(atom, ()):
+                if record.record_id not in seen and record.use_right != "block":
+                    seen.add(record.record_id)
+                    out.append((record, SalienceExplanation(score=0.0, components={})))
+        return out
+
     def record_fit_outcome(self, var: int, source_edges: tuple, cycle: int) -> None:
         """Close the feedback loop: if a memory-promoted candidate was installed as the
         fitted source_edge, emit a success experience event.  Sleep consolidation reads
@@ -416,13 +513,17 @@ class PersistentNethraIndex:
                 context_key=hint["context_key"],
                 active_atoms=[f"x{se}" for se in sorted(confirmed)],
                 active_nethras=hint["active_nethras"],
+                active_routes=hint.get("active_routes", []),
                 hook="source_edge_candidates",
                 use_right="ranking_hint",
                 behavior_effect=1,
                 candidate_reduction_delta=1,
+                saved_search_count=1,
                 success=True,
                 evidence_refs=hint["evidence_refs"],
             )
+            if hint.get("active_routes"):
+                self.metrics.route_saved_search_count += 1
         else:
             # Promoted candidates were not among the fitted source_edges: bad hint.
             # candidate_reduction_delta = -1: the hint wasted a top-m slot on a
@@ -432,14 +533,18 @@ class PersistentNethraIndex:
                 context_key=hint["context_key"],
                 active_atoms=[f"x{p}" for p in sorted(promoted)],
                 active_nethras=hint["active_nethras"],
+                active_routes=hint.get("active_routes", []),
                 hook="source_edge_candidates",
                 use_right="ranking_hint",
                 behavior_effect=1,
                 candidate_reduction_delta=-1,
+                wasted_search_count=1,
                 success=False,
                 failure_reason="promoted_candidate_not_fitted",
                 evidence_refs=hint["evidence_refs"],
             )
+            if hint.get("active_routes"):
+                self.metrics.route_wasted_search_count += 1
 
     def _record_event(self, **kwargs: Any) -> None:
         if self.mode == "off":
@@ -465,6 +570,11 @@ class PersistentNethraIndex:
             success=bool(kwargs.get("success", False)),
             failure_reason=str(kwargs.get("failure_reason", "")),
             evidence_refs=list(kwargs.get("evidence_refs") or []),
+            active_routes=list(kwargs.get("active_routes") or []),
+            saved_search_count=int(kwargs.get("saved_search_count", 0) or 0),
+            wasted_search_count=int(kwargs.get("wasted_search_count", 0) or 0),
+            miss_count=int(kwargs.get("miss_count", 0) or 0),
+            residual_bucket_key=str(kwargs.get("residual_bucket_key", "")),
             hidden_truth_used=False,
         )
         self.events.append(event)
@@ -493,6 +603,126 @@ def _dominant_use_right(items: list[tuple[NethraMemoryRecord, SalienceExplanatio
         if any(record.use_right == right for record, _ in items):
             return right
     return "record_only"
+
+
+def _record_from_route(route: SearchRoute) -> NethraMemoryRecord:
+    context_scope = _route_context_scope(route)
+    atoms = list(route.candidate_region or route.probe_region or route.trigger_anchors)
+    if route.target_anchor and route.target_anchor not in atoms:
+        atoms = [route.target_anchor, *atoms]
+    return NethraMemoryRecord(
+        record_id=route.route_id,
+        record_type="nethra_handle",
+        run_id="route",
+        seed=0,
+        schedule="",
+        n_vars=0,
+        cycle_start=route.first_seen,
+        cycle_end=route.last_seen,
+        nethra_id=route.nethra_id or route.route_id,
+        touched_atoms=atoms,
+        touched_structure_refs=[],
+        member_nethras=[],
+        context_scope=context_scope,
+        evidence_refs=list(route.evidence_refs),
+        use_right=route.use_right,
+        salience=route.salience,
+        source=route.source or "route",
+        created_cycle=route.first_seen,
+        last_used_cycle=route.last_seen,
+        success_count=route.success_count,
+        failure_count=route.failure_count,
+        invalidators=list(route.invalidators),
+        payload=route.to_dict(),
+    )
+
+
+def _record_from_projection_entry(entry: Any, target_anchor: str, hook: str, context_key: str) -> NethraMemoryRecord:
+    return NethraMemoryRecord(
+        record_id=str(entry.nethra_id),
+        record_type="nethra_handle",
+        run_id="projection",
+        seed=0,
+        schedule="",
+        n_vars=0,
+        cycle_start=0,
+        cycle_end=0,
+        nethra_id=str(entry.nethra_id),
+        touched_atoms=list(entry.atoms),
+        touched_structure_refs=[],
+        member_nethras=[],
+        context_scope=context_key if getattr(entry, "ctx_prefix", "") == context_key else "",
+        evidence_refs=[str(entry.nethra_id)],
+        use_right=_projection_use_right(entry, hook),
+        salience=float(getattr(entry, "salience", 0.0) or 0.0),
+        source="projection",
+        success_count=int(getattr(entry, "success_count", 0) or 0),
+        failure_count=int(getattr(entry, "failure_count", 0) or 0),
+        payload={
+            "entry_kind": "projection_route",
+            "nethra_id": str(entry.nethra_id),
+            "target_anchor": target_anchor,
+            "operation_hook": hook,
+            "atoms": list(entry.atoms),
+        },
+    )
+
+
+def _projection_use_right(entry: Any, hook: str) -> str:
+    use_rights = set(getattr(entry, "use_rights", set()) or set())
+    for right in ("soft_filter", "ranking_hint", "probe_hint", "feature_only", "record_only"):
+        if right in use_rights:
+            if hook == "probe_hint" and right == "ranking_hint":
+                continue
+            return right
+    return "record_only"
+
+
+def _preferred_candidate_ints(record: NethraMemoryRecord, *, var: int) -> set[int]:
+    payload = record.payload if isinstance(record.payload, dict) else {}
+    route_region = payload.get("candidate_region") if payload.get("entry_kind") == "nethra_search_route" else None
+    atoms = route_region or record.touched_atoms
+    out = {_atom_to_int(atom) for atom in atoms}
+    return {v for v in out if v is not None and v != var}
+
+
+def _preferred_probe_ints(record: NethraMemoryRecord, *, var: int) -> set[int]:
+    payload = record.payload if isinstance(record.payload, dict) else {}
+    route_region = payload.get("probe_region") if payload.get("entry_kind") == "nethra_search_route" else None
+    atoms = route_region or record.touched_atoms
+    out = {_atom_to_int(atom) for atom in atoms}
+    return {v for v in out if v is not None and v != var}
+
+
+def _record_route_ids(records: list[NethraMemoryRecord]) -> list[str]:
+    ids: list[str] = []
+    for record in records:
+        payload = record.payload if isinstance(record.payload, dict) else {}
+        if payload.get("entry_kind") == "nethra_search_route":
+            route_id = str(payload.get("route_id", ""))
+            if route_id and route_id not in ids:
+                ids.append(route_id)
+    return ids
+
+
+def _is_route_record(record: NethraMemoryRecord) -> bool:
+    return isinstance(record.payload, dict) and record.payload.get("entry_kind") == "nethra_search_route"
+
+
+def _route_context_scope(route: SearchRoute) -> str:
+    for anchor in route.trigger_anchors:
+        if "|" in anchor:
+            return anchor
+    return ""
+
+
+def _atom_to_int(value: Any) -> int | None:
+    text = str(value)
+    if text.startswith("x") and text[1:].isdigit():
+        return int(text[1:])
+    if text.isdigit():
+        return int(text)
+    return None
 
 
 def _intlike(value: Any) -> bool:

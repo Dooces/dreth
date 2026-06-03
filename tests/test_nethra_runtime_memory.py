@@ -93,6 +93,102 @@ def test_assist_mode_reorders_using_ranking_hint():
     assert event["candidates_after"] == [2, 1]
 
 
+def test_assist_mode_uses_first_class_search_route_candidate_region(tmp_path):
+    route_path = tmp_path / "routes.jsonl"
+    route_path.write_text(json.dumps({
+        "entry_kind": "nethra_search_route",
+        "route_id": "route_x0_to_x2",
+        "nethra_id": "n_route",
+        "operation_hook": "source_edge_candidates",
+        "target_anchor": "x0",
+        "trigger_anchors": ["source_edge_candidates|x0|vis=3"],
+        "candidate_region": ["x2"],
+        "deferred_region": ["x1"],
+        "residual_bucket_key": "source_edge_candidates|x0|route_x0_to_x2",
+        "probe_region": [],
+        "invalidators": [],
+        "role_state": "tareth",
+        "use_right": "ranking_hint",
+        "saved_search_count": 3,
+        "wasted_search_count": 0,
+        "miss_count": 0,
+        "success_count": 2,
+        "failure_count": 0,
+        "first_seen": 1,
+        "last_seen": 9,
+        "salience": 1.0,
+        "evidence_refs": ["ev1"],
+        "source": "sleep",
+    }) + "\n")
+
+    index = PersistentNethraIndex(mode="assist", run_id="run-b", seed=2)
+    assert index.load_path(route_path) == 1
+
+    ranked = index.rank_candidates(
+        var=0,
+        context_key="source_edge_candidates|x0|vis=3",
+        candidates=(1, 2),
+        hook="source_edge_candidates",
+        cycle=10,
+    )
+
+    assert ranked == (2, 1)
+    metrics = index.runtime_metrics()
+    assert metrics["nethra_memory_routes_loaded"] == 1
+    assert metrics["nethra_memory_route_matches"] == 1
+    assert metrics["nethra_memory_route_behavior_effects"] == 1
+    event = index.export_experience_events()[-1]
+    assert event["active_routes"] == ["route_x0_to_x2"]
+    assert event["saved_search_count"] == 1
+
+
+def test_trass_search_route_does_not_narrow_primary_candidate_hook(tmp_path):
+    route_path = tmp_path / "routes.jsonl"
+    route_path.write_text(json.dumps({
+        "entry_kind": "nethra_search_route",
+        "route_id": "route_trass",
+        "nethra_id": "n_trass",
+        "operation_hook": "source_edge_candidates",
+        "target_anchor": "x0",
+        "trigger_anchors": ["source_edge_candidates|x0|vis=3"],
+        "candidate_region": ["x2"],
+        "role_state": "trass",
+        "use_right": "ranking_hint",
+    }) + "\n")
+
+    index = PersistentNethraIndex(mode="assist")
+    index.load_path(route_path)
+    ranked = index.rank_candidates(
+        var=0,
+        context_key="source_edge_candidates|x0|vis=3",
+        candidates=(1, 2),
+        hook="source_edge_candidates",
+        cycle=10,
+    )
+
+    assert ranked == (1, 2)
+    assert index.runtime_metrics()["nethra_memory_behavior_effects"] == 0
+    assert index.export_experience_events()[-1]["active_routes"] == []
+
+
+def test_empty_route_and_projection_indexes_fall_back_to_atom_records():
+    index = PersistentNethraIndex(mode="assist", run_id="run-b", seed=2)
+    index.add_records([_handle("h2", ["x2"], salience=2.0)])
+
+    ranked = index.rank_candidates(
+        var=0,
+        context_key="source_edge_candidates|x0|vis=3",
+        candidates=(1, 2),
+        hook="source_edge_candidates",
+        cycle=10,
+    )
+
+    assert ranked == (2, 1)
+    metrics = index.runtime_metrics()
+    assert metrics["nethra_memory_atom_fallbacks"] == 1
+    assert metrics["nethra_memory_projection_fallbacks"] == 0
+
+
 def test_sleep_hard_filter_is_rejected_on_load():
     with tempfile.TemporaryDirectory() as td:
         path = Path(td) / "sleep.jsonl"
