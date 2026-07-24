@@ -4,31 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dreth"
-version = "0.0.0"
-description = "Experimental framework for learned structure, context roles, and scoped authority under limited attention."
+version = "0.1.0"
+description = "Failure-shaped authority, lazy decomposition, and recursive nethra graphs."
 readme = "README.md"
 requires-python = ">=3.10"
-license = { file = "LICENSE" }
-keywords = [
-  "causal-inference",
-  "structure-learning",
-  "agent-systems",
-  "attention",
-  "diagnostics",
-]
-classifiers = [
-  "Development Status :: 2 - Pre-Alpha",
-  "Intended Audience :: Science/Research",
-  "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
-  "Programming Language :: Python :: 3",
-  "Programming Language :: Python :: 3.10",
-  "Programming Language :: Python :: 3.11",
-  "Programming Language :: Python :: 3.12",
-  "Topic :: Scientific/Engineering :: Artificial Intelligence",
-]
-dependencies = [
-  "numpy>=1.26",
-]
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
+dependencies = []
 
 [project.urls]
 Repository = "https://github.com/Dooces/dreth"
@@ -38,44 +20,11 @@ Issues = "https://github.com/Dooces/dreth/issues"
 dreth = "dreth.cli:run"
 
 [project.optional-dependencies]
-dev = [
-  "pytest>=8",
-  "ruff>=0.6",
-]
-typecheck = [
-  "mypy>=1.10",
-]
+dev = ["pytest>=8"]
 
 [tool.setuptools.packages.find]
 include = ["dreth*"]
-exclude = ["tests*", "reports*", "docs*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-python_files = ["test_*.py"]
-norecursedirs = [".git", ".git-data", ".pytest_cache", "reports", "docs"]
 addopts = ["-ra"]
-
-[tool.ruff]
-line-length = 100
-target-version = "py310"
-exclude = [
-  ".git",
-  ".git-data",
-  ".pytest_cache",
-  "reports",
-  "__pycache__",
-]
-
-[tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "SIM"]
-ignore = [
-  "E501",  # long diagnostic/report strings are common in this repo
-]
-
-[tool.mypy]
-python_version = "3.10"
-packages = ["dreth"]
-ignore_missing_imports = true
-warn_unused_configs = true
-check_untyped_defs = false
