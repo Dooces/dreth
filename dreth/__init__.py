@@ -1,15 +1,30 @@
-"""
-dreth — streaming causal structure learning with recursive authority records.
+from .engine import Dreth, default_consequence
+from .graph import NethraGraph
+from .model import (
+    Authority,
+    Consideration,
+    Context,
+    ContextPattern,
+    Factor,
+    Failure,
+    Nethra,
+    Outcome,
+    PredictionCommitment,
+    UseState,
+)
 
-Modules:
-  functions.py      — operator vocabulary (FUNC_LIBRARY, HIDDEN_FUNC_LIBRARY)
-  world.py          — hidden causal world and intervention oracle
-  ledger.py         — earned authority state: VarNethra, TiedFrontier, Compression,
-                      NoiseEnvelope, ChainedLedger
-  fit.py            — full audit: hypothesis enumeration and scoring
-  sentinels.py      — sentinel selection and cheap-path validation
-  records.py        — diagnostic-only: CycleRecord, FitDiagnostic
-  agent.py          — authority-record control loop: ChainedAgent
-  baseline.py       — naive refit-everything agent for cost comparison
-  cli.py            — CLI entrypoint and schedule runner
-"""
+__all__ = [
+    "Authority",
+    "Consideration",
+    "Context",
+    "ContextPattern",
+    "Dreth",
+    "Factor",
+    "Failure",
+    "Nethra",
+    "NethraGraph",
+    "Outcome",
+    "PredictionCommitment",
+    "UseState",
+    "default_consequence",
+]
