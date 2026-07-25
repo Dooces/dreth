@@ -1,74 +1,75 @@
 # Dreth
 
-Dreth is a failure-shaped control graph.
+Dreth is an experimental economy of consideration governed by prospective predictive
+authority.
 
-It keeps successful behavior closed and cheap. A consequential prediction failure opens the exact boundary that produced it, earns decomposition there, and leaves the same handle intact everywhere else.
+A nethra is a scoped operative handle over learned or supplied structure. It binds a
+provider, touched structure, an executable use claim, evidence, and repair topology. A
+nethra can earn contextual permission to remove actual work. Consequential failure blocks
+the exact local dispatch path and opens that same handle for repair. Higher nethras can own
+subordinate failure channels and suppress subordinate checks after earning coverage of
+those channels.
 
-## Core object
+## Implementation source of truth
 
-A **nethra** is an operative handle with four jobs:
+[The kernel specification](docs/KERNEL_SPEC.md) defines:
 
-1. commit a prediction before its outcome;
-2. earn context-relative authority when that prediction succeeds;
-3. reduce future work within the horizon it has already predicted successfully;
-4. identify the boundary to open when a consequential prediction fails.
+- the exact domain, provider, kernel, and evaluator ownership boundary;
+- immutable prospective commitments;
+- operation-, action-, target-, context-, revision-, and horizon-specific authority;
+- tareth/trass role derivation;
+- real work dispatch and accounting;
+- harmless mismatch behavior;
+- local consequential failure quarantine;
+- lazy factorization, relational attribution, and prospective repair promotion;
+- recurrent higher handles and channel-specific subordinate suppression;
+- module APIs, pseudocode, implementation order, and acceptance tests.
 
-Nethras reference other nethras recursively. Shared component nodes connect related handles and make nearby alternatives available for consideration.
+## Current branch status
 
-## Roles and state
+The current executable is a caller-driven ledger skeleton:
 
-Roles belong to a nethra in a context and operation:
+- callers supply `expected`, `role`, `implicated_ids`, and factorization callbacks;
+- `observe()` settles every due commitment in a context against one caller-supplied value;
+- `can_reuse()` returns a Boolean and changes no work plan;
+- failures create caller-directed boundaries and factors;
+- consolidation receives caller-selected boundary IDs.
 
-- **tareth**: preserving the distinction changes the predicted consequence;
-- **trass**: collapsing the distinction preserves the predicted consequence.
+Its tests establish consistency of those ledger rules. The next implementation pass replaces
+that causal boundary according to `docs/KERNEL_SPEC.md`.
 
-Every authority boundary has two operational states:
+## Research success
 
-- **usable**
-- **unusable**
+A valid Dreth experiment executes the specified mechanism exactly and reports complete
+evidence and cost. Zero work savings, missed failures, poor attribution, and negative utility
+remain valid experimental results.
 
-Trust remains graded and relative. A handle gains weight from successful prospective predictions, longer proven horizons, successful use across contexts, and reuse by higher nethras. Runtime permission still requires successful evidence in the current context.
+An effective Dreth run removes actual consideration while preserving consequential failure
+detection, local repair, and positive net utility.
 
-## Runtime
+## Historical mechanism receipt
+
+Conversation history records an accepted 12-run `regime_switch` experiment in which an
+earned higher sentinel suppressed lower sentinel work:
 
 ```text
-commit prediction at cycle t for horizon h
-→ expose it to the outcome at t+h
-→ success earns authority through h in that context
-→ authority permits reuse through h
-→ consequential failure blocks that local boundary
-→ failure creates child factors or a relational composite
-→ later recurrence may be consolidated explicitly
+n = 8, 12
+historical handle amortization = 13.8%
+regime sentinel pass = 9,186
+regime sentinel fail = 11,214
+no_sentinel = 0
+runs ok = 12/12
 ```
 
-Normal operation performs prediction commitment and outcome comparison. Decomposition, repair indexing, and graph growth happen when failure earns them.
+The new regression harness will recreate that same-object ablation and report its result.
+The pass condition is mechanism fidelity and complete accounting.
 
-Joint failures create composite nethras over the implicated handles. Individual handles retain their existing authority. Recursive nethras use the same object and the same evidence rules at every level.
-
-The nethra node persists through failure. Each failure blocks its context/horizon authority edge and adds the repair boundary beneath that node.
-
-## Success criterion
-
-Dreth succeeds when failure-shaped authority reduces future work while preserving detection, localizing repair to the responsible boundary, and costing less than the work it saves.
-
-The exhaustive failure classes are:
-
-1. **detection** — a consequential failure passes unseen;
-2. **attribution** — the failure opens the wrong boundary;
-3. **utility** — prediction checks and repair cost more than the work they remove.
-
-## Example
+## Current executable
 
 ```bash
 python -m dreth
-```
-
-The example earns three-cycle authority for a working engine handle, produces a local cold-start failure, lazily creates fuel/spark/air/compression/sensor children, and shows that the warm-context authority remains usable.
-
-## Tests
-
-```bash
 python -m pytest -q
 ```
 
-The tests exercise prospective authority, horizon gating, graph retrieval, local failure boundaries, lazy factorization, relational composites, recursive consolidation, and the two-state authority surface.
+The JSON demo describes the existing ledger skeleton. Implementation work begins with Pass 1
+in [TODO.md](TODO.md).
